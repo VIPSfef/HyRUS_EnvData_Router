@@ -3,6 +3,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "telemetry.h"
+#include "time_sync.h"
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -49,17 +50,25 @@ static void pause_ms(unsigned ms) {
 #endif
 #define QUEUE_CAP TB_QUEUE_CAP
 #define SEND_WINDOWS TB_SEND_WINDOWS
-#define BATCH_JSON_CAP (TB_CAPACITY * 400u + 2048u)
+/* Includes worst-width uint64, subnormal doubles, keys, units and error fields. */
+#define BATCH_JSON_CAP (TB_CAPACITY * 512u + TB_MAX_KEYS * 768u + 2048u)
 #define WIRE_CAP (SEND_WINDOWS * BATCH_JSON_CAP + 4096u)
 typedef struct {
     uint64_t rejected, sequence_gaps, queue_windows, queue_samples, raw_samples;
 } losses;
 typedef struct {
+    char key[TB_KEY_BYTES], unit[TB_UNIT_BYTES];
+    uint64_t last_t;
+    uint32_t last_seq;
+} metric_state;
+typedef struct {
     mutex_t mutex;
     tb_batch current, queue[QUEUE_CAP];
     unsigned head, count;
-    uint64_t last_t, last_rx_ms, sealed_window;
-    uint32_t last_seq;
+    uint64_t last_t, watermark_us, sealed_window;
+    metric_state metric[TB_MAX_KEYS];
+    unsigned metric_n;
+    tc_clock clock;
     int have_last, have_sealed, eof, failed, ready, summary;
     losses loss;
     const char *url, *stream, *session;
@@ -98,6 +107,15 @@ static int real_number(char **p, double *v, char sep) {
     *p = end;
     return separator(p, sep);
 }
+static int name_field(char **p, char *out, size_t cap) {
+    size_t n = 0;
+    while (**p && **p != ',' && !isspace((unsigned char)**p)) {
+        if (n + 1 >= cap) return 0;
+        out[n++] = *(*p)++;
+    }
+    out[n] = 0;
+    return n && separator(p, ',');
+}
 static int parse(char *p, tb_sample *s) {
     uint64_t u;
     double d;
@@ -108,17 +126,20 @@ static int parse(char *p, tb_sample *s) {
     s->seq = (uint32_t)u;
     if (!integer(&p, &u, ',') || u > UINT32_MAX) return 0;
     s->quality = (uint32_t)u;
+    if (!name_field(&p, s->key, sizeof(s->key)) ||
+        !name_field(&p, s->unit, sizeof(s->unit)) ||
+        !real_number(&p, &s->value, ',')) return 0;
     for (i = 0; i < 3; ++i) if (!real_number(&p, &s->p[i], ',')) return 0;
     for (i = 0; i < 3; ++i) {
         if (!real_number(&p, &d, ',') || (isfinite(d) && fabs(d) > 1e9)) return 0;
         s->v[i] = (float)d;
     }
-    for (i = 0; i < TB_CHANNELS; ++i) {
-        if (!real_number(&p, &d, ',') || (isfinite(d) && fabs(d) > 1e9)) return 0;
-        s->value[i] = (float)d;
-    }
-    if (!integer(&p, &u, '\0') || u > UINT32_MAX) return 0;
+    if (!integer(&p, &u, ',') || u > UINT32_MAX) return 0;
+    s->time_uncert_us = (uint32_t)u;
+    if (!integer(&p, &u, ',') || u > UINT32_MAX) return 0;
     s->nav_age_us = (uint32_t)u;
+    if (!real_number(&p, &d, '\0') || !isfinite(d) || d < 0 || d > 1e9) return 0;
+    s->pos_error_m = (float)d;
     return tb_sample_valid(s);
 }
 /* Caller holds mutex. Full queue drops NEW window, never overwrites in-flight data. */
@@ -135,26 +156,73 @@ static void seal(app *a) {
     a->have_sealed = 1;
     a->current.n = 0;
 }
-static void ingest(app *a, const tb_sample *s) {
+static void ingest(app *a, const tb_sample *input) {
+    tb_sample sample = *input;
+    tb_sample *s = &sample;
     uint64_t w = s->t_us / 1000000 * 1000000;
+    uint64_t utc;
+    uint32_t uncertainty;
+    unsigned k;
     lock(&a->mutex);
-    if (!tb_sample_valid(s) ||
-        (a->have_last && (s->t_us <= a->last_t || s->seq <= a->last_seq)) ||
+    for (k = 0; k < a->metric_n && strcmp(a->metric[k].key, s->key); ++k) {}
+    if (tc_estimate(&a->clock, s->t_us, &utc, &uncertainty)) {
+        s->utc_us = utc;
+        s->utc_uncert_us = uncertainty;
+    } else {
+        s->utc_us = 0;
+        s->utc_uncert_us = UINT32_MAX;
+    }
+    if (!tb_sample_valid(s) || s->t_us < a->watermark_us ||
+        (a->have_last && s->t_us < a->last_t) ||
+        (k == a->metric_n && k == TB_MAX_KEYS) ||
+        (k < a->metric_n && (strcmp(a->metric[k].unit, s->unit) ||
+         s->seq <= a->metric[k].last_seq || s->t_us <= a->metric[k].last_t)) ||
         (a->have_sealed && w <= a->sealed_window)) {
         ++a->loss.rejected;
     } else {
         if (a->current.n && a->current.window_us != w) seal(a);
         if (!a->current.n) tb_batch_init(&a->current, w);
         if (tb_batch_add(&a->current, s)) {
-            if (a->have_last) a->loss.sequence_gaps += (uint64_t)s->seq - a->last_seq - 1;
+            if (k < a->metric_n) a->loss.sequence_gaps += (uint64_t)s->seq - a->metric[k].last_seq - 1;
+            else {
+                (void)strcpy(a->metric[k].key, s->key);
+                (void)strcpy(a->metric[k].unit, s->unit);
+                ++a->metric_n;
+            }
+            a->metric[k].last_t = s->t_us;
+            a->metric[k].last_seq = s->seq;
             a->last_t = s->t_us;
-            a->last_seq = s->seq;
             a->have_last = 1;
-            a->last_rx_ms = now_ms();
             if (a->current.n > a->current.raw_n) ++a->loss.raw_samples;
         } else ++a->loss.rejected;
     }
     unlock(&a->mutex);
+}
+/* Explicit source watermark: future measurements must have t >= watermark. */
+static int control(app *a, char *p) {
+    uint64_t t, utc, u, rtt;
+    int ok = 0;
+    if (!strncmp(p, "@watermark,", 11)) {
+        p += 11;
+        if (!integer(&p, &t, '\0')) return 0;
+        lock(&a->mutex);
+        if (t >= a->watermark_us && (!a->have_last || t >= a->last_t)) {
+            a->watermark_us = t;
+            if (a->current.n && t >= a->current.window_us &&
+                t - a->current.window_us >= TB_WINDOW_US) seal(a);
+            ok = 1;
+        }
+        unlock(&a->mutex);
+    } else if (!strncmp(p, "@clock,", 7)) {
+        p += 7;
+        if (!integer(&p, &t, ',') || !integer(&p, &utc, ',') ||
+            !integer(&p, &u, ',') || u > UINT32_MAX ||
+            !integer(&p, &rtt, '\0') || rtt > UINT32_MAX) return 0;
+        lock(&a->mutex);
+        ok = tc_anchor(&a->clock, t, utc, (uint32_t)u, (uint32_t)rtt);
+        unlock(&a->mutex);
+    }
+    return ok;
 }
 
 #ifdef _WIN32
@@ -267,23 +335,39 @@ static void http_close(http *h) {
 }
 #endif
 
-static int encode(app *a, unsigned head, unsigned n, losses l) {
+static int encode(app *a, unsigned head, unsigned n, losses l, const tc_report *report) {
     unsigned i;
     int k;
     size_t used;
     k = snprintf(wire, sizeof(wire),
-        "{\"schema\":1,\"stream\":\"%s\",\"session\":\"%s\",\"frame\":\"ENU\","
-        "\"origin_wgs84\":[%.17g,%.17g,%.17g],\"time_basis\":\"unix_us\","
-        "\"field_order\":[\"t_us\",\"seq\",\"quality\",\"east_m\",\"north_m\",\"up_m\","
-        "\"ve_mps\",\"vn_mps\",\"vu_mps\",\"temp_C\",\"rh_pct\",\"pm25_ug_m3\",\"pm10_ug_m3\",\"nav_age_us\"],"
+        "{\"schema\":2,\"stream\":\"%s\",\"session\":\"%s\",\"frame\":\"ENU\","
+        "\"origin_wgs84\":[%.17g,%.17g,%.17g],\"time_basis\":\"pixhawk_boot_us\","
+        "\"time_epoch\":\"session_boot\",\"utc_basis\":\"unix_us_estimate\","
+        "\"field_order\":[\"t_us\",\"seq\",\"quality\",\"key\",\"unit\",\"east_m\",\"north_m\",\"up_m\","
+        "\"ve_mps\",\"vn_mps\",\"vu_mps\",\"value\",\"time_uncert_us\",\"nav_age_us\",\"pos_error_m\",\"utc_us\",\"utc_uncert_us\"],"
         "\"loss\":{\"rejected\":\"%" PRIu64 "\",\"sequence_gaps\":\"%" PRIu64 "\","
-        "\"queue_windows\":\"%" PRIu64 "\",\"queue_samples\":\"%" PRIu64 "\",\"raw_samples\":\"%" PRIu64 "\"},\"batches\":[",
+        "\"queue_windows\":\"%" PRIu64 "\",\"queue_samples\":\"%" PRIu64 "\",\"raw_samples\":\"%" PRIu64 "\"},\"clock_model\":",
         a->stream, a->session, a->origin[0], a->origin[1], a->origin[2],
         l.rejected, l.sequence_gaps, l.queue_windows, l.queue_samples, l.raw_samples);
     if (k < 0 || (size_t)k >= sizeof(wire)) return 0;
     used = (size_t)k;
+    if (report) {
+        k = snprintf(wire + used, sizeof(wire) - used,
+            "{\"anchors\":%u,\"oldest_boot_us\":\"%" PRIu64 "\",\"last_boot_us\":\"%" PRIu64 "\","
+            "\"last_utc_us\":\"%" PRIu64 "\",\"offset_us\":\"%" PRId64 "\","
+            "\"drift_ppm\":%.17g,\"residual_std_us\":%.17g,\"max_residual_us\":%.17g,"
+            "\"anchor_uncert_max_us\":%u,\"rtt_mean_us\":%.17g,\"rtt_max_us\":%u},\"batches\":[",
+            (unsigned)report->count, report->oldest_boot_us, report->last_boot_us,
+            report->last_utc_us, report->offset_us, report->drift_ppm,
+            report->residual_std_us, report->max_abs_residual_us,
+            (unsigned)report->anchor_uncert_max_us, report->roundtrip_mean_us,
+            (unsigned)report->roundtrip_max_us);
+    } else k = snprintf(wire + used, sizeof(wire) - used, "null,\"batches\":[");
+    if (k < 0 || (size_t)k >= sizeof(wire) - used) return 0;
+    used += (size_t)k;
     for (i = 0; i < n; ++i) {
         if (i) wire[used++] = ',';
+        tb_batch_prepare(&a->queue[(head + i) % QUEUE_CAP]);
         k = tb_batch_json_mode(&a->queue[(head + i) % QUEUE_CAP], wire + used,
                                sizeof(wire) - used, !a->summary);
         if (k < 0) return 0;
@@ -315,18 +399,20 @@ static void *sender(void *arg)
     for (;;) {
         uint64_t now = now_ms();
         unsigned n, head;
-        int eof, bytes, ok;
+        int eof, bytes, ok, have_clock;
         losses loss;
+        tc_report report;
         if (now < next) { pause_ms((unsigned)(next - now > 100 ? 100 : next - now)); continue; }
         lock(&a->mutex);
-        if (a->current.n && (a->eof || now - a->last_rx_ms >= 1000)) seal(a);
+        if (a->current.n && a->eof) seal(a);
         head = a->head;
         n = a->count < SEND_WINDOWS ? a->count : SEND_WINDOWS;
         eof = a->eof;
         loss = a->loss;
+        have_clock = tc_get_report(&a->clock, &report);
         unlock(&a->mutex);
         if (!n && eof) break;
-        bytes = n ? encode(a, head, n, loss) : 0;
+        bytes = n ? encode(a, head, n, loss, have_clock ? &report : NULL) : 0;
         if (n && !bytes) {
             fprintf(stderr, "JSON capacity exceeded\n");
             lock(&a->mutex); a->failed = 1; unlock(&a->mutex);
@@ -366,6 +452,7 @@ int main(int argc, char **argv) {
     pthread_t thread;
 #endif
     (void)setlocale(LC_NUMERIC, "C");
+    tc_init(&a->clock);
     if (argc == 2 && strcmp(argv[1], "--sizes") == 0) {
         printf("sample=%zu batch=%zu state=%zu wire=%zu static_total=%zu\n",
                sizeof(tb_sample), sizeof(tb_batch), sizeof(state), sizeof(wire), sizeof(state) + sizeof(wire));
@@ -408,7 +495,9 @@ int main(int argc, char **argv) {
         }
         while (isspace((unsigned char)*p)) ++p;
         if (!*p || *p == '#') continue;
-        if (!bad && parse(p, &sample)) ingest(a, &sample);
+        if (!bad && *p == '@') {
+            if (!control(a, p)) { lock(&a->mutex); ++a->loss.rejected; unlock(&a->mutex); }
+        } else if (!bad && parse(p, &sample)) ingest(a, &sample);
         else { lock(&a->mutex); ++a->loss.rejected; unlock(&a->mutex); }
         lock(&a->mutex); bad = a->failed; unlock(&a->mutex);
         if (bad) break;

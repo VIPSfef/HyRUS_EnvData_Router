@@ -27,7 +27,7 @@ jobs:
             artifact: telemetry-linux-amd64
           - name: Windows AMD64
             os: windows-2025
-            cc: clang
+            cc: clang-cl
             suffix: .exe
             package: ZIP
             artifact: telemetry-windows-amd64
@@ -72,6 +72,8 @@ jobs:
         run: python test_core.py --skip-build --executable build/test_telemetry${{ matrix.suffix }}
       - name: Loopback HTTP integration tests
         run: python test_sender.py build/telemetry_send${{ matrix.suffix }}
+      - name: Maximum JSON capacity
+        run: python test_sender_limits.py build/telemetry_send${{ matrix.suffix }}
       - name: Package
         run: cpack --config build/CPackConfig.cmake -G ${{ matrix.package }} -B dist
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

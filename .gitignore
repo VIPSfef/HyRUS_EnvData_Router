@@ -2,6 +2,7 @@
 /build*/
 /dist/
 /install/
+/stage/
 /_CPack_Packages/
 __pycache__/
 *.pyc

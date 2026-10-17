@@ -17,13 +17,14 @@ import sys
 
 ROOT = Path(__file__).resolve().parent
 EPOCH = 1_800_000_000_000_000
-CAPACITY = 128
+CAPACITY = 512
 
 
 def run(argv: list[str]) -> str:
-    result = subprocess.run(argv, cwd=ROOT, check=True, capture_output=True, text=True)
+    result = subprocess.run(argv, cwd=ROOT, check=False, capture_output=True, text=True)
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="")
+    result.check_returncode()
     return result.stdout
 
 
@@ -36,14 +37,8 @@ def expect_numeric(got: object, expected: float, label: str) -> None:
     assert math.isclose(got, expected, rel_tol=2e-13, abs_tol=1e-11), (label, got, expected)
 
 
-def channel_values(n: int, channel: int) -> list[float]:
-    if channel == 0:
-        return [float(i % 100) for i in range(n)]
-    if channel == 1:
-        return [float(40 + i % 20) for i in range(n) if i != 1]
-    if channel == 2:
-        return [2.5 + (i % 7) * 0.25 for i in range(n) if i != 2]
-    return []
+def observed_values(n: int) -> list[float]:
+    return [123.12345678901235 + (i % 100) * 0.125 for i in range(n) if i != 1]
 
 
 def check_fixture(executable: Path, mode: str) -> int:
@@ -57,34 +52,44 @@ def check_fixture(executable: Path, mode: str) -> int:
     assert result["raw_dropped"] == max(0, n - CAPACITY)
     assert result["raw_included"] == (mode != "summary")
     assert len(result["raw"]) == (0 if mode == "summary" else min(n, CAPACITY))
-    assert len(result["stats"]) == 4
-    for channel, stat in enumerate(result["stats"]):
-        values = channel_values(n, channel)
+    assert result["key_n"] == (1 if n else 0)
+    assert len(result["stats"]) == (1 if n else 0)
+    for stat in result["stats"]:
+        assert stat["key"] == "custom_metric" and stat["unit"] == "my_unit"
+        values = [] if mode == "missing" else observed_values(n)
         assert stat["n"] == len(values)
         if not values:
-            assert all(stat[k] is None for k in ("mean", "variance", "min", "max"))
+            assert all(stat[k] is None for k in ("mean", "variance", "min", "max",
+                "time_uncert_mean_us", "time_uncert_max_us", "position_error_mean_m", "position_error_max_m"))
             continue
-        expect_numeric(stat["mean"], statistics.mean(values), f"{mode}.mean[{channel}]")
-        expect_numeric(stat["min"], min(values), f"{mode}.min[{channel}]")
-        expect_numeric(stat["max"], max(values), f"{mode}.max[{channel}]")
+        expect_numeric(stat["mean"], statistics.mean(values), f"{mode}.mean")
+        expect_numeric(stat["min"], min(values), f"{mode}.min")
+        expect_numeric(stat["max"], max(values), f"{mode}.max")
         if len(values) > 1:
-            expect_numeric(stat["variance"], statistics.variance(values), f"{mode}.variance[{channel}]")
+            expect_numeric(stat["variance"], statistics.variance(values), f"{mode}.variance")
         else:
             assert stat["variance"] is None
+        expect_numeric(stat["time_uncert_mean_us"], 123, f"{mode}.time_uncert_mean")
+        expect_numeric(stat["time_uncert_max_us"], 123, f"{mode}.time_uncert_max")
+        error = 0.25 + math.sqrt(35.5**2 + 2.25**2 + 0.125**2) * 123 / 1e6
+        expect_numeric(stat["position_error_mean_m"], error, f"{mode}.position_error_mean")
+        expect_numeric(stat["position_error_max_m"], error, f"{mode}.position_error_max")
     for i, row in enumerate(result["raw"]):
-        assert len(row) == 14
+        assert len(row) == 17
         expected_t = 2**64 - 1 if mode == "large_time" else epoch + i * 1000
         assert isinstance(row[0], str) and row[0] == str(expected_t)
         assert row[1:3] == [100 + i, 5]
         # Equality intentionally checks binary64 coordinates round-trip exactly.
-        assert row[3] == 123456789.12345679
-        assert row[4] == -987654321.01234567
-        assert row[5] == 120.125 + i * 0.1
-        assert row[6:9] == [35.5, -2.25, 0.125]
-        assert row[9] == i % 100
-        assert row[10] == (None if i == 1 else 40 + i % 20)
-        assert row[11] == (None if i == 2 else 2.5 + i % 7 * 0.25)
-        assert row[12] is None and row[13] == 1234
+        assert row[3:5] == ["custom_metric", "my_unit"]
+        assert row[5] == 123456789.12345679
+        assert row[6] == -987654321.01234567
+        assert row[7] == 120.125 + i * 0.1
+        assert row[8:11] == [35.5, -2.25, 0.125]
+        assert row[11] == (None if i == 1 or mode == "missing" else 123.12345678901235 + (i % 100) * 0.125)
+        assert row[12:15] == [123, 1234, 0.25]
+        expected_utc = str(2**64 - 1) if mode == "large_time" else None if i == 2 else str(EPOCH + i * 1000)
+        assert row[15] == expected_utc
+        assert row[16] == (4567 if expected_utc is not None else None)
     return len(raw.encode("utf-8")) - 1  # fixture adds one newline
 
 
@@ -109,8 +114,8 @@ def main() -> int:
              str(ROOT / "telemetry.c"), str(ROOT / "test_telemetry.c"), "-o", str(executable), "-lm"])
     print(run([str(executable)]), end="")
     lengths = {mode: check_fixture(executable, mode)
-               for mode in ("empty", "single", "normal", "overflow", "summary", "large_time")}
-    print("PASS 6 independently parsed JSON fixtures; bytes=" + json.dumps(lengths, sort_keys=True))
+               for mode in ("empty", "single", "normal", "missing", "overflow", "summary", "large_time")}
+    print(f"PASS {len(lengths)} independently parsed JSON fixtures; bytes=" + json.dumps(lengths, sort_keys=True))
     if args.bench:
         bench = json.loads(run([str(executable), "--bench"]), parse_constant=reject_nonfinite)
         assert bench["samples"] == 1_000_000 and bench["seconds"] > 0

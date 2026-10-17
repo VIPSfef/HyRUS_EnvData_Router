@@ -1,159 +1,147 @@
-# Telemetry Batch 0.1.0
+# Telemetry Batch 0.2.0
 
-고속 이동 환경센서 수신기 뒤에 붙이는 작은 C99 수집·중계 프로그램.
-샘플링은 유지하고 HTTP 요청 시작 간격만 최소 1초로 제한한다.
-기본값은 **원본 + 통계**, `--summary`는 통계만 보낸다.
+고속 이동 센서의 관측을 보존하고, 1초 구간별 원본·통계를 묶어 HTTP/HTTPS로 보내는 C99 프로그램이다.
+기본은 **원본 + 통계**이며 `--summary`는 원본을 생략한다. 수신 빈도와 HTTP 요청 빈도를 분리한다.
 
-## 구성과 범위
+## 구성과 연결 범위
 
-```
-기존 MAVLink 해독기 + 측정시각 기준 항법 정렬
-    -> 정규화 CSV (표준입력)
-    -> telemetry_send (C, 수집 + 전송 스레드)
-    -> HTTP/HTTPS JSON POST (서버)
-```
+`MAVLink 해독기/시각·좌표 정렬 → 정규화 CSV 또는 C API → 고정 큐 → 송신 스레드 → 서버`.
+실제 MAVLink wire 해독기, UART/UDP 입출력, 최종 저장 서버는 포함하지 않는다.
+기존 해독기는 아래 CSV를 출력하거나 `tb_sample`을 채워 `telemetry.c/.h`에 연결한다.
+임의 숫자 `key/unit/value`를 처리하므로 해독된 새 key 추가에 코어 소스 변경이 필요 없다.
+새 MAVLink wire 메시지 자체에는 송수신 측 dialect 정의와 해독 라이브러리 업데이트가 필요하다.
+문자열·배열 값, 센서 교정, 좌표 변환, 순서 재정렬은 상위 어댑터의 책임이다.
 
-`telemetry.c/.h`는 OS에 독립적인 고정 메모리 코어다.
-`sender.c`는 Windows WinHTTP 또는 Linux libcurl을 사용하는 실행 예제다.
-MAVLink XML/센서 모델/실제 포트/서버 스키마가 정해지지 않았으므로 **MAVLink 바이트 해독기와 최종 저장 서버는 포함하지 않는다.**
-기존 해독기가 CSV를 출력하면 바로 연결할 수 있다. 자체 C 수신기에 결합할 때에는 `tb_sample`을 채워 코어 API를 호출한다.
-CSV는 입출력 어댑터이며 MAVLink 자체 패킷 형식이 아니다.
+## 빌드·설치·게시
 
-## Linux: GitHub에서 설치
-
-이 폴더의 **내용을 저장소 루트**에 올린다. 실제 GitHub 주소는 아직 지정되지 않았다.
-Ubuntu/Debian AMD64에서 필요한 패키지:
+Windows AMD64는 WinHTTP, Linux는 libcurl와 pthread를 사용한다. AMD/Intel x86-64에서 같은 아키텍처다.
+Linux 실행 환경은 현재 없어 현장 실행은 미검증이다. GitHub/GitLab CI 파일은 준비했으며 원격 실행은 미수행이다.
 
 ```sh
-sudo apt-get install git cmake build-essential libcurl4-openssl-dev
-git clone YOUR_REPOSITORY_URL telemetry-batch
+sudo apt-get install git cmake build-essential libcurl4-openssl-dev python3
+git clone YOUR_REPOSITORY_CLONE_URL telemetry-batch
 cd telemetry-batch
 sh install.sh
 ```
 
-기본 설치 경로는 `$HOME/.local/bin/telemetry_send`다. PATH에 없으면 절대 경로로 실행한다.
-관리자 권한은 의존성 설치에만 필요하다. `PREFIX=/원하는/경로 sh install.sh`로 설치 위치를 변경한다.
-Linux는 운영체제 libcurl/TLS 라이브러리를 동적 사용한다. 정적 단일 바이너리 배포를 보장하지 않는다.
-현재 기기에는 Linux 실행 환경이 없어 Linux 실행 검증은 미수행이다. 포함한 GitHub Actions가 Ubuntu AMD64 빌드·테스트·설치·패키징을 수행한다.
+기본 설치는 `$HOME/.local/bin/telemetry_send`, 변경은 `PREFIX=/원하는/경로 sh install.sh`다.
+실행 시 PATH 또는 절대 경로를 사용한다. Linux는 OS의 libcurl/TLS 라이브러리를 동적 사용한다.
+이 폴더의 내용을 저장소 루트로 사용한다. 로컬 `main` 초기 커밋이 있으며 실제 remote URL은 아직 없다.
+회사 GitLab·`prj.uaslaboratory.synology.me`에 접속/게시하지 않았다. 웹 호스트만으로 clone URL을 추측하지 않는다.
+GitLab 프로젝트 화면에서 복사한 clone URL로 아래 자리표시자를 바꾼 뒤 사용자가 게시할 수 있다.
 
-## Windows AMD64
-
-동봉 `telemetry_send.exe`는 Windows x86-64/AMD64 실행 파일이다. AMD와 Intel의 x64 CPU에서 같은 아키텍처로 실행한다.
-Windows 기본 HTTP 기능을 사용하므로 별도 libcurl 설치가 필요 없다.
-콘솔 프로그램이며 자동 실행 서비스 등록은 포함하지 않는다.
-
-```powershell
-Get-Content .\example.csv | .\telemetry_send.exe - env1 trial-001 37 127 100
-Get-Content .\example.csv | .\telemetry_send.exe http://127.0.0.1:8080/ingest env1 trial-002 37 127 100
+```sh
+git remote add origin YOUR_GITLAB_CLONE_URL
+git push -u origin main
 ```
 
-첫 명령의 URL `-`는 서버 전송 없이 JSON을 표준출력으로 보여 준다.
-두 번째 명령은 해당 주소에 JSON 수신 서버가 실행 중이어야 한다.
-예시 SESSION은 재사용하지 말고 실제 실행마다 새로운 UUID/고유 문자열을 지정한다.
-
-## 빌드와 검증
+`.github/workflows/`와 `.gitlab-ci.yml`에 빌드·테스트·설치·패키징 절차가 있다.
+로컬 검증은 다음과 같다. Windows 다중 구성 빌드에는 `--config MinSizeRel`을 추가한다.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=MinSizeRel
 cmake --build build --parallel 2
 ctest --test-dir build --output-on-failure
+python test_core.py --cc clang --bench
 python test_sender.py ./build/telemetry_send
 cmake --install build --prefix ./stage
 cmake --build build --target package
 ```
 
-Windows는 Visual Studio 또는 LLVM-MinGW가 설정된 개발 환경에서 동일하게 빌드한다.
-다중 구성 빌드는 `--config MinSizeRel`을 추가하고 실행 파일 경로를 해당 구성 폴더로 바꾼다.
-테스트용 Python만 필요하며 운영 프로그램에는 Python이 필요 없다.
+## 실행과 관측 입력
 
-독립 코어 검증/마이크로벤치:
+`telemetry_send URL|- STREAM SESSION ORIGIN_LAT ORIGIN_LON ELLIPSOID_ALT [--summary]`
+Windows 예: `Get-Content .\example.csv | .\telemetry_send.exe - env1 trial-unique-001 37 127 100`.
+Linux 예: `telemetry_send https://SERVER/ingest env1 trial-unique-002 37 127 100 < example.csv`.
+URL `-`는 JSON을 표준출력에 출력한다. `TB_TOKEN`이 있으면 Bearer 인증 헤더에 사용한다.
+STREAM/SESSION은 ASCII 영숫자·`_ - .`의 1~64자다. 매 부팅·실행에 고유 SESSION을 사용한다.
+원점은 실행 동안 고정된 WGS84 위도/경도(deg)·**타원체고(m)**이며 위치/속도는 ENU m/m·s⁻¹다.
+PX4 NED→ENU는 축 `(y,x,-z)` 변환과 원점 일치가 필요하다. MSL 고도와 타원체고의 차이는 어댑터가 보정한다.
+원점·시계가 재설정되면 새 SESSION/프로세스로 시작한다. 프로그램이 시계 종류를 수치 크기로 추측하지 않는다.
 
-```sh
-python test_core.py --cc clang --bench
+관측 한 줄은 다음 **15필드**다. `#` 주석/빈 줄은 무시하고 1,023자를 넘는 줄은 거부한다.
+
+```text
+t_us,seq,quality,key,unit,value,east_m,north_m,up_m,ve_mps,vn_mps,vu_mps,time_uncert_us,nav_age_us,pos_error_m
 ```
 
-## 실행과 입력 계약
+- `t_us`: 실제 관측시각을 Pixhawk boot microseconds(uint64)로 정렬한 값. PC/서버 수신시각이 아니다.
+- `seq/quality`: uint32. seq는 key별 관측 순번, quality는 의미를 상위에서 정하는 보존용 비트마스크다.
+- `key`: 최대31자 `[A-Za-z_][A-Za-z0-9_.-]*`; `unit`: 최대15자 `[A-Za-z0-9_./%*^+-]+`.
+- `value`: double 숫자 또는 `nan`. 신규 key는 자동 등록하며 기본 최대16개/SESSION, 같은 key의 단위는 SESSION 동안 고정한다.
+- 위치/속도는 그 관측시각의 값이다. `time_uncert_us`는 센서 관측과 항법의 **상대 시각 정렬오차 추정**, 기본 최대20,000µs다.
+- `nav_age_us`는 정렬에 쓴 항법과 관측의 시간 거리이며 보간 시 양쪽 중 큰 거리, 기본 최대200,000µs다.
+- `pos_error_m`는 시각 오차 항을 제외한 위치오차 추정이다. 음수/비유한 값은 거부한다.
+- 위치·속도·유효 value의 절댓값은 ≤1e9다. 물리량별 정상 범위·교정·품질판정은 어댑터가 수행한다.
 
+전체 입력 관측의 t는 비감소, 같은 key의 t와 seq는 각각 엄격히 증가해야 한다. 서로 다른 key는 같은 t를 가질 수 있다.
+UDP 순서 역전은 입력 전에 정렬한다. 같은 측정값을 통신 주기마다 새 관측으로 재등록하지 않는다.
+서로 다른 측정 주기의 key는 새 값이 생겼을 때만 행을 추가한다. 누락값은 JSON null이며 그 key의 통계 n에서 제외된다.
+MAVLink 헤더 8비트 순번은 여러 메시지가 공유하므로 관측 seq로 쓰지 않는다. 시각 없는 메시지는 별도 측정시각 정보가 필요하다.
+
+## UTC 추정과 구간 마감
+
+제어 행은 `@clock,boot_us,utc_unix_us,gnss_uncert_us,rtt_us`와 `@watermark,W`다.
+clock은 **동일 부팅의 동시 시각 대응점**이다. UTC는 Unix µs이며 GPS/TAI 시간은 상위에서 UTC로 변환한다.
+GNSS·시각 포착 오차 및 SYSTEM_TIME boot-ms 양자화는 gnss_uncert_us에 포함하고 실제 교환 RTT를 제공한다.
+TIMESYNC는 장치 간 상대 시계차/RTT 추정에 쓰며 UTC 기준 자체를 만들어 주지는 않는다.
+최근16개 anchor에 중심화 OLS를 적용하고 기본 ±500ppm 필터·마지막 anchor 후 최대10초 외삽을 사용한다.
+추정 UTC 오차는 max anchor uncertainty + ceil(max RTT/2) + max fit residual + nearest-anchor age × 500ppm + 수치 반올림 여유다.
+이는 제공된 오차/드리프트 가정에 의존하는 **공학적 추정**이며 95% 신뢰구간이나 절대 정확도 보증이 아니다.
+짧은 anchor 간격의 잡음은 엄격한 드리프트 필터에 거부될 수 있다. RTT 비대칭·GPS→UTC 변환·UTC step도 별도 고려한다.
+anchor의 boot/UTC는 각각 증가해야 한다. 부팅/UTC step·불연속은 새 SESSION/모델 초기화가 필요하다.
+anchor 부재·범위 밖·오래된 모델이어도 관측은 보존하고 utc_us/utc_uncert_us를 null로 보낸다. 과거 행은 소급 재보정하지 않는다.
+UTC 절대오차는 상대 time_uncert_us와 별개다. 상대 정렬에 공통인 UTC 오차를 위치오차에 다시 더하지 않는다.
+
+구간은 boot 시각의 `[floor(t/1e6)*1e6, +1초)`다. 다음 구간 관측, EOF, 또는 충분히 진행한 watermark가 마감한다.
+watermark는 앞으로 `t<W` 관측이 오지 않는다는 상위 소스의 선언이다. 이후 `t<W`는 거부하고 `t==W`는 허용한다.
+W는 비감소이며 마지막 관측의 t 이상이어야 한다. 현재 구간이 없어도 기억한다. 이미 마감한 구간은 다시 열지 않는다.
+PC에서 입력이 잠시 없다는 이유로 자동 마감하지 않는다. 따라서 고정1초 지연이나 벽시계 정시 업로드를 보장하지 않는다.
+`example.csv`는 boot0 UTC anchor, 100m/s 이동 중 두 key의 10Hz 관측 세 번, W=2초, 다음 구간의 새 key를 보여 준다.
+
+## 통계·보간·출력 스키마
+
+key마다 Welford로 유효 n·평균·표본분산 M2/(n−1)·최소·최대를 누적한다. n=0 통계와 n<2 분산은 null이다.
+시간 불확도의 평균/최대, `pos_error_m + ||v||*time_uncert_us/1e6`의 평균/최대도 유효 value만 집계한다.
+평균은 표본 가중이며 시간/거리 가중이 아니다. 분산은 센서 정확도·공간 분해능·독립 표본의 신뢰구간이 아니다.
+코어 `tb_align`은 같은 시계·SESSION의 양 끝 항법 사이 선형 보간만 수행하며 외삽/200ms 초과 간격을 거부한다.
+위치오차는 끝점 오차의 선형 보간 + `A*Δt²/8`이다. 마지막 항은 실제 전 구간 가속도 크기가 A 이하일 때만 수학적 상한이다.
+센서 응답/흡입관 지연을 모르면 자동 역보정하지 않는다. 100m/s에서 10Hz는 약10m, 100ms 시간오차도 약10m다.
+원본은 관측 경로의 재집계·보간에 쓸 수 있지만 미관측 물리장을 유일하게 복원하지 못한다. summary는 위치별 원본 복원에 불충분하다.
+
+JSON은 자체 `schema:2`이며 OGC SensorThings/SensorML API 호환을 주장하지 않는다.
+최상위에 stream/session, 고정 ENU 원점, 시계 기준, field_order, 누적 loss, clock_model, batches를 포함한다.
+clock_model은 송신 시점의 모델 진단이며, 각 행 UTC/오차는 수신 시 적용한 추정값을 보존한다.
+각 raw 행의 **17필드**는 출력 field_order 그대로다(입력 CSV 순서와 다름).
+
+```text
+t_us,seq,quality,key,unit,east_m,north_m,up_m,ve_mps,vn_mps,vu_mps,value,time_uncert_us,nav_age_us,pos_error_m,utc_us,utc_uncert_us
 ```
-telemetry_send URL|- STREAM SESSION ORIGIN_LAT ORIGIN_LON ELLIPSOID_ALT [--summary]
-```
 
-- `STREAM`, `SESSION`: ASCII 영숫자 및 `_-.`, 1~64자. 단일 물리 센서·측정 순번 스트림을 한 프로세스에서 처리한다.
-- `ORIGIN_LAT/LON`: 고정 ENU 원점의 WGS84 위도/경도(deg). 마지막 값은 WGS84 타원체고(m).
-- `TB_TOKEN` 환경 변수가 있으면 `Authorization: Bearer ...`를 보낸다. 외부 전송에는 HTTPS 주소를 사용한다.
-- 표준입력은 샘플당 한 줄. `#` 주석과 빈 줄은 무시한다. 1,023자를 넘는 입력 줄은 거부한다.
-- 종료 코드는 0=모두 정상 전송, 1=설정/스레드 시작 오류, 2=거부·누락·미전송 중 하나 이상 발생이다.
+t_us/window_us/known utc_us와 누적 loss는 64비트 정밀도를 위해 십진 문자열이다. UTC 미상은 마지막 두 필드 모두 null이다.
+`tb_batch_prepare`가 raw를 (t_us,key,seq), 통계를 key로 정렬한다. 동일 관측 집합·key별 순서를 가진 비포화 배치는 바이트가 일치한다.
+포화 시 먼저 도착한512행만 보존하므로 retained subset은 도착 순서에 의존한다. stats에는 초과 관측도 포함한다.
 
-필드 순서(`example.csv` 참고):
+## 서버·손실·계산량
 
-| 필드 | 계약 |
-|---|---|
-| `t_us` | 서버 수신시각이 아닌 **동기화된 실제 측정시각**, UNIX microseconds(uint64) |
-| `seq` | 센서 전용 단조 증가 uint32 순번. 재부팅/랩어라운드 전에 새 SESSION·프로세스 시작 |
-| `quality` | 상위 센서/해독기가 부여한 uint32 품질 플래그. 코어는 그대로 보존 |
-| `east_m,north_m,up_m` | 해당 측정시각에 정렬된 고정 원점 ENU 위치(double) |
-| `ve_mps,vn_mps,vu_mps` | 같은 시각 ENU 속도(float) |
-| `temp_C,rh_pct,pm25_ug_m3,pm10_ug_m3` | 새 관측만 기록. 누락/미갱신 채널은 `nan` |
-| `nav_age_us` | 정렬에 사용한 항법 관측의 측정시각과 센서 측정시각의 절대 차이(us). 보간 시 보수적으로 양 끝 중 큰 차이 |
+배치 식별키는 **(stream,session,window_us)**다. 서버는 요청 내 모든 배치를 영속 저장/영속 큐 수락한 뒤에만 2xx로 ACK한다.
+서버는 식별키로 중복을 제거해야 한다. ACK 유실 재시도가 가능하며 HTTP exactly-once 전달을 보장하지 않는다.
+송신 시작은 초당 최대1회, HTTP 요청 하나에 최대4구간, 완성 대기 큐8개다. 느린 요청 뒤에도 몰아서 시작하지 않는다.
+기본 원시512관측/초는 100Hz × 4key = 400행/초를 수용한다. raw 초과는 raw_dropped와 통계에 반영한다.
+큐 포화는 새 배치를 버리고 전송 중 자료를 보존한다. 전역 손실 카운터는 서로 겹칠 수 있으므로 합산해 손실률로 쓰지 않는다.
+EOF 후 연속 전송3회 실패하면 종료2와 pending을 남긴다. 종료0=정상,1=설정/시작 오류,2=거부·손실·미전송/실행 오류다.
+디스크 spool은 없다. 전원 종료 시 최대 대기8+진행1구간(보존 raw 최대4,608행) 및 그 통계가 소실될 수 있다.
+장기 단절 무손실이 필요하면 상위 원본 기록이나 영속 spool을 추가해야 한다.
 
-반복 수신한 같은 센서 측정값을 새 관측처럼 넣지 않는다. 예를 들어 온도100Hz/PM1Hz이면 나머지 PM99개는 `nan`이다.
-한 줄의 네 채널은 동일 측정시각을 공유한다. 채널별 측정시각이 다르면 별도 행/스트림으로 정규화한다.
-동일·역순 시각/순번은 거부한다. UDP 순서 역전/다중 센서 재정렬은 상위 어댑터 책임이다.
-`nav_age_us` 기본 한계는 200,000us이며 이는 정확도 보증이 아니다. 장치 속도와 허용 위치오차로 더 작게 정해야 한다.
+수신 추가는 O(16), 경계 복사·초기화는 O(512), 송신 스레드 heapsort는 O(N log N), JSON은 O(N)이다.
+네트워크·정렬·JSON은 송신 스레드에서 수행한다. 초 경계 복사/초기화의 짧은 잠금 비용도 실시간 예산에 포함해야 한다.
+CPU 예산은 `f_observation*C_add + f_window*C_seal + f_request*C_encode`로 나눠 산정한다. 요청 묶음은 원본 정보량을 줄이지 않는다.
+검증 PC에서 sample136B/batch71,840B. 백만 정상 추가의 5회 중앙값은 약76ns/건(초기화 포함, 정렬·JSON·네트워크 제외)이었다.
+이는 MCU 예측값이 아니다. 실제 실행파일/전체 고정 RAM/검증 범위는 [REVIEW.md](REVIEW.md), 해당 빌드는 `telemetry_send --sizes`로 확인한다.
 
-값 범위는 유한 위치/속도 절댓값≤1e9, 온도≥-273.15°C, 습도0..100%, PM≥0이며 유효 센서값의 절댓값≤1e9다.
-Inf는 거부한다. NaN 센서 채널은 개별 통계에서 제외하고 JSON `null`로 보존한다.
+## 설계 근거
 
-## MAVLink 연결 시 주의
-
-공식 [TIMESYNC](https://mavlink.io/en/services/timesync.html)로 시계 차이를 추정하고, 센서 측정시각의 항법 이력을 정렬한다.
-[GLOBAL_POSITION_INT](https://mavlink.io/en/messages/common.html#GLOBAL_POSITION_INT)의 위·경도는 degE7, 고도는 MSL mm, 속도는 NED cm/s다.
-이 프로그램의 ENU m / m/s / 타원체고와 직접 같은 값이 아니다. NED -> ENU 축은 `(y,x,-z)`이며 MSL과 타원체고 사이 지오이드 보정도 일치해야 한다.
-PX4 로컬 좌표의 원점 재설정이 발생하면 새 SESSION/원점을 사용한다.
-MAVLink 헤더의 8비트 패킷 순번은 다른 메시지와 공유되므로 이 프로그램의 `seq`에 쓰지 않는다.
-`HYGROMETER_SENSOR`에는 측정시각 필드가 없다. 고속 이동 정렬에는 측정시각을 담은 커스텀 메시지 또는 별도 동기화된 계측 정보가 필요하다.
-
-## 통계와 공간 정보
-
-각 1초 측정시각 구간마다 채널별 유효 개수, 평균, 표본분산 `M2/(n-1)`, 최솟값, 최댓값을 Welford 방식으로 누적한다.
-빈 채널은 null, 관측1개 분산도 null이다. 분산은 센서 정확도나 독립 표본에 대한 신뢰구간이 아니다.
-평균은 **표본 가중 평균**이며 시간가중·거리/공간가중 평균이 아니다.
-
-기본 원본 묶음은 시간·위치·속도·순번·품질을 보존하므로 서버에서 경로 표시, 위치 구간별 재집계, 시공간 보간을 수행할 수 있다.
-이는 수신 원본의 복원이며, 관측 사이의 실제 물리장 복원을 보장하지 않는다.
-`--summary`는 원본을 생략하여 위치별 봉우리·발생 순서 복원이 불가능하므로 이동 관측의 기본값으로 쓰지 않는다.
-
-속도 `v`, 측정 주파수 `f`이면 샘플 간 이동거리는 약 `v/f`, 시간정렬 오차 `delta_t`에 따른 위치오차는 약 `|v|*delta_t`다.
-100m/s 이동에서는 10Hz=10m, 100Hz=1m이며, 100ms 정렬오차만으로 약10m가 이동한다.
-센서 응답지연/흡입관 지연 `tau`도 약 `|v|*tau`의 공간 오프셋을 만든다. 센서 모델·교정 없이 자동 역복원하지 않는다.
-[SPS30](https://sensirion.com/resource/datasheet/sps30)처럼 자체 측정 간격이 약1초인 센서는 10Hz로 통신해도 독립적인 10Hz 공간 관측이 아니다.
-
-## 서버 계약 및 장애
-
-POST JSON 최상위에는 schema, stream, session, 좌표 원점, 필드 순서, 누적 손실계수, `batches` 배열이 있다.
-배치 식별키는 **(stream, session, window_us)**. `window_us`/`t_us`/누적 손실계수는 64비트 정밀도를 위해 십진 문자열이다.
-서버는 배치 식별키로 중복을 제거하고, **요청 내 모든 배치를 영속 저장/영속 큐 수락한 뒤 2xx**를 반환해야 한다.
-부분 저장 실패를 2xx로 응답하면 안 된다. ACK 유실로 재전송될 수 있으므로 exactly-once HTTP 전달은 보장하지 않는다.
-
-연결 복구 시 한 요청에 최대4초 배치를 묶어 backlog를 줄인다. 평상시와 재시도 모두 요청 시작 간격은 최소1초다.
-입력이 없으면 마지막 입력 후1초 이상 지난 부분 배치도 마감하며, 추가 샘플 없이도 전송된다. 늦게 도착한 이미 마감된 구간 샘플은 거부한다.
-측정시각 구간 끝에 다음 샘플이 와야 일반 구간이 마감되므로 고정1초 지연/정확한 벽시계 정시 업로드를 보장하지 않는다.
-
-기본값은 원본128개/측정1초, 완성 배치8개 대기다. 100Hz를 수용하되 무제한 주파수/무제한 통신 장애를 수용하지 않는다.
-원본 초과는 **통계에 포함**하고 `raw_dropped`를 늘린다. 큐 초과는 **새 배치를 버리고**, 전송 중 자료는 덮지 않는다.
-누락/거부는 JSON 및 종료 진단에 남는다. 카운터는 중복될 수 있으므로 합산해 손실률로 쓰지 않는다.
-EOF 이후 전송3회 연속 실패 시 종료2와 pending개수를 남긴다. **디스크 spool은 없으며 종료/전원 차단 시 메모리의 미전송 자료는 사라진다.**
-장시간 단절에서도 무손실이 필요하면 상위 수신기의 원본 파일 기록 또는 별도 영속 spool을 결합해야 한다.
-
-## 크기와 계산량
-
-- 검증한 Windows AMD64 MinSize 빌드: 실행 파일23,040B(빌드 설정에 따라 달라짐).
-- 코어: 샘플72B, 배치9,416B. 기본 송신 예제의 고정 데이터302,024B(약295KiB); OS/스레드 스택/HTTP·TLS 메모리 별도.
-- `telemetry_send --sizes`로 실제 빌드의 고정 크기를 확인한다.
-- 코어 추가는 O(4), 메모리 할당/네트워크 없음. 초 경계에는 배치복사+초기화 O(N), 약18KiB 메모리 작업이 짧은 잠금 안에서 발생한다.
-- JSON은 O(B*N*4), 네트워크와 함께 전용 송신 스레드에서 실행. 수집 경로에서 HTTP를 기다리지 않는다.
-- 예상 CPU시간/초는 `f_sample*C_add + f_window*C_seal + f_request*C_encode`로 분리해야 한다. 10Hz만으로 서버 부하가 크다고 단정할 수 없다.
-- 원본 묶음은 요청 횟수·헤더/서버 작업 부담을 줄이며 원본 정보량 자체를 줄이지 않는다. 압축/바이너리 인코딩은 미포함.
-- 작은 장치용은 모든 소스에 같은 `-DTB_CAPACITY=16 -DTB_QUEUE_CAP=4 -DTB_SEND_WINDOWS=2`를 적용할 수 있다(16samples/s 계약으로 축소). `TB_MAX_NAV_AGE_US`도 변경 가능.
-
-독립 리뷰와 실제 검증 결과는 [REVIEW.md](REVIEW.md)를 참고한다.
+[OGC SensorThings](https://docs.ogc.org/is/18-088/18-088.html)는 관측 phenomenonTime과 결과 생성 resultTime을 구분한다.
+[OGC SensorML](https://docs.ogc.org/is/23-000/23-000.html)은 시간·공간 기준틀과 시각이 붙은 위치를 명시한다.
+[MAVLink TIMESYNC](https://mavlink.io/en/services/timesync.html)는 반복 교환/RTT 기반 시계차 추정과 필터링을 설명한다.
+[WMO 관측망 품질 지침](https://etrp.wmo.int/pluginfile.php/90334/mod_folder/content/0/INFCOM-3-RWCS-TECHNICAL-GUIDELINES-approved_updates.pdf)은 관측시각과 데이터베이스 수신시각을 구분해 지연을 평가한다.
