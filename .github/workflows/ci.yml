@@ -1,7 +1,6 @@
 name: Build, test, and package
 
-# Publish the contents of telemetry_batch/ as the repository root.
-# This workflow stores CI artifacts; it does not publish GitHub releases.
+# Intel/AMD x86-64 targets only. CI artifacts; no release publishing.
 on:
   push:
   pull_request:
@@ -14,23 +13,23 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: Linux AMD64
+          - name: Linux x64
             os: ubuntu-24.04
-            cc: gcc
+            arch: x64
             suffix: ''
             package: TGZ
-            artifact: telemetry-linux-amd64
-          - name: Windows AMD64
+            artifact: telemetry-linux-x64
+          - name: Windows x64
             os: windows-2025
-            cc: clang-cl
+            arch: x64
             suffix: .exe
             package: ZIP
-            artifact: telemetry-windows-amd64
+            artifact: telemetry-windows-x64
     defaults:
       run:
         shell: bash
@@ -42,31 +41,50 @@ jobs:
         with:
           python-version: '3.12'
           architecture: x64
-      - name: Install Linux build dependencies
+      - name: Install Linux build and runtime dependencies
         if: runner.os == 'Linux'
         run: |
+          test "$(uname -m)" = x86_64
           sudo apt-get update
-          sudo apt-get install --yes ninja-build libcurl4-openssl-dev
-      - name: Set up Windows SDK and AMD64 libraries
+          sudo apt-get install --yes ninja-build gcc libcurl4-openssl-dev:amd64
+      - name: Set up Windows x64 SDK libraries
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vswhere = Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) 'Microsoft Visual Studio/Installer/vswhere.exe'
           $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (-not $vs) { throw 'Visual Studio C tools were not found' }
           $devCmd = Join-Path $vs 'Common7/Tools/VsDevCmd.bat'
-          $lines = & cmd /d /s /c "call `"$devCmd`" -no_logo -arch=x64 -host_arch=x64 && set"
+          $commandLine = 'call "{0}" -no_logo -arch=x64 -host_arch=x64 && set' -f $devCmd
+          $lines = & cmd /d /s /c $commandLine
           if ($LASTEXITCODE -ne 0) { throw 'Windows compiler environment setup failed' }
           foreach ($line in $lines) {
             if ($line -match '^(PATH|INCLUDE|LIB|LIBPATH)=(.*)$') {
               "$($Matches[1])=$($Matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
             }
           }
-      - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=${{ matrix.cc }}
+      - name: Configure Linux x64 with matching curl
+        if: runner.os == 'Linux'
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel \
+            -DTB_TARGET_ARCH=${{ matrix.arch }} -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_C_FLAGS=-m64 -DCMAKE_EXE_LINKER_FLAGS=-m64 \
+            -DCURL_NO_CURL_CMAKE=TRUE \
+            -DCURL_INCLUDE_DIR=/usr/include/x86_64-linux-gnu \
+            -DCURL_LIBRARY=/usr/lib/x86_64-linux-gnu/libcurl.so
+      - name: Configure Windows x64 with explicit compiler target
+        if: runner.os == 'Windows'
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel \
+            -DTB_TARGET_ARCH=${{ matrix.arch }} -DCMAKE_C_COMPILER=clang-cl \
+            -DCMAKE_C_FLAGS=--target=x86_64-pc-windows-msvc
       - name: Build
         run: cmake --build build --parallel 2
-      - name: C tests
+      - name: Verify actual executable architectures
+        run: |
+          python test_arch.py build/telemetry_send${{ matrix.suffix }} --arch ${{ matrix.arch }}
+          python test_arch.py build/telemetry_monitor${{ matrix.suffix }} --arch ${{ matrix.arch }}
+      - name: C tests on the target executables
         run: ctest --test-dir build --output-on-failure
       - name: Independently parse JSON fixtures
         run: python test_core.py --skip-build --executable build/test_telemetry${{ matrix.suffix }}
@@ -74,18 +92,20 @@ jobs:
         run: python test_sender.py build/telemetry_send${{ matrix.suffix }}
       - name: Confirmed batch release
         run: python test_confirmation.py build/telemetry_send${{ matrix.suffix }}
-      - name: Monitor and server settings
+      - name: Monitor settings and POSIX PTY tests
         run: python test_monitor.py build/telemetry_send${{ matrix.suffix }} --monitor-executable build/telemetry_monitor${{ matrix.suffix }}
       - name: Maximum JSON capacity
         run: python test_sender_limits.py build/telemetry_send${{ matrix.suffix }}
-      - name: Package
-        run: cpack --config build/CPackConfig.cmake -G ${{ matrix.package }} -B dist
+      - name: Install and package the tested target
+        run: |
+          cmake --install build --prefix stage
+          cpack --config build/CPackConfig.cmake -G ${{ matrix.package }} -B dist/${{ matrix.arch }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact }}
           path: |
-            dist/*.zip
-            dist/*.tar.gz
+            dist/${{ matrix.arch }}/*.zip
+            dist/${{ matrix.arch }}/*.tar.gz
           if-no-files-found: error
           compression-level: 0
           retention-days: 14

@@ -1,4 +1,4 @@
-# 검토 기록 — v0.3.0
+# 검토 기록 — v0.3.1
 
 검토일: 2026-10-19. 대상: 범용 수치형 관측 KV 수집 코어, GPS/elapsed 시계 추정, HTTP 중계기. 회사 서버/실제 비행 장치 연결은 수행하지 않았다.
 
@@ -103,3 +103,11 @@ Windows 시간 제한은 [WinHTTP 단계별 timeout](https://learn.microsoft.com
 새 확정 수락 회귀 시험(test_confirmation.py) 3개 통과: 200→202→204 동안 동일 배치 보존, 서버 수락 뒤 응답 단절 시 동일 ID 재전송, 204 뒤 이전 구간 없이 새 구간만 송신. Windows 최신 실행 파일로 확인했으며 요청 간격과 최종 pending=0도 확인했다.
 
 TUI 종료 정리: Windows console control handler와 POSIX SIGINT/SIGTERM handler에 입력 모드·커서 복원을 구현했다. POSIX는 async-signal-safe API만 사용하고 이전 신호 동작을 복원한 뒤 재전달한다. Linux PTY 편집/저장/신호 복원 회귀 검사는 CI에 포함했으며 이 Windows PC에서는 건너뛴다. 실제 Linux 실행과 Windows Ctrl+C 강제종료 이벤트 경로는 여기서 실행 검증하지 않았다.
+
+## 2026-10-19: Windows/Linux x64 빌드 구분
+
+최종 지원 대상은 Windows x64와 Linux x64다. Intel x64와 AMD64는 같은 x86-64 대상이며 제조사별 실행 파일을 만들지 않는다. 32비트 전용 빌드·배포 구성은 포함하지 않는다. 패키지명은 호스트 CPU 문자열 대신 컴파일러의 x86-64 매크로와 8바이트 포인터를 확인한 x64를 사용한다.
+
+Windows x64에서 C 코어2388·시계110·설정408 검사, JSON7fixture, 수신/HTTP/204확인/모니터/최대용량 시험을 통과했다. 실제 PE32+ machine0x8664도 확인했다. 실행 경로의 C 코드는 변경하지 않았으며 빌드 검증과 패키지 이름·CI·설치 안내를 수정했다. Linux x64는 libcurl 및 pthread로 빌드/시험하도록 CI에 정의했으나 이 PC에는 사용 가능한 Linux 런타임이 없어 실제 Linux 실행 및 원격 CI는 미수행이다.
+
+GitHub/GitLab CI는 각 OS의 x64 실행 파일 아키텍처를 확인한 뒤 기존 자동 시험과 패키징을 수행한다. Linux 설치 스크립트는 기본 build-linux-x64를 사용한다. 결과물은0.3.1-Windows-x64.zip 및 Linux CI에서 생성할0.3.1-Linux-x64.tar.gz로 구분한다.

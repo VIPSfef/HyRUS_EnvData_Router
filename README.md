@@ -1,4 +1,4 @@
-# Telemetry Batch 0.3.0
+# Telemetry Batch 0.3.1
 
 고속 이동 센서의 관측을 보존하고, 1초 구간별 원본·통계를 묶어 HTTP/HTTPS로 보내는 C99 프로그램이다.
 기본은 **원본 + 통계**이며 `--summary`는 원본을 생략한다. 수신 빈도와 HTTP 요청 빈도를 분리한다.
@@ -80,19 +80,87 @@ Windows I/O timeout은 단계별 제한이다. Linux 총 요청 timeout은 `conn
 
 ## 빌드·설치·게시
 
-Windows AMD64는 WinHTTP, Linux는 libcurl와 pthread를 사용한다. AMD/Intel x86-64에서 같은 아키텍처다.
-Linux 실행 환경은 현재 없어 현장 실행은 미검증이다. GitHub/GitLab CI 파일은 준비했으며 원격 실행은 미수행이다.
+대상은 **Windows x64와 Linux x64 두 빌드**다. Intel x64와 AMD64는 같은 x86-64 명령어 집합이므로 CPU 제조사별 빌드를 나누지 않는다.
+Windows는 WinHTTP, Linux는 libcurl와 pthread를 사용한다.
+
+| 대상 | 패키지명 | 실제 검증 상태 |
+|---|---|---|
+| Windows x64 | `telemetry-batch-0.3.1-Windows-x64.zip` | 실제 빌드·자동 테스트 통과 |
+| Linux x64 | `telemetry-batch-0.3.1-Linux-x64.tar.gz` | 빌드/CI 정의 준비; 실행 환경 부재로 미검증 |
+
+Linux는 현재 기기에 실행 가능한 런타임이 없어 로컬 빌드·실행과 원격 CI 실행을 검증하지 못했다.
+Windows 검증을 Linux 검증으로 간주하지 않는다. 상세 실행 결과와 범위는 [REVIEW.md](REVIEW.md)에 기록한다.
+
+CMake의 `TB_TARGET_ARCH=x64`는 **선택한 컴파일러의 64비트 x86-64 출력 검증 조건**이다. 컴파일러의 타깃을 바꾸는 옵션이 아니다.
+포인터 크기와 컴파일러의 대상 매크로를 확인하며 다른 대상이면 설정 단계에서 실패한다.
+컴파일러/생성기를 바꿀 때는 새 빌드 디렉터리를 사용한다. 권장 경로는 `build-windows-x64`와 `build-linux-x64`다.
+
+### Windows x64
+
+LLVM-MinGW bin과 Ninja를 PATH에 둔 환경에서 다음과 같이 빌드한다.
+
+```powershell
+cmake -S . -B build-windows-x64 -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_C_COMPILER=x86_64-w64-mingw32-clang.exe -DTB_TARGET_ARCH=x64
+cmake --build build-windows-x64 --parallel 2
+ctest --test-dir build-windows-x64 --output-on-failure
+```
+
+Visual Studio C++ 빌드 도구를 사용한다면 x64 플랫폼을 지정한다. 아래 VS 2022 생성기에는 CMake 3.21 이상이 필요하다.
+생성기 캐시를 섞지 않도록 별도 디렉터리를 사용한다.
+
+```powershell
+cmake -S . -B build-windows-x64-vs -G "Visual Studio 17 2022" -A x64 -DTB_TARGET_ARCH=x64
+cmake --build build-windows-x64-vs --config MinSizeRel --parallel 2
+ctest --test-dir build-windows-x64-vs -C MinSizeRel --output-on-failure
+```
+
+LLVM/Ninja 실행 파일은 `build-windows-x64/`, VS 실행 파일은 `build-windows-x64-vs/MinSizeRel/`에 생긴다.
+
+### Linux x64 설치·직접 빌드
+
+Ubuntu/Debian x64 개발 환경의 예시다. 실제 프로젝트 화면에서 복사한 clone URL로 자리표시자를 바꾼다.
 
 ```sh
+sudo apt-get update
 sudo apt-get install git cmake build-essential libcurl4-openssl-dev python3
 git clone YOUR_REPOSITORY_CLONE_URL telemetry-batch
 cd telemetry-batch
 sh install.sh
 ```
 
-기본 설치는 `$HOME/.local/bin/telemetry_send`와 `telemetry_monitor`, 변경은 `PREFIX=/원하는/경로 sh install.sh`다.
-실행 시 PATH 또는 절대 경로를 사용한다. Linux는 OS의 libcurl/TLS 라이브러리를 동적 사용한다.
-이 폴더의 내용을 저장소 루트로 사용한다. 로컬 `main` 초기 커밋이 있으며 실제 remote URL은 아직 없다.
+기본 설치는 `$HOME/.local/bin/telemetry_send`와 `telemetry_monitor`다. PATH 또는 절대 경로를 사용한다.
+다른 설치 경로는 `PREFIX=/원하는/경로 sh install.sh`로 지정한다.
+실행 환경에도 x64 동적 로더·libcurl/TLS 라이브러리가 필요하며 정적 단일 바이너리 배포를 보장하지 않는다.
+설치 없이 테스트/패키징하려면 native x64 GCC와 libcurl 개발 파일로 직접 빌드한다.
+
+```sh
+cmake -S . -B build-linux-x64 -DCMAKE_BUILD_TYPE=MinSizeRel -DTB_TARGET_ARCH=x64
+cmake --build build-linux-x64 --parallel 2
+```
+
+### 테스트·설치·패키징
+
+아래는 Linux x64 예시다. 핵심 검증은 **이미 해당 타깃으로 빌드한 실행 파일**에 수행한다.
+
+```sh
+ctest --test-dir build-linux-x64 --output-on-failure
+python3 test_core.py --skip-build --executable ./build-linux-x64/test_telemetry --bench
+python3 test_sender.py ./build-linux-x64/telemetry_send
+python3 test_confirmation.py ./build-linux-x64/telemetry_send
+python3 test_monitor.py ./build-linux-x64/telemetry_send --monitor-executable ./build-linux-x64/telemetry_monitor
+cmake --install build-linux-x64 --prefix ./stage-linux-x64
+cmake --build build-linux-x64 --target package
+```
+
+Windows LLVM/Ninja는 같은 Python 테스트에 `build-windows-x64/*.exe`를 사용한다.
+설치/패키징은 `cmake --install build-windows-x64 --prefix ./stage-windows-x64`,
+`cmake --build build-windows-x64 --target package`다.
+VS는 `build-windows-x64-vs/MinSizeRel/*.exe`를 사용하고 설치/패키징에도 `--config MinSizeRel`을 추가한다.
+`.github/workflows/`와 `.gitlab-ci.yml`에는 Windows x64·Linux x64 정의를 두며 준비 상태와 실제 CI 실행 결과를 구분한다.
+
+### 원격 저장소 게시
+
+이 폴더의 내용을 저장소 루트로 사용한다. 로컬 main 커밋은 있으나 실제 remote URL은 아직 없다.
 회사 GitLab·`prj.uaslaboratory.synology.me`에 접속/게시하지 않았다. 웹 호스트만으로 clone URL을 추측하지 않는다.
 GitLab 프로젝트 화면에서 복사한 clone URL로 아래 자리표시자를 바꾼 뒤 사용자가 게시할 수 있다.
 
@@ -101,20 +169,7 @@ git remote add origin YOUR_GITLAB_CLONE_URL
 git push -u origin main
 ```
 
-`.github/workflows/`와 `.gitlab-ci.yml`에 빌드·테스트·설치·패키징 절차가 있다.
-로컬 검증은 다음과 같다. Windows 다중 구성 빌드에는 `--config MinSizeRel`을 추가한다.
-
-```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=MinSizeRel
-cmake --build build --parallel 2
-ctest --test-dir build --output-on-failure
-python test_core.py --cc clang --bench
-python test_sender.py ./build/telemetry_send
-python test_confirmation.py ./build/telemetry_send
-python test_monitor.py ./build/telemetry_send --monitor-executable ./build/telemetry_monitor
-cmake --install build --prefix ./stage
-cmake --build build --target package
-```
+[CMake 공식 문서](https://cmake.org/cmake/help/latest/generator/Visual%20Studio%2017%202022.html)는 VS의 `-A x64` 대상 선택을 설명한다.
 
 ## 실행과 관측 입력
 
