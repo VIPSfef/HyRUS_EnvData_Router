@@ -5,6 +5,13 @@ target_link_libraries(test_time_sync PRIVATE telemetry)
 add_executable(test_config test_config.c ../config.c)
 target_include_directories(test_config PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..")
 foreach(target test_telemetry test_time_sync test_config)
+  # Keep verification executables separate from the programs users run.
+  set_target_properties(${target} PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+  foreach(config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set_target_properties(${target} PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY_${config} "${CMAKE_BINARY_DIR}/tests")
+  endforeach()
   if(NOT WIN32)
     target_link_libraries(${target} PRIVATE m)
   endif()

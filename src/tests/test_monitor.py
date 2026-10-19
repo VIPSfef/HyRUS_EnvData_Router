@@ -1,8 +1,8 @@
 """Monitor/config integration tests with generated input and loopback HTTP only.
 
 No external service, GUI focus, or additional packages. POSIX uses a test-owned PTY.
-Run: python src/tests/test_monitor.py [build/windows-x64/telemetry_send.exe]
-         [--monitor-executable telemetry_monitor.exe]
+Run: python src/tests/test_monitor.py [build/windows-x64/mavlink_telemetry_data_router_headless.exe]
+         [--interactive-executable mavlink_telemetry_data_router_interactive.exe]
 Interactive console drawing/editor keys require a separate console check.
 """
 from __future__ import annotations
@@ -44,7 +44,7 @@ def environment() -> dict[str, str]:
 
 def command(executable: Path, url: str, monitor: bool = True) -> list[str]:
     return [str(executable), url, "monitor-test", "monitor-session", "37", "127", "100"] + (
-        ["--monitor"] if monitor else [])
+        ["--interactive"] if monitor else [])
 
 
 def write_config(path: Path, url: str, **overrides: object) -> None:
@@ -224,7 +224,7 @@ def slow_http_progress(executable: Path, folder: Path) -> None:
         config = folder / "설정-monitor.ini"
         write_config(config, server.url)
         child = subprocess.Popen(
-            [str(executable), "--config", str(config), "--monitor"],
+            [str(executable), "--config", str(config), "--interactive"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env=environment())
         capture = Capture(child.stderr)
@@ -300,7 +300,7 @@ def invalid_config_before_network(executable: Path, folder: Path) -> None:
         write_config(config, server.url)
         with config.open("a", encoding="utf-8") as out:
             out.write("url=http://invalid.example/PRIVATE_DUPLICATE_VALUE\n")
-        child = subprocess.Popen([str(executable), "--config", str(config), "--monitor"],
+        child = subprocess.Popen([str(executable), "--config", str(config), "--interactive"],
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE, text=True, env=environment())
         try:
@@ -326,7 +326,7 @@ def default_monitor(executable: Path) -> None:
     assert process.returncode == 0, process.stderr
     assert_final(process.stderr, 1, dry=True)
     assert len([json.loads(line) for line in process.stdout.splitlines()]) == 1
-    print("PASS telemetry_monitor defaults to monitoring with the existing positional CLI")
+    print("PASS mavlink_telemetry_data_router_interactive defaults to monitoring with the existing positional CLI")
 
 
 
@@ -336,7 +336,7 @@ def standalone_offline_monitor(executable: Path, folder: Path) -> None:
     standalone.mkdir()
     copied = standalone / executable.name
     shutil.copy2(executable, copied)
-    assert not any(path.name.startswith("telemetry_send") for path in standalone.iterdir())
+    assert not any(path.name.startswith("mavlink_telemetry_data_router_headless") for path in standalone.iterdir())
 
     # Keep an unlistened loopback port reserved: no server can acquire it during
     # this test, and connect must fail rather than accidentally obtaining a 204.
@@ -507,7 +507,7 @@ def posix_tui_cleanup(executable: Path) -> None:
             env = environment()
             env["TERM"] = "xterm-256color"
             child = subprocess.Popen(
-                [str(executable), "--config", str(config), "--monitor"],
+                [str(executable), "--config", str(config), "--interactive"],
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=slave,
                 pass_fds=(slave,), preexec_fn=controlling_terminal,
                 env=env, text=True)
@@ -591,8 +591,8 @@ def posix_tui_cleanup(executable: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("executable", nargs="?", type=Path,
-                        default=BUILD / ("telemetry_send.exe" if os.name == "nt" else "telemetry_send"))
-    parser.add_argument("--monitor-executable", type=Path)
+                        default=BUILD / ("mavlink_telemetry_data_router_headless.exe" if os.name == "nt" else "mavlink_telemetry_data_router_headless"))
+    parser.add_argument("--interactive-executable", type=Path)
     args = parser.parse_args()
     executable = args.executable.resolve()
     assert executable.is_file(), executable
@@ -601,9 +601,9 @@ def main() -> None:
         folder = Path(temp)
         slow_http_progress(executable, folder)
         invalid_config_before_network(executable, folder)
-    monitor = args.monitor_executable
+    monitor = args.interactive_executable
     if monitor is None:
-        candidate = executable.with_name("telemetry_monitor.exe" if os.name == "nt" else "telemetry_monitor")
+        candidate = executable.with_name("mavlink_telemetry_data_router_interactive.exe" if os.name == "nt" else "mavlink_telemetry_data_router_interactive")
         if candidate.is_file():
             monitor = candidate
     if monitor is not None:
@@ -613,7 +613,7 @@ def main() -> None:
         with tempfile.TemporaryDirectory(prefix="telemetry-monitor-alone-") as temp:
             standalone_offline_monitor(monitor.resolve(), Path(temp))
     else:
-        print("SKIP default-monitor binary check: pass --monitor-executable to enable")
+        print("SKIP default-monitor binary check: pass --interactive-executable to enable")
     posix_tui_cleanup(monitor.resolve() if monitor is not None else executable)
     print("ALL MONITOR INTEGRATION CHECKS PASSED")
 

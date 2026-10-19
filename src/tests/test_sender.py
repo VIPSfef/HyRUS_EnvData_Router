@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILD = ROOT / "build" / ("windows-x64" if os.name == "nt" else "linux-x64")
-EXE = (Path(sys.argv[1]) if len(sys.argv) > 1 else BUILD / ("telemetry_send.exe" if os.name == "nt" else "telemetry_send")).resolve()
+EXE = (Path(sys.argv[1]) if len(sys.argv) > 1 else BUILD / ("mavlink_telemetry_data_router_headless.exe" if os.name == "nt" else "mavlink_telemetry_data_router_headless")).resolve()
 BASE = 1_000_000
 UTC_BASE = 1_800_000_000_000_000
 

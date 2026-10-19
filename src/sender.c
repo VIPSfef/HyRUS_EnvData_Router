@@ -275,7 +275,7 @@ static int http_open(http *h, const tb_config *config) {
         h->route[n + c.dwExtraInfoLength] = 0;
     }
     h->flags = c.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
-    h->session = WinHttpOpen(L"telemetry-batch/1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    h->session = WinHttpOpen(L"mavlink_telemetry_data_router/0.4.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                             WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!h->session) return 0;
     if (!WinHttpSetTimeouts(h->session, (int)config->connect_timeout_ms,
@@ -622,15 +622,15 @@ int main(int argc, char **argv) {
         }
         option_start = 7;
     } else {
-        fprintf(stderr, "Usage: telemetry_send URL|- STREAM SESSION LAT LON ALT [--summary] [--monitor]\n"
-                        "   or: telemetry_monitor --config telemetry.ini [--no-monitor]\n"
+        fprintf(stderr, "Usage: mavlink_telemetry_data_router_headless URL|- STREAM SESSION LAT LON ALT [--summary] [--interactive]\n"
+                        "   or: mavlink_telemetry_data_router_interactive --config telemetry.ini [--headless]\n"
                         "TUI: e edit, Enter validate, s save for restart; telemetry stays in memory.\n");
         return 1;
     }
     for (i = (unsigned)option_start; i < (unsigned)argc; ++i) {
         if (!strcmp(argv[i], "--summary")) a->config.summary = 1;
-        else if (!strcmp(argv[i], "--monitor")) a->monitor_enabled = 1;
-        else if (!strcmp(argv[i], "--no-monitor")) a->monitor_enabled = 0;
+        else if (!strcmp(argv[i], "--interactive") || !strcmp(argv[i], "--monitor")) a->monitor_enabled = 1;
+        else if (!strcmp(argv[i], "--headless") || !strcmp(argv[i], "--no-monitor")) a->monitor_enabled = 0;
         else { fprintf(stderr, "Unknown option\n"); return 1; }
     }
     if (!cfg_validate(&a->config, SEND_WINDOWS, error, sizeof(error))) {

@@ -7,4 +7,4 @@ prefix=${PREFIX:-"$HOME/.local"}
 cmake -S "$project_dir" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel -DBUILD_TESTING=OFF -DTB_TARGET_ARCH=x64
 cmake --build "$build_dir" --parallel 2
 cmake --install "$build_dir" --prefix "$prefix"
-printf 'Installed: %s/bin/telemetry_send and telemetry_monitor (Linux x64)\n' "$prefix"
+printf 'Installed: %s/bin/mavlink_telemetry_data_router_headless and mavlink_telemetry_data_router_interactive (Linux x64)\n' "$prefix"

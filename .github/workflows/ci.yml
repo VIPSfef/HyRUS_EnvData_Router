@@ -22,12 +22,12 @@ jobs:
             os: ubuntu-24.04
             preset: linux-x64
             suffix: ''
-            artifact: telemetry-linux-x64
+            artifact: mavlink_telemetry_data_router-linux-x64
           - name: Windows x64
             os: windows-2025
             preset: windows-x64
             suffix: .exe
-            artifact: telemetry-windows-x64
+            artifact: mavlink_telemetry_data_router-windows-x64
     defaults:
       run:
         shell: bash
@@ -64,7 +64,7 @@ jobs:
       - name: Configure Linux x64
         if: runner.os == 'Linux'
         run: |
-          cmake --preset linux-x64 -DCMAKE_C_COMPILER=gcc \
+          cmake --preset linux-x64-tests -DCMAKE_C_COMPILER=gcc \
             -DCMAKE_C_FLAGS=-m64 -DCMAKE_EXE_LINKER_FLAGS=-m64 \
             -DCURL_NO_CURL_CMAKE=TRUE \
             -DCURL_INCLUDE_DIR=/usr/include/x86_64-linux-gnu \
@@ -72,26 +72,26 @@ jobs:
       - name: Configure Windows x64
         if: runner.os == 'Windows'
         run: |
-          cmake --preset windows-x64 -DCMAKE_C_COMPILER=clang-cl \
+          cmake --preset windows-x64-tests -DCMAKE_C_COMPILER=clang-cl \
             -DCMAKE_C_FLAGS=--target=x86_64-pc-windows-msvc
       - name: Build
-        run: cmake --build --preset ${{ matrix.preset }}
+        run: cmake --build --preset ${{ matrix.preset }}-tests
       - name: Verify executable architectures
         run: |
-          python src/tests/test_arch.py build/${{ matrix.preset }}/telemetry_send${{ matrix.suffix }} --arch x64
-          python src/tests/test_arch.py build/${{ matrix.preset }}/telemetry_monitor${{ matrix.suffix }} --arch x64
+          python src/tests/test_arch.py build/${{ matrix.preset }}/mavlink_telemetry_data_router_headless${{ matrix.suffix }} --arch x64
+          python src/tests/test_arch.py build/${{ matrix.preset }}/mavlink_telemetry_data_router_interactive${{ matrix.suffix }} --arch x64
       - name: C tests on target executables
-        run: ctest --preset ${{ matrix.preset }}
+        run: ctest --preset ${{ matrix.preset }}-tests
       - name: Independently parse JSON fixtures
-        run: python src/tests/test_core.py --skip-build --executable build/${{ matrix.preset }}/test_telemetry${{ matrix.suffix }}
+        run: python src/tests/test_core.py --skip-build --executable build/${{ matrix.preset }}/tests/test_telemetry${{ matrix.suffix }}
       - name: Loopback HTTP integration tests
-        run: python src/tests/test_sender.py build/${{ matrix.preset }}/telemetry_send${{ matrix.suffix }}
+        run: python src/tests/test_sender.py build/${{ matrix.preset }}/mavlink_telemetry_data_router_headless${{ matrix.suffix }}
       - name: Confirmed batch release
-        run: python src/tests/test_confirmation.py build/${{ matrix.preset }}/telemetry_send${{ matrix.suffix }}
+        run: python src/tests/test_confirmation.py build/${{ matrix.preset }}/mavlink_telemetry_data_router_headless${{ matrix.suffix }}
       - name: Monitor settings and POSIX PTY tests
-        run: python src/tests/test_monitor.py build/${{ matrix.preset }}/telemetry_send${{ matrix.suffix }} --monitor-executable build/${{ matrix.preset }}/telemetry_monitor${{ matrix.suffix }}
+        run: python src/tests/test_monitor.py build/${{ matrix.preset }}/mavlink_telemetry_data_router_headless${{ matrix.suffix }} --interactive-executable build/${{ matrix.preset }}/mavlink_telemetry_data_router_interactive${{ matrix.suffix }}
       - name: Maximum JSON capacity
-        run: python src/tests/test_sender_limits.py build/${{ matrix.preset }}/telemetry_send${{ matrix.suffix }}
+        run: python src/tests/test_sender_limits.py build/${{ matrix.preset }}/mavlink_telemetry_data_router_headless${{ matrix.suffix }}
       - name: Install and package tested target
         run: |
           cmake --install build/${{ matrix.preset }}
@@ -100,8 +100,8 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: |
-            build/${{ matrix.preset }}/telemetry_send${{ matrix.suffix }}
-            build/${{ matrix.preset }}/telemetry_monitor${{ matrix.suffix }}
+            build/${{ matrix.preset }}/mavlink_telemetry_data_router_headless${{ matrix.suffix }}
+            build/${{ matrix.preset }}/mavlink_telemetry_data_router_interactive${{ matrix.suffix }}
             build/packages/*.zip
             build/packages/*.tar.gz
           if-no-files-found: error

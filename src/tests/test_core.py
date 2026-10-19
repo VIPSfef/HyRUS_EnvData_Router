@@ -101,7 +101,7 @@ def main() -> int:
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--bench", action="store_true", help="time 1,000,000 accepted additions")
     args = parser.parse_args()
-    executable = args.executable or BUILD / ("test_telemetry.exe" if os.name == "nt" else "test_telemetry")
+    executable = args.executable or BUILD / "tests" / ("test_telemetry.exe" if os.name == "nt" else "test_telemetry")
     executable = executable.resolve()
     if not args.skip_build:
         compiler = args.cc or os.environ.get("CC") or shutil.which("clang") or shutil.which("gcc")

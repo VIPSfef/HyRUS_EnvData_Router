@@ -8,7 +8,7 @@ import tarfile
 def normalize(path):
     path = Path(path)
     temporary = path.with_name(path.name + '.normalized')
-    executables = {'telemetry_send', 'telemetry_monitor'}
+    executables = {'mavlink_telemetry_data_router_headless', 'mavlink_telemetry_data_router_interactive'}
     found = set()
     try:
         with tarfile.open(path, 'r:gz') as source, tarfile.open(temporary, 'w:gz', format=tarfile.PAX_FORMAT) as target:

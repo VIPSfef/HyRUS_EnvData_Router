@@ -1,4 +1,6 @@
-# 검토 기록 — v0.4.0
+# 검토 기록 — mavlink_telemetry_data_router v0.4.0
+
+이전 검증 기록의 `telemetry_send` / `telemetry_monitor`는 각각 현재 `_headless` / `_interactive` 프로그램의 예전 이름이다. 현재 사용 이름과 개발 검사 선택 방식은 README를 따른다.
 
 검토일: 2026-10-19. 대상: 범용 수치형 관측 KV 수집 코어, GPS/elapsed 시계 추정, HTTP 중계기. 회사 서버/실제 비행 장치 연결은 수행하지 않았다.
 
@@ -132,3 +134,16 @@ Linux 교차 빌드는 공식 Ubuntu22.04 패키지를 SHA256 확인 후 build/t
 이번 MinSizeRel 빌드의 Windows 파일은 각각135,680B이고 Linux ELF는 각각54,560B다. CPack strip 배포물은 Windows 각각53,760B, Linux 각각48,208B다. Windows 호스트에서 만든 Linux TGZ의 실행 파일 모드를0755로 보정하는 post-build hook과 재검사를 추가했다.
 
 독립 재검토에서 교차 빌드의 실행 권한 훅이 소스 TGZ에도 적용되는 문제를 찾아 소스 패키지를 건너뛰도록 수정했다. 교차 빌드 트리에서도 package_source의 ZIP/TGZ 생성을 실제 확인했다. 설치 prefix도 build/stage/linux-x64로 맞췄다.
+
+
+## 2026-10-19: 실행 이름 통일과 사용자 안내·선택 검사
+
+제품 이름을 mavlink_telemetry_data_router로 통일하고 운용 실행 파일은 _headless 및 _interactive로 구분했다. Windows/Linux 두 파일씩 실제 다시 빌드하고 PE32+/ELF64를 확인했다. 도움말·WinHTTP User-Agent·설치·CPack·CI·통합 검사 기본 경로도 같은 명칭을 사용한다. 모드 옵션은 --interactive/--headless를 기본 표기로 제공하고 이전 옵션은 호환용으로 수용한다.
+
+README는 프로그램 선택, 예제 실행, 서버 설정, 서버 장애, 소스 빌드, 선택 검사 순서로 다시 썼다. 기존 입력/시계/통계 수식과 빌드 상세 설명은 docs/REFERENCE.md에 보존했다. 설치 문서도 README에서 docs/REFERENCE.md 및 docs/REVIEW.md로 연결되도록 디렉터리를 맞췄다.
+
+세 C 검사기는 통계·시계·설정 실패를 독립적으로 찾는 데 유용하므로 유지했다. 합칠 수 있으나 운용 파일의 크기나 속도에는 이득이 없다. CTest가 검사별 결과를 모으며 운용 앱은 검사기를 호출하지 않는다. 기본/Debug/수동 구성은 BUILD_TESTING=OFF, 개발용 -tests 프리셋과 CI만 ON이며 결과는 build/<platform>/tests/에 생성한다. 예전 루트 검사 파일과 이전 이름의 운용 파일은 생성물로 확인해 정리했다.
+
+Windows에서 일반 OFF 빌드, 선택 ON 빌드, CTest3개와 JSON7fixture를 실제 확인했다. 코어2388·시계110·설정408 검사를 유지하며 수신/서버확인/interactive/최대용량 통합 검사를 모두 통과했다. Linux도 새 이름의 운용 파일과 tests/의 검사 파일을 교차 컴파일했다. Linux 실행 및 원격 CI는 미수행이다.
+
+관측 처리·통계·시계·스레드의 코드는 변경하지 않았다. 모드 선택의 추가 문자열 비교는 시작 시 인수 처리에만 들어가며 관측당 계산 경로에는 추가 연산이 없다. 고정 수집 상태+송신 버퍼는 --sizes로 기존1,762,504B임을 재확인했다. 검사 실행 파일은 운영 앱에 링크되지 않아 운영 중 CPU/RAM 부담이 없다.

@@ -1,6 +1,10 @@
 {
   "version": 3,
-  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "base",
@@ -8,27 +12,39 @@
       "generator": "Ninja",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "MinSizeRel",
-        "BUILD_TESTING": true,
+        "BUILD_TESTING": false,
         "TB_TARGET_ARCH": "x64"
       }
     },
     {
       "name": "windows-x64",
-      "displayName": "Windows x64 send + monitor",
+      "displayName": "Windows x64 headless + interactive",
       "inherits": "base",
       "binaryDir": "${sourceDir}/build/windows-x64",
       "installDir": "${sourceDir}/build/stage/windows-x64",
-      "cacheVariables": { "CMAKE_C_COMPILER": "clang" },
-      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
     },
     {
       "name": "linux-x64",
-      "displayName": "Linux x64 send + monitor",
+      "displayName": "Linux x64 headless + interactive",
       "inherits": "base",
       "binaryDir": "${sourceDir}/build/linux-x64",
       "installDir": "${sourceDir}/build/stage/linux-x64",
-      "cacheVariables": { "CMAKE_C_COMPILER": "cc" },
-      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "cc"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
     },
     {
       "name": "windows-x64-debug",
@@ -36,7 +52,9 @@
       "inherits": "windows-x64",
       "binaryDir": "${sourceDir}/build/windows-x64-debug",
       "installDir": "${sourceDir}/build/stage/windows-x64-debug",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
     },
     {
       "name": "linux-x64-debug",
@@ -44,21 +62,115 @@
       "inherits": "linux-x64",
       "binaryDir": "${sourceDir}/build/linux-x64-debug",
       "installDir": "${sourceDir}/build/stage/linux-x64-debug",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "windows-x64-tests",
+      "displayName": "Windows x64 developer tests",
+      "inherits": "windows-x64",
+      "cacheVariables": {
+        "BUILD_TESTING": true
+      }
+    },
+    {
+      "name": "linux-x64-tests",
+      "displayName": "Linux x64 developer tests",
+      "inherits": "linux-x64",
+      "cacheVariables": {
+        "BUILD_TESTING": true
+      }
     }
   ],
   "buildPresets": [
-    { "name": "windows-x64", "configurePreset": "windows-x64", "jobs": 2 },
-    { "name": "linux-x64", "configurePreset": "linux-x64", "jobs": 2 },
-    { "name": "windows-x64-debug", "configurePreset": "windows-x64-debug", "jobs": 2 },
-    { "name": "linux-x64-debug", "configurePreset": "linux-x64-debug", "jobs": 2 },
-    { "name": "package-windows-x64", "configurePreset": "windows-x64", "targets": ["package"], "jobs": 2 },
-    { "name": "package-linux-x64", "configurePreset": "linux-x64", "targets": ["package"], "jobs": 2 }
+    {
+      "name": "windows-x64",
+      "configurePreset": "windows-x64",
+      "jobs": 2
+    },
+    {
+      "name": "linux-x64",
+      "configurePreset": "linux-x64",
+      "jobs": 2
+    },
+    {
+      "name": "windows-x64-debug",
+      "configurePreset": "windows-x64-debug",
+      "jobs": 2
+    },
+    {
+      "name": "linux-x64-debug",
+      "configurePreset": "linux-x64-debug",
+      "jobs": 2
+    },
+    {
+      "name": "package-windows-x64",
+      "configurePreset": "windows-x64",
+      "targets": [
+        "package"
+      ],
+      "jobs": 2
+    },
+    {
+      "name": "package-linux-x64",
+      "configurePreset": "linux-x64",
+      "targets": [
+        "package"
+      ],
+      "jobs": 2
+    },
+    {
+      "name": "windows-x64-tests",
+      "configurePreset": "windows-x64-tests",
+      "jobs": 2
+    },
+    {
+      "name": "linux-x64-tests",
+      "configurePreset": "linux-x64-tests",
+      "jobs": 2
+    }
   ],
   "testPresets": [
-    { "name": "windows-x64", "configurePreset": "windows-x64", "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error" } },
-    { "name": "linux-x64", "configurePreset": "linux-x64", "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error" } },
-    { "name": "windows-x64-debug", "configurePreset": "windows-x64-debug", "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error" } },
-    { "name": "linux-x64-debug", "configurePreset": "linux-x64-debug", "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error" } }
+    {
+      "name": "windows-x64",
+      "configurePreset": "windows-x64-tests",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "windows-x64-tests",
+      "configurePreset": "windows-x64-tests",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "linux-x64",
+      "configurePreset": "linux-x64-tests",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "linux-x64-tests",
+      "configurePreset": "linux-x64-tests",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    }
   ]
 }

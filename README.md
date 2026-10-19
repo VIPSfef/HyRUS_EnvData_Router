@@ -1,354 +1,158 @@
-# Telemetry Batch 0.4.0
+# mavlink_telemetry_data_router
 
-고속 이동 센서의 관측을 보존하고, 1초 구간별 원본·통계를 묶어 HTTP/HTTPS로 보내는 C99 프로그램이다.
-기본은 **원본 + 통계**이며 `--summary`는 원본을 생략한다. 수신 빈도와 HTTP 요청 빈도를 분리한다.
+이동 중인 센서에서 받은 **관측값·측정시각·위치·속도**를 모아 서버로 전달하는 프로그램입니다. Windows x64와 Linux x64에서 사용합니다. Intel과 AMD에는 같은 x64 실행 파일을 사용합니다.
 
-## 구성과 연결 범위
+예를 들어 100 Hz로 들어온 관측을 한 개씩 서버에 보내는 대신, **1초 구간의 원본 100개와 통계를 묶어** 전송합니다. 기본 설정은 원본을 보존하며, 서버 요청 시작 간격은 최소 1초입니다.
 
-`MAVLink 해독기/시각·좌표 정렬 → 정규화 CSV 또는 C API → 고정 큐 → 송신 스레드 → 서버`.
-실제 MAVLink wire 해독기, UART/UDP 입출력, 최종 저장 서버는 포함하지 않는다.
-기존 해독기는 아래 CSV를 출력하거나 `tb_sample`을 채워 `src/telemetry.c/.h`에 연결한다.
-임의 숫자 `key/unit/value`를 처리하므로 해독된 새 key 추가에 코어 소스 변경이 필요 없다.
-새 MAVLink wire 메시지 자체에는 송수신 측 dialect 정의와 해독 라이브러리 업데이트가 필요하다.
-문자열·배열 값, 센서 교정, 좌표 변환, 순서 재정렬은 상위 어댑터의 책임이다.
+## 무엇을 실행하면 되나요?
 
-## 상태 모니터와 서버 설정
+두 프로그램 중 **하나만** 실행하세요. 둘 다 수신·통계 처리·서버 전송을 자체적으로 수행합니다.
 
-`telemetry_send`는 헤드리스 수집·중계기이고, `telemetry_monitor`는 같은 수집·중계 기능에 TUI를 기본으로 켠 실행 파일이다. `telemetry_send --monitor`도 같은 기능을 제공한다.
-모니터 자체가 수집·중계 프로그램이므로 별도 `telemetry_send` 프로세스를 실행하지 않는다. 둘 중 하나만 실행한다.
-최종 수신 서버가 꺼져 있어도 모니터와 입력 수신은 계속 동작하고 재시도한다. 미확인 자료는 고정 RAM 큐에 남으며 큐가 가득 차면 새 구간을 버리고 손실을 표시한다.
-관측 입력은 계속 표준입력으로 받고 화면과 진단은 표준오류로 출력한다. 입력은 MAVLink 해독기에서 정규화한 CSV다.
-화면은 기본1Hz이며, 입력/송신/화면이 각각 다른 스레드에서 동작한다. 관측은 메모리에만 유지하고 설정만 파일로 저장한다.
-
-| 진단 항목 | 판단에 쓰는 의미 |
+| 실행 파일 이름 | 사용할 때 |
 |---|---|
-| 전체·키별 observations/s, 최신 값·순번 | 센서/해독기 입력 중단, 특정 key 갱신 중단 |
-| accepted/rejected, 순번 gaps, raw/queue 손실 | 입력 규칙 위반과 메모리 용량 초과를 구분 |
-| 큐 사용량·최장 대기시간·전송 중 구간 수 | 서버 장애·지연으로 미확인 자료가 쌓이는지 |
-| HTTP 상태·오류 코드, 204 ACK 수·재시도·응답시간 | TCP 전달과 서버의 확정 수락을 구분 |
-| 인코딩 시간·요청 시도 바이트 | 직렬화 비용과 재전송 부하 확인(실제 선로 바이트가 아님) |
-| boot 시각·watermark·열린 구간 | 입력은 조용하지만 구간 마감 선언을 기다리는 상태 확인 |
-| ENU 위치·속도, 상대 시각 불확실도·항법 age·위치오차 추정 | 이동 관측의 시공간 품질 확인 |
-| UTC ESTIMATED/UNKNOWN/STALE, anchor 수·age·드리프트·잔차 | 시계 모델의 가용성과 오래됨 확인 |
-| ACTIVE 설정·token 환경변수 set/missing | 현재 적용된 서버·전송 조건과 인증 준비 확인 |
+| `mavlink_telemetry_data_router_interactive` | 화면에서 수신량·전송 상태를 보고 설정을 편집할 때 |
+| `mavlink_telemetry_data_router_headless` | 화면 없이 자동 운용하거나 다른 프로그램에서 실행할 때 |
 
-`SENDING / RETRY / IDLE / WAIT_WATERMARK` 등 상태를 표시한다. 마지막 상태/오류 코드는 마지막 완료 요청의 결과이며 전송 중에는 과거 결과다.
-ACK 수는 확인된 **요청 수**다(한 요청에 여러 구간 가능). `DRY`의 `dry_releases`는 화면 출력 성공이며 서버 ACK가 아니다.
-입력 bytes/lines/idle에는 주석·제어 행도 포함한다. 관측률과 key별 n에는 받아들인 관측만 포함하고 NaN도 한 관측으로 센다.
-GPS fix·원본 MAVLink CRC·wire 패킷 손실률은 현재 입력 경계에서 알 수 없어 `n/a`다. 관측 순번 gap을 MAVLink 헤더 손실률로 해석하지 않는다.
-UTC/위치오차는 추정 지표이며 시계 모델이 실제 센서 지연·GPS 품질을 자동 검증하지 않는다. STALE 경고는 화면 진단이고 저장된 과거 관측의 UTC를 바꾸지 않는다.
+Windows 파일에는 `.exe`가 붙습니다. **interactive를 쓰기 위해 headless를 따로 켤 필요가 없습니다.**
 
-Windows PowerShell에서 첫 예제를 실행한다. `-`는 외부 전송 없이 JSON을 내보내는 시험 모드다.
+현재 입력은 MAVLink 해독기가 만든 **정규화 CSV**입니다. Pixhawk의 UART/UDP MAVLink 패킷을 직접 해독하는 기능과 최종 저장 서버는 포함하지 않습니다.
+
+```text
+센서/Pixhawk → MAVLink 해독·시각/좌표 정렬 → 이 프로그램 → HTTP/HTTPS 저장 서버
+```
+
+## 파일은 어디에 있나요?
+
+소스를 받은 폴더에서 실행 파일은 다음 위치에 있습니다. 소스만 내려받았다면 아래 빌드 절차를 먼저 수행하세요.
+
+```text
+src/                             프로그램·개발 검사 소스
+config/telemetry.ini.example     설정 예제
+examples/example.csv             실행 확인용 가상 관측
+build/
+  windows-x64/
+    mavlink_telemetry_data_router_headless.exe
+    mavlink_telemetry_data_router_interactive.exe
+    tests/                       개발 검사를 선택한 경우에만 생성
+  linux-x64/
+    mavlink_telemetry_data_router_headless
+    mavlink_telemetry_data_router_interactive
+    tests/                       개발 검사를 선택한 경우에만 생성
+  packages/                      Windows ZIP, Linux TAR.GZ, 소스 패키지
+```
+
+Windows와 Linux용 운용 프로그램은 **각각 2개, 합계 4개**입니다. 실행 파일은 자신이 사용할 OS의 것으로 선택합니다. 배포 ZIP/TAR.GZ를 받았다면 두 프로그램은 압축 안의 `bin/`에 있습니다. 아래 실행 예제는 소스 폴더 기준이므로 배포본에서는 프로그램 경로를 `bin/`으로 바꾸고 설정·예제 경로도 실제 위치에 맞춥니다.
+
+## 먼저 예제로 실행하기
+
+아래 명령은 **저장소 루트 폴더**에서 실행합니다. 기본 설정의 `url=-`는 서버에 접속하지 않고 JSON을 출력하는 시험 모드입니다. 여기서는 JSON을 버리고 상태 화면만 봅니다.
+
+Windows PowerShell:
 
 ```powershell
 Copy-Item .\config\telemetry.ini.example .\telemetry.ini
-Get-Content .\examples\example.csv | .\build\windows-x64\telemetry_monitor.exe --config .\telemetry.ini 1>$null
+Get-Content .\examples\example.csv | .\build\windows-x64\mavlink_telemetry_data_router_interactive.exe --config .\telemetry.ini 1>$null
 ```
 
-실제 운용은 MAVLink 해독기의 CSV 출력을 파이프로 연결한다. 짧은 예제 파일은 EOF 직후 종료하므로, 계속 갱신되는 화면/설정 편집은 실행 중인 입력 소스에서 사용한다.
-Linux 예: `your_decoder | telemetry_monitor --config ./telemetry.ini`.
-실제 서버 URL로 운용할 때 JSON 표준출력은 비어 있다. 시험 모드에서 JSON도 터미널에 출력하면 TUI와 섞이므로 `/dev/null` 또는 PowerShell `$null`로 보낸다.
-관측 저장을 원하지 않으면 JSON 출력을 파일로 리디렉션하지 않는다.
+Linux:
 
-- `e`: 설정 화면. 위/아래 또는 번호+Enter로 필드를 선택하고 편집한다.
-- `Ctrl+U`: 필드 지우기, Backspace: 한 글자 지우기, Enter: 검증, Esc: 편집 취소.
-- `s`: 검증된 설정을 임시 파일에 완성한 뒤 원자적으로 교체한다. 실패 시 기존 설정을 보존한다.
-- Esc 또는 `q`: 설정 화면에서 돌아온다. 저장하지 않은 변경은 버린다. `q`는 수집기를 종료하지 않는다.
+```sh
+cp config/telemetry.ini.example telemetry.ini
+./build/linux-x64/mavlink_telemetry_data_router_interactive --config ./telemetry.ini < examples/example.csv > /dev/null
+```
 
-**저장된 변경은 재시작 후 적용**한다. 실행 중 ACTIVE 서버/stream/session/좌표 원점은 고정하므로 미확인 배치가 다른 서버/식별자로 이동하지 않는다.
-재시작은 입력 소스를 정상 종료해 큐를 확인받은 후 수행한다. 실패 종료의 pending 자료는 RAM에만 있으므로 프로세스 종료와 함께 사라진다.
-세션은 Pixhawk boot/관측 원점을 식별하도록 설정하고, boot/원점이 바뀌면 새 session을 지정한다.
-키보드는 Windows `CONIN$` 또는 Linux `/dev/tty`에서 읽는다. CSV stdin 자체가 터미널이면 편집을 비활성화해 같은 입력을 가로채지 않는다.
-표준오류가 리디렉션되면 ANSI 제어문자 없이 1Hz 상태를 출력하고 편집은 비활성화된다. 터미널에서는 위/아래로 key 목록을 스크롤한다.
+예제 파일을 모두 읽으면 프로그램이 종료됩니다. 계속 갱신되는 화면과 설정 편집을 사용하려면 실제 해독기의 CSV 출력을 연결해야 합니다. 다음 `your_decoder`는 그 해독기 실행 명령으로 바꿉니다.
 
-설정은 UTF-8 `key=value`다. Windows 한글 경로를 지원하며 알 수 없는 키·중복·범위 밖 값·잘린 행은 시작 전에 거부한다.
+```sh
+your_decoder | ./build/linux-x64/mavlink_telemetry_data_router_interactive --config ./telemetry.ini
+```
 
-| 설정 | 기본값 / 범위 |
+화면 없이 실행하려면 같은 위치의 `_headless` 프로그램을 선택합니다.
+
+## 실제 서버로 보내기
+
+`telemetry.ini`에서 우선 다음 항목을 설정합니다.
+
+| 항목 | 설정할 내용 |
 |---|---|
-| url | 필수. `https://HOST/path`, `http://HOST/path`, 시험용 `-`; URL userinfo 금지 |
-| stream, session | 필수. ASCII 영숫자/`_-.`, 1–64자 |
-| token_env | `TB_TOKEN`. 토큰 **값** 대신 환경변수 이름 |
-| origin_lat/lon/alt | 기본0. WGS84 deg/deg/타원체고 m; 실제 관측 원점으로 설정 |
-| send_interval_ms | 1000, 1000–60000; 재시도 포함 요청 시작 간격 |
-| connect_timeout_ms / io_timeout_ms | 각각1000, 100–60000 |
-| max_windows | 4, 1–컴파일 한도4; 요청당 최대 구간 수 |
-| refresh_ms | 1000, 250–10000; 터미널 화면 갱신 |
-| idle_warn_ms / ack_warn_ms | 2000 / 5000, 250–3600000; 화면 경고 기준 |
-| summary | 0. 1이면 전송 원본을 생략하고 통계만 전송 |
+| `url` | 서버의 수신 주소. 예: `https://YOUR_SERVER/ingest` |
+| `stream` | 관측 장치나 데이터 흐름을 구분하는 이름 |
+| `session` | Pixhawk 부팅 또는 관측 실행마다 새로 정하는 식별자 |
+| `origin_lat`, `origin_lon`, `origin_alt` | 위치 좌표의 기준 원점. 위도·경도·타원체고 |
+| `token_env` | 인증 토큰을 담을 환경변수 이름. 기본 `TB_TOKEN` |
 
-Windows I/O timeout은 단계별 제한이다. Linux 총 요청 timeout은 `connect_timeout_ms + 2*io_timeout_ms`다. 동일한 전체 요청 최악시간을 보장하는 설정이 아니다.
-토큰은 OS 환경에서 제공한다. 화면에는 환경변수 이름과 set/missing만 보이고 URL query는 숨긴다. 설정 파일에는 query 문자열이 그대로 저장되므로 인증정보는 query 대신 토큰 환경변수로 관리한다.
-기존 위치 인자 실행법과 `--summary`, `--sizes`는 유지하며 `--no-monitor`로 화면을 끌 수 있다.
+인증 토큰 **값**은 설정 파일 대신 지정한 환경변수에 넣습니다. `send_interval_ms=1000`은 서버 요청 시작 간격이며 센서 수신 빈도를 제한하지 않습니다.
 
-## CMake 소스·빌드·패키지 트리
+interactive 화면에서 `e`로 설정을 열고, 항목을 고쳐 Enter로 확인한 다음 `s`로 저장할 수 있습니다. **저장한 설정은 재시작 후 적용**됩니다. 미확인 자료가 남았다면 먼저 정상 전송을 마친 뒤 재시작하세요.
 
-모든 프로그램·테스트 소스는 `src/`에, 생성 파일과 네 실행 파일은 `build/`에 둔다.
-기본 빌드는 **Windows x64 수집기/모니터와 Linux x64 수집기/모니터**다. Intel/AMD x64에 같은 실행 파일을 사용한다.
-Debug는 별도 선택 사항이며 기본 네 실행 파일을 덮어쓰지 않는다.
+화면에서는 수신률, 거부·누락 수, 대기 큐, HTTP 결과, 서버 확인 수, GPS 시각 추정 상태를 확인할 수 있습니다. 전체 설정과 키보드 조작은 [상세 사용법](docs/REFERENCE.md#상태-모니터와-서버-설정)에 있습니다.
 
-```text
-mavlink-server-transfer/
-├── CMakeLists.txt
-├── CMakePresets.json           # 공유 빌드·테스트·패키지 설정
-├── cmake/                     # 아키텍처 검증·툴체인 설정
-├── src/
-│   ├── CMakeLists.txt
-│   ├── sender.c
-│   ├── telemetry.c / telemetry.h
-│   ├── time_sync.c / time_sync.h
-│   ├── config.c / config.h
-│   ├── monitor.c / monitor.h
-│   └── tests/                 # C·Python 검증 소스
-├── config/telemetry.ini.example
-├── examples/example.csv
-├── docs/REVIEW.md
-└── build/
-    ├── windows-x64/
-    │   ├── telemetry_send.exe
-    │   └── telemetry_monitor.exe
-    ├── linux-x64/
-    │   ├── telemetry_send
-    │   └── telemetry_monitor
-    ├── packages/              # CPack ZIP/TGZ, 소스 패키지
-    └── stage/                 # 설치 트리
-```
+## 서버가 꺼져 있으면 어떻게 되나요?
 
-`build/`와 개인별 `CMakeUserPresets.json`은 Git에서 제외한다. 공유 설정은 `CMakePresets.json`으로 관리한다.
-빌드·테스트 결과와 플랫폼별 실제 실행 범위는 [검증 기록](docs/REVIEW.md)을 확인한다.
-Windows 검증을 Linux 검증으로 간주하지 않는다. 한 OS의 native preset만 실행하면 해당 OS의 두 파일이 생성된다.
-나머지 OS에서도 같은 소스를 빌드하거나, 대상 라이브러리를 갖춘 명시적 교차 툴체인을 사용해야 한다.
+입력이 계속 열려 있는 동안에는 관측 수신과 interactive 화면 갱신이 계속됩니다. 전송에 실패한 자료는 메모리에 보관하고 다시 시도합니다.
 
-### 공유 preset
+서버가 모든 배치를 확정 수락한 뒤 **HTTP 204**를 반환하면 해당 자료의 메모리 공간을 재사용합니다. 200·202 등 다른 응답이나 연결 실패는 확정 수락으로 처리하지 않습니다. 서버도 배치 식별자로 중복을 제거해야 합니다.
 
-CMake 3.21 이상과 Ninja를 사용한다. 기본 최적화는 실행 파일 크기를 줄이는 `MinSizeRel`이다.
+메모리는 무한하지 않습니다. 대기 큐는 최대 8개 구간이고, 가득 차면 새 구간을 버리며 손실을 표시합니다. 관측은 디스크에 자동 저장하지 않습니다. 입력이 끝난 뒤에도 전송 실패가 계속되면 미전송 수를 알리고 종료하므로, 남은 메모리 자료는 소실됩니다.
 
-| 목적 | Windows x64 | Linux x64 |
-|---|---|---|
-| 구성 | `cmake --preset windows-x64` | `cmake --preset linux-x64` |
-| 빌드 | `cmake --build --preset windows-x64` | `cmake --build --preset linux-x64` |
-| C 테스트 | `ctest --preset windows-x64` | `ctest --preset linux-x64` |
-| 설치 트리 | `cmake --install build/windows-x64` | `cmake --install build/linux-x64` |
-| 패키지 | `cmake --build --preset package-windows-x64` | `cmake --build --preset package-linux-x64` |
-| Debug 구성·빌드·테스트 | `windows-x64-debug` | `linux-x64-debug` |
+## 소스에서 빌드하기
 
-Debug는 위 명령의 preset 이름을 바꾸며 결과는 `build/windows-x64-debug/`, `build/linux-x64-debug/`에 생성한다.
-CPack 패키지는 `build/packages/`에 모으며 관측 자료는 패키지나 디스크에 저장하지 않는다.
-설치 기본 위치는 `build/stage/<platform>/`이다. 실제 시스템 설치는 `cmake --install build/linux-x64 --prefix "$HOME/.local"`처럼 명시한다.
+CMake 3.21 이상과 Ninja, 대상 OS의 x64 C 컴파일러가 필요합니다. 일반 빌드는 운용 프로그램 2개만 만듭니다.
 
-### Windows x64
-
-LLVM-MinGW의 x64 `clang`과 Ninja를 PATH에 둔 환경에서 실행한다.
-MSVC 대상 Clang을 쓰면 x64 Visual Studio 개발 환경과 해당 Windows SDK가 필요하다.
-같은 빌드 디렉터리에서 서로 다른 컴파일러의 캐시를 섞지 않는다.
+Windows는 LLVM-MinGW의 x64 Clang과 Ninja를 PATH에 둔 뒤 실행합니다.
 
 ```powershell
 cmake --preset windows-x64
 cmake --build --preset windows-x64
-ctest --preset windows-x64
 cmake --build --preset package-windows-x64
-Copy-Item .\config\telemetry.ini.example .\telemetry.ini
-Get-Content .\examples\example.csv | .\build\windows-x64\telemetry_monitor.exe --config .\telemetry.ini 1>$null
 ```
 
-컴파일러 경로가 PATH에 없다면 첫 구성 때 `-DCMAKE_C_COMPILER=C:/YOUR_TOOLCHAIN/bin/clang.exe`로 지정한다.
-머신별 설정을 보존할 때는 저장소 루트에 다음 `CMakeUserPresets.json`을 만들고 로컬 경로를 입력한다.
-공유 preset에는 개인 절대 경로를 넣지 않는다. 로컬 preset도 기본 `build/windows-x64`를 사용한다.
-
-```json
-{
-  "version": 3,
-  "configurePresets": [
-    {
-      "name": "windows-local",
-      "inherits": "windows-x64",
-      "cacheVariables": {
-        "CMAKE_C_COMPILER": "C:/YOUR_TOOLCHAIN/bin/clang.exe",
-        "CMAKE_MAKE_PROGRAM": "C:/YOUR_NINJA/ninja.exe"
-      }
-    }
-  ]
-}
-```
-
-최초 구성은 `cmake --preset windows-local`, 이후 빌드·테스트는 공유 `windows-x64` preset을 사용한다.
-`TB_TARGET_ARCH=x64`는 컴파일러의 **실제 출력 대상 검사 조건**이며 컴파일러 타깃을 바꾸는 옵션이 아니다.
-32비트·다른 아키텍처이면 구성 단계에서 실패하고, `src/tests/test_arch.py`가 실제 PE/ELF 실행 파일도 검사한다.
-
-### Linux x64 설치·빌드
-
-Ubuntu/Debian x64의 개발 도구·libcurl가 필요하다. Windows는 WinHTTP, Linux는 libcurl와 pthread를 사용한다.
-실제 프로젝트 화면에서 복사한 clone URL로 자리표시자를 바꾼다.
+Linux는 회사 GitLab 등의 저장소 화면에서 복사한 clone URL을 사용합니다. 아래 자리표시자를 실제 주소로 바꿉니다.
 
 ```sh
 sudo apt-get update
-sudo apt-get install git cmake ninja-build build-essential libcurl4-openssl-dev python3
-git clone YOUR_REPOSITORY_CLONE_URL telemetry-batch
-cd telemetry-batch
+sudo apt-get install git cmake ninja-build build-essential libcurl4-openssl-dev
+git clone YOUR_REPOSITORY_CLONE_URL mavlink_telemetry_data_router
+cd mavlink_telemetry_data_router
 cmake --preset linux-x64
 cmake --build --preset linux-x64
-ctest --preset linux-x64
 cmake --build --preset package-linux-x64
 sh install.sh
 ```
 
-`install.sh`는 기본 `build/linux-x64/`를 사용하고 `$HOME/.local/bin/telemetry_send`와 `telemetry_monitor`에 설치한다.
-`PREFIX=/원하는/경로 sh install.sh`로 설치 위치를 바꾸고 `BUILD_DIR=/원하는/빌드경로`로 빌드 위치를 바꾼다.
-실행 환경에도 x64 동적 로더와 libcurl/TLS 라이브러리가 필요하며 정적 단일 바이너리 배포를 보장하지 않는다.
-Ubuntu/PX4/Gazebo 의존성이 없는 중계기이며 특정 Ubuntu 버전의 실행 검증은 검증 기록과 구분한다.
+Linux 설치 기본 위치는 `$HOME/.local/bin`이며 `PREFIX=/원하는/경로 sh install.sh`로 바꿀 수 있습니다. Linux 실행에도 libcurl와 호환되는 시스템 라이브러리가 필요합니다.
 
-### Windows에서 Linux x64도 교차 빌드
+Windows에서 Linux용 파일도 교차 컴파일할 수 있습니다. 절차·컴파일러 경로 설정·Debug 빌드는 [상세 빌드 안내](docs/REFERENCE.md#cmake-소스빌드패키지-트리)를 참고하세요.
 
-이 작업 폴더에는 Windows x64 두 파일과 Linux x64 두 파일을 실제로 생성했다. Windows 실행 시험은 통과했으며 Linux는 교차 빌드·ELF·의존성 검사까지 수행했다. Linux 런타임 실행은 검증하지 않았다.
+## test_ 프로그램은 왜 있나요?
 
-Windows의 LLVM-MinGW Clang22/LLD, Ninja, Python3.9 이상을 PATH에 둔 뒤 아래를 실행한다. 일반 Linux native 빌드에는 이 절차가 필요 없다.
+`test_`로 시작하는 파일은 **개발자가 변경 후 오류를 확인하는 검사 도구**입니다. 수집기나 서버가 아니며 운용 프로그램이 호출하지도 않습니다. 평소에 실행하거나 배포할 필요가 없습니다.
+
+| 개발 검사 | 확인하는 것 |
+|---|---|
+| `test_telemetry` | 평균·분산, 관측 순서, 용량 초과, 위치 보간, JSON 생성 |
+| `test_time_sync` | UTC 추정, 시계 드리프트, 큰 시각 값, 잘못된 동기화 입력 |
+| `test_config` | 설정값 범위, 인증정보 숨김, 한글 경로, 저장 실패 시 기존 파일 보존 |
+
+세 검사를 하나의 프로그램으로 합칠 수도 있습니다. 현재는 **어느 부분이 실패했는지 구분하기 쉽도록** 나눴습니다. 검사 코드는 운용 프로그램에 포함되지 않으므로, 분리된 검사 프로그램이 있어도 운용 중 CPU·메모리 사용이나 실행 파일 크기는 늘지 않습니다.
+
+검토 결과 검사는 유지하고 **필요할 때만 빌드**하도록 했습니다. 기본값은 `BUILD_TESTING=OFF`이며, 검사를 켜면 결과를 `build/<OS>/tests/`에 따로 만듭니다. 배포 ZIP/TAR.GZ에는 운용 프로그램 2개와 문서·설정 예제 등이 들어가며 `test_` 실행 파일은 제외됩니다.
+
+개발자가 Windows에서 검사하려면:
 
 ```powershell
-python -m pip install --target build/toolchains/python-deps zstandard
-$env:PYTHONPATH = "$PWD/build/toolchains/python-deps"
-python cmake/toolchains/prepare-linux-x64.py
-$python = (Get-Command python).Source
-cmake -S . -B build/linux-x64 -G Ninja `
-  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/linux-x64-cross.cmake `
-  -DCMAKE_BUILD_TYPE=MinSizeRel -DBUILD_TESTING=ON `
-  "-DTB_LINUX_PYTHON=$python" `
-  "-DCMAKE_INSTALL_PREFIX=$PWD/build/stage/linux-x64"
-cmake --build build/linux-x64 --parallel 2
-cmake --build build/linux-x64 --target package
+cmake --preset windows-x64-tests
+cmake --build --preset windows-x64-tests
+ctest --preset windows-x64-tests
 ```
 
-준비 스크립트는 공식 Ubuntu22.04 패키지를 HTTPS로 받고 SHA256를 확인한 뒤 `build/toolchains/`에만 추출한다. 패키지를 OS에 설치하거나 패키지 설치 스크립트를 실행하지 않는다. sysroot와 Python 추가 모듈은 배포물에 포함하지 않는다.
-생성 ELF는 glibc2.34 이상과 OpenSSL 계열 `libcurl.so.4`를 필요로 한다. 교차 패키징은 TGZ 안의 두 실행 파일 권한도 `0755`로 보정한다.
-교차 빌드 디렉터리를 Linux로 복사해 native CMake 캐시로 재사용하지 않는다. Linux에서 새로 빌드할 때는 소스만 가져와 native preset으로 구성한다.
-### 통합 검증·패키지
+Linux에서는 위 이름의 `windows`를 `linux`로 바꿉니다. CTest가 세 검사기를 실행하고 결과를 모아 보여 줍니다. HTTP 재시도·서버 확인·동시 수신·interactive 화면은 별도 Python 통합 검사로 확인합니다.
 
-핵심 검증은 이미 해당 플랫폼으로 빌드한 실행 파일에 수행한다. Linux 예시이며 Windows는 실행 파일에 `.exe`를 붙인다.
+검사 프리셋은 같은 플랫폼 빌드 폴더를 재사용합니다. 일반 프리셋으로 다시 구성하면 검사가 OFF로 돌아가지만, 이미 생성된 `tests/` 파일을 자동 삭제하지는 않습니다. 그 파일은 실행 중인 서비스가 아닙니다.
 
-```sh
-python3 src/tests/test_arch.py build/linux-x64/telemetry_send --arch x64
-python3 src/tests/test_arch.py build/linux-x64/telemetry_monitor --arch x64
-python3 src/tests/test_core.py --skip-build --executable ./build/linux-x64/test_telemetry --bench
-python3 src/tests/test_sender.py ./build/linux-x64/telemetry_send
-python3 src/tests/test_confirmation.py ./build/linux-x64/telemetry_send
-python3 src/tests/test_monitor.py ./build/linux-x64/telemetry_send --monitor-executable ./build/linux-x64/telemetry_monitor
-python3 src/tests/test_sender_limits.py ./build/linux-x64/telemetry_send
-cmake --build --preset package-linux-x64
-cmake --build build/linux-x64 --target package_source
-```
+## 상세 자료와 검증 범위
 
-GitHub/GitLab CI도 같은 preset·폴더를 사용하며 대상별 실행 파일 두 개와 패키지를 산출물로 보존한다.
-CI 정의를 작성한 것과 CI를 실제 실행해 통과한 것은 구분한다. 자동 원격 게시나 서버 연결은 수행하지 않는다.
-CMake preset 형식은 [CMake 3.21 공식 설명](https://cmake.org/cmake/help/v3.21/manual/cmake-presets.7.html)을 따른다.
+- [기술 참조](docs/REFERENCE.md): 입력 CSV·키/단위 규칙, GPS/UTC·좌표, 통계·오차 추정, 서버 규약, 교차 빌드, 전체 검사 절차
+- [검토·검증 기록](docs/REVIEW.md): 실제 시험 결과, 계산량·메모리, 알려진 한계
 
-### 원격 저장소 게시
-
-이 폴더가 저장소 루트다. 회사 GitLab·`prj.uaslaboratory.synology.me`는 실제 clone URL을 설정해 게시한다.
-웹 호스트만으로 clone URL을 추측하지 않는다. 저장소 화면에서 복사한 주소로 자리표시자를 바꾼다.
-
-```sh
-git remote add origin YOUR_GITLAB_CLONE_URL
-git push -u origin main
-```
-
-## 실행과 관측 입력
-
-`telemetry_send URL|- STREAM SESSION ORIGIN_LAT ORIGIN_LON ELLIPSOID_ALT [--summary]`
-Windows 예: `Get-Content .\examples\example.csv | .\build\windows-x64\telemetry_send.exe - env1 trial-unique-001 37 127 100`.
-Linux 예: `telemetry_send https://SERVER/ingest env1 trial-unique-002 37 127 100 < examples/example.csv`.
-URL `-`는 JSON을 표준출력에 출력한다. `TB_TOKEN`이 있으면 Bearer 인증 헤더에 사용한다.
-STREAM/SESSION은 ASCII 영숫자·`_ - .`의 1~64자다. 매 부팅·실행에 고유 SESSION을 사용한다.
-원점은 실행 동안 고정된 WGS84 위도/경도(deg)·**타원체고(m)**이며 위치/속도는 ENU m/m·s⁻¹다.
-PX4 NED→ENU는 축 `(y,x,-z)` 변환과 원점 일치가 필요하다. MSL 고도와 타원체고의 차이는 어댑터가 보정한다.
-원점·시계가 재설정되면 새 SESSION/프로세스로 시작한다. 프로그램이 시계 종류를 수치 크기로 추측하지 않는다.
-
-관측 한 줄은 다음 **15필드**다. `#` 주석/빈 줄은 무시하고 1,023자를 넘는 줄은 거부한다.
-
-```text
-t_us,seq,quality,key,unit,value,east_m,north_m,up_m,ve_mps,vn_mps,vu_mps,time_uncert_us,nav_age_us,pos_error_m
-```
-
-- `t_us`: 실제 관측시각을 Pixhawk boot microseconds(uint64)로 정렬한 값. PC/서버 수신시각이 아니다.
-- `seq/quality`: uint32. seq는 key별 관측 순번, quality는 의미를 상위에서 정하는 보존용 비트마스크다.
-- `key`: 최대31자 `[A-Za-z_][A-Za-z0-9_.-]*`; `unit`: 최대15자 `[A-Za-z0-9_./%*^+-]+`.
-- `value`: double 숫자 또는 `nan`. 신규 key는 자동 등록하며 기본 최대16개/SESSION, 같은 key의 단위는 SESSION 동안 고정한다.
-- 위치/속도는 그 관측시각의 값이다. `time_uncert_us`는 센서 관측과 항법의 **상대 시각 정렬오차 추정**, 기본 최대20,000µs다.
-- `nav_age_us`는 정렬에 쓴 항법과 관측의 시간 거리이며 보간 시 양쪽 중 큰 거리, 기본 최대200,000µs다.
-- `pos_error_m`는 시각 오차 항을 제외한 위치오차 추정이다. 음수/비유한 값은 거부한다.
-- 위치·속도·유효 value의 절댓값은 ≤1e9다. 물리량별 정상 범위·교정·품질판정은 어댑터가 수행한다.
-
-전체 입력 관측의 t는 비감소, 같은 key의 t와 seq는 각각 엄격히 증가해야 한다. 서로 다른 key는 같은 t를 가질 수 있다.
-UDP 순서 역전은 입력 전에 정렬한다. 같은 측정값을 통신 주기마다 새 관측으로 재등록하지 않는다.
-서로 다른 측정 주기의 key는 새 값이 생겼을 때만 행을 추가한다. 누락값은 JSON null이며 그 key의 통계 n에서 제외된다.
-MAVLink 헤더 8비트 순번은 여러 메시지가 공유하므로 관측 seq로 쓰지 않는다. 시각 없는 메시지는 별도 측정시각 정보가 필요하다.
-
-## UTC 추정과 구간 마감
-
-제어 행은 `@clock,boot_us,utc_unix_us,gnss_uncert_us,rtt_us`와 `@watermark,W`다.
-clock은 **동일 부팅의 동시 시각 대응점**이다. UTC는 Unix µs이며 GPS/TAI 시간은 상위에서 UTC로 변환한다.
-GNSS·시각 포착 오차 및 SYSTEM_TIME boot-ms 양자화는 gnss_uncert_us에 포함하고 실제 교환 RTT를 제공한다.
-TIMESYNC는 장치 간 상대 시계차/RTT 추정에 쓰며 UTC 기준 자체를 만들어 주지는 않는다.
-최근16개 anchor에 중심화 OLS를 적용하고 기본 ±500ppm 필터·마지막 anchor 후 최대10초 외삽을 사용한다.
-추정 UTC 오차는 max anchor uncertainty + ceil(max RTT/2) + max fit residual + nearest-anchor age × 500ppm + 수치 반올림 여유다.
-이는 제공된 오차/드리프트 가정에 의존하는 **공학적 추정**이며 95% 신뢰구간이나 절대 정확도 보증이 아니다.
-짧은 anchor 간격의 잡음은 엄격한 드리프트 필터에 거부될 수 있다. RTT 비대칭·GPS→UTC 변환·UTC step도 별도 고려한다.
-anchor의 boot/UTC는 각각 증가해야 한다. 부팅/UTC step·불연속은 새 SESSION/모델 초기화가 필요하다.
-anchor 부재·범위 밖·오래된 모델이어도 관측은 보존하고 utc_us/utc_uncert_us를 null로 보낸다. 과거 행은 소급 재보정하지 않는다.
-UTC 절대오차는 상대 time_uncert_us와 별개다. 상대 정렬에 공통인 UTC 오차를 위치오차에 다시 더하지 않는다.
-
-구간은 boot 시각의 `[floor(t/1e6)*1e6, +1초)`다. 다음 구간 관측, EOF, 또는 충분히 진행한 watermark가 마감한다.
-watermark는 앞으로 `t<W` 관측이 오지 않는다는 상위 소스의 선언이다. 이후 `t<W`는 거부하고 `t==W`는 허용한다.
-W는 비감소이며 마지막 관측의 t 이상이어야 한다. 현재 구간이 없어도 기억한다. 이미 마감한 구간은 다시 열지 않는다.
-PC에서 입력이 잠시 없다는 이유로 자동 마감하지 않는다. 따라서 고정1초 지연이나 벽시계 정시 업로드를 보장하지 않는다.
-`examples/example.csv`는 boot0 UTC anchor, 100m/s 이동 중 두 key의 10Hz 관측 세 번, W=2초, 다음 구간의 새 key를 보여 준다.
-
-## 통계·보간·출력 스키마
-
-key마다 Welford로 유효 n·평균·표본분산 M2/(n−1)·최소·최대를 누적한다. n=0 통계와 n<2 분산은 null이다.
-시간 불확도의 평균/최대, `pos_error_m + ||v||*time_uncert_us/1e6`의 평균/최대도 유효 value만 집계한다.
-평균은 표본 가중이며 시간/거리 가중이 아니다. 분산은 센서 정확도·공간 분해능·독립 표본의 신뢰구간이 아니다.
-코어 `tb_align`은 같은 시계·SESSION의 양 끝 항법 사이 선형 보간만 수행하며 외삽/200ms 초과 간격을 거부한다.
-위치오차는 끝점 오차의 선형 보간 + `A*Δt²/8`이다. 마지막 항은 실제 전 구간 가속도 크기가 A 이하일 때만 수학적 상한이다.
-센서 응답/흡입관 지연을 모르면 자동 역보정하지 않는다. 100m/s에서 10Hz는 약10m, 100ms 시간오차도 약10m다.
-원본은 관측 경로의 재집계·보간에 쓸 수 있지만 미관측 물리장을 유일하게 복원하지 못한다. summary는 위치별 원본 복원에 불충분하다.
-
-JSON은 자체 `schema:2`이며 OGC SensorThings/SensorML API 호환을 주장하지 않는다.
-최상위에 stream/session, 고정 ENU 원점, 시계 기준, field_order, 누적 loss, clock_model, batches를 포함한다.
-clock_model은 송신 시점의 모델 진단이며, 각 행 UTC/오차는 수신 시 적용한 추정값을 보존한다.
-각 raw 행의 **17필드**는 출력 field_order 그대로다(입력 CSV 순서와 다름).
-
-```text
-t_us,seq,quality,key,unit,east_m,north_m,up_m,ve_mps,vn_mps,vu_mps,value,time_uncert_us,nav_age_us,pos_error_m,utc_us,utc_uncert_us
-```
-
-t_us/window_us/known utc_us와 누적 loss는 64비트 정밀도를 위해 십진 문자열이다. UTC 미상은 마지막 두 필드 모두 null이다.
-`tb_batch_prepare`가 raw를 (t_us,key,seq), 통계를 key로 정렬한다. 동일 관측 집합·key별 순서를 가진 비포화 배치는 바이트가 일치한다.
-포화 시 먼저 도착한512행만 보존하므로 retained subset은 도착 순서에 의존한다. stats에는 초과 관측도 포함한다.
-
-## 서버·손실·계산량
-
-배치 식별키는 **(stream,session,window_us)**다. 서버는 요청 내 모든 배치를 영속 저장/영속 큐 수락한 뒤에만 204로 ACK한다.
-서버는 식별키로 중복을 제거해야 한다. ACK 유실 재시도가 가능하며 HTTP exactly-once 전달을 보장하지 않는다.
-송신 시작은 초당 최대1회, HTTP 요청 하나에 최대4구간, 완성 대기 큐8개다. 느린 요청 뒤에도 몰아서 시작하지 않는다.
-기본 원시512관측/초는 100Hz × 4key = 400행/초를 수용한다. raw 초과는 raw_dropped와 통계에 반영한다.
-큐 포화는 새 배치를 버리고 전송 중 자료를 보존한다. 전역 손실 카운터는 서로 겹칠 수 있으므로 합산해 손실률로 쓰지 않는다.
-EOF 후 연속 전송3회 실패하면 종료2와 pending을 남긴다. 종료0=정상,1=설정/시작 오류,2=거부·손실·미전송/실행 오류다.
-디스크 spool은 없다. 전원 종료 시 최대 대기8+진행1구간(보존 raw 최대4,608행) 및 그 통계가 소실될 수 있다.
-장기 단절 무손실이 필요하면 상위 원본 기록이나 영속 spool을 추가해야 한다.
-
-수신 추가는 O(16), 경계 복사·초기화는 O(512), 송신 스레드 heapsort는 O(N log N), JSON은 O(N)이다.
-네트워크·정렬·JSON은 송신 스레드에서 수행한다. 초 경계 복사/초기화의 짧은 잠금 비용도 실시간 예산에 포함해야 한다.
-CPU 예산은 `f_observation*C_add + f_window*C_seal + f_request*C_encode`로 나눠 산정한다. 요청 묶음은 원본 정보량을 줄이지 않는다.
-검증 PC에서 sample136B/batch71,840B. 백만 정상 추가의 5회 중앙값은 약76ns/건(초기화 포함, 정렬·JSON·네트워크 제외)이었다.
-이는 MCU 예측값이 아니다. 실제 실행파일/전체 고정 RAM/검증 범위는 [검증 기록](docs/REVIEW.md), 해당 빌드는 `telemetry_send --sizes`로 확인한다.
-
-## 설계 근거
-
-[OGC SensorThings](https://docs.ogc.org/is/18-088/18-088.html)는 관측 phenomenonTime과 결과 생성 resultTime을 구분한다.
-[OGC SensorML](https://docs.ogc.org/is/23-000/23-000.html)은 시간·공간 기준틀과 시각이 붙은 위치를 명시한다.
-[MAVLink TIMESYNC](https://mavlink.io/en/services/timesync.html)는 반복 교환/RTT 기반 시계차 추정과 필터링을 설명한다.
-[WMO 관측망 품질 지침](https://etrp.wmo.int/pluginfile.php/90334/mod_folder/content/0/INFCOM-3-RWCS-TECHNICAL-GUIDELINES-approved_updates.pdf)은 관측시각과 데이터베이스 수신시각을 구분해 지연을 평가한다.
-
-## 2026-10-19: 서버 확정 수락과 메모리 반환
-
-서버는 요청의 모든 배치를 영속 저장 또는 영속 큐에 확정 수락한 다음에만 HTTP 204를 반환한다. 이 프로그램은 204에만 해당 배치를 큐에서 제거하고 고정 버퍼를 재사용한다. 200/201/202 등 다른 상태나 전송 오류에는 자료와 배치 ID를 유지하여 재시도한다. HTTP 상태 코드 자체가 저장을 강제하지는 않으므로 이 규칙은 서버와 중계기의 애플리케이션 계약이다. TCP ACK는 바이트 전달 확인이며 이 확정 수락 응답을 대체하지 않는다. 서버는 (stream,session,window_us)로 중복을 제거하고 이미 확정 수락한 중복 요청에도 204로 답해야 한다. 큐에서 제거해도 버퍼 바이트를 즉시 0으로 지우지는 않는다. 다음 자료를 받을 때 같은 공간을 재사용하므로 메모리는 누적되지 않는다.
-
-소스와 실행 파일의 작업 위치: C:\Users\pjs20\OneDrive\문서\New project 3\mavlink-server-transfer. 원격 Git 서버는 설정하지 않았다.
+Windows x64는 실제 실행 시험을 통과했습니다. Linux x64 파일은 Windows에서 실제 교차 컴파일하고 ELF 형식·의존성을 확인했으며, Linux에서의 직접 실행은 아직 검증하지 않았습니다.

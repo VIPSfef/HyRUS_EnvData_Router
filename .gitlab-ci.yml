@@ -13,27 +13,27 @@ linux-x64:
     - DEBIAN_FRONTEND=noninteractive apt-get install -y cmake ninja-build gcc libcurl4-openssl-dev:amd64 python3
   script:
     - |
-      cmake --preset linux-x64 -DCMAKE_C_COMPILER=gcc \
+      cmake --preset linux-x64-tests -DCMAKE_C_COMPILER=gcc \
         -DCMAKE_C_FLAGS=-m64 -DCMAKE_EXE_LINKER_FLAGS=-m64 \
         -DCURL_NO_CURL_CMAKE=TRUE \
         -DCURL_INCLUDE_DIR=/usr/include/x86_64-linux-gnu \
         -DCURL_LIBRARY=/usr/lib/x86_64-linux-gnu/libcurl.so
-    - cmake --build --preset linux-x64
-    - python3 src/tests/test_arch.py build/linux-x64/telemetry_send --arch x64
-    - python3 src/tests/test_arch.py build/linux-x64/telemetry_monitor --arch x64
-    - ctest --preset linux-x64
-    - python3 src/tests/test_core.py --skip-build --executable build/linux-x64/test_telemetry
-    - python3 src/tests/test_sender.py build/linux-x64/telemetry_send
-    - python3 src/tests/test_confirmation.py build/linux-x64/telemetry_send
-    - python3 src/tests/test_monitor.py build/linux-x64/telemetry_send --monitor-executable build/linux-x64/telemetry_monitor
-    - python3 src/tests/test_sender_limits.py build/linux-x64/telemetry_send
+    - cmake --build --preset linux-x64-tests
+    - python3 src/tests/test_arch.py build/linux-x64/mavlink_telemetry_data_router_headless --arch x64
+    - python3 src/tests/test_arch.py build/linux-x64/mavlink_telemetry_data_router_interactive --arch x64
+    - ctest --preset linux-x64-tests
+    - python3 src/tests/test_core.py --skip-build --executable build/linux-x64/tests/test_telemetry
+    - python3 src/tests/test_sender.py build/linux-x64/mavlink_telemetry_data_router_headless
+    - python3 src/tests/test_confirmation.py build/linux-x64/mavlink_telemetry_data_router_headless
+    - python3 src/tests/test_monitor.py build/linux-x64/mavlink_telemetry_data_router_headless --interactive-executable build/linux-x64/mavlink_telemetry_data_router_interactive
+    - python3 src/tests/test_sender_limits.py build/linux-x64/mavlink_telemetry_data_router_headless
     - cmake --install build/linux-x64
     - cmake --build --preset package-linux-x64
   artifacts:
-    name: telemetry-linux-x64
+    name: mavlink_telemetry_data_router-linux-x64
     paths:
-      - build/linux-x64/telemetry_send
-      - build/linux-x64/telemetry_monitor
+      - build/linux-x64/mavlink_telemetry_data_router_headless
+      - build/linux-x64/mavlink_telemetry_data_router_interactive
       - build/packages/*.tar.gz
     expire_in: 14 days
 
@@ -43,22 +43,22 @@ windows-x64:
   rules:
     - if: '$RUN_WINDOWS_BUILD == "1"'
   script:
-    - cmake --preset windows-x64 -DCMAKE_C_COMPILER=clang-cl -DCMAKE_C_FLAGS=--target=x86_64-pc-windows-msvc
-    - cmake --build --preset windows-x64
-    - python src/tests/test_arch.py build/windows-x64/telemetry_send.exe --arch x64
-    - python src/tests/test_arch.py build/windows-x64/telemetry_monitor.exe --arch x64
-    - ctest --preset windows-x64
-    - python src/tests/test_core.py --skip-build --executable build/windows-x64/test_telemetry.exe
-    - python src/tests/test_sender.py build/windows-x64/telemetry_send.exe
-    - python src/tests/test_confirmation.py build/windows-x64/telemetry_send.exe
-    - python src/tests/test_monitor.py build/windows-x64/telemetry_send.exe --monitor-executable build/windows-x64/telemetry_monitor.exe
-    - python src/tests/test_sender_limits.py build/windows-x64/telemetry_send.exe
+    - cmake --preset windows-x64-tests -DCMAKE_C_COMPILER=clang-cl -DCMAKE_C_FLAGS=--target=x86_64-pc-windows-msvc
+    - cmake --build --preset windows-x64-tests
+    - python src/tests/test_arch.py build/windows-x64/mavlink_telemetry_data_router_headless.exe --arch x64
+    - python src/tests/test_arch.py build/windows-x64/mavlink_telemetry_data_router_interactive.exe --arch x64
+    - ctest --preset windows-x64-tests
+    - python src/tests/test_core.py --skip-build --executable build/windows-x64/tests/test_telemetry.exe
+    - python src/tests/test_sender.py build/windows-x64/mavlink_telemetry_data_router_headless.exe
+    - python src/tests/test_confirmation.py build/windows-x64/mavlink_telemetry_data_router_headless.exe
+    - python src/tests/test_monitor.py build/windows-x64/mavlink_telemetry_data_router_headless.exe --interactive-executable build/windows-x64/mavlink_telemetry_data_router_interactive.exe
+    - python src/tests/test_sender_limits.py build/windows-x64/mavlink_telemetry_data_router_headless.exe
     - cmake --install build/windows-x64
     - cmake --build --preset package-windows-x64
   artifacts:
-    name: telemetry-windows-x64
+    name: mavlink_telemetry_data_router-windows-x64
     paths:
-      - build/windows-x64/telemetry_send.exe
-      - build/windows-x64/telemetry_monitor.exe
+      - build/windows-x64/mavlink_telemetry_data_router_headless.exe
+      - build/windows-x64/mavlink_telemetry_data_router_interactive.exe
       - build/packages/*.zip
     expire_in: 14 days

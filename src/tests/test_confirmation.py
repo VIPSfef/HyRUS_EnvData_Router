@@ -204,7 +204,7 @@ def confirmed_queue_reuse(executable):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("executable", nargs="?", type=Path,
-                        default=BUILD / ("telemetry_send.exe" if os.name == "nt" else "telemetry_send"))
+                        default=BUILD / ("mavlink_telemetry_data_router_headless.exe" if os.name == "nt" else "mavlink_telemetry_data_router_headless"))
     executable = parser.parse_args().executable.resolve()
     assert executable.is_file(), f"Sender executable not found: {executable}"
     status_confirmation(executable)
