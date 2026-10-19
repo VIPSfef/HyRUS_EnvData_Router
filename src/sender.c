@@ -82,6 +82,9 @@ typedef struct {
 typedef struct {
     mutex_t mutex;
     tb_batch current, queue[QUEUE_CAP];
+    weather_batch weather_current, weather_queue[QUEUE_CAP];
+    uint8_t queue_weather[QUEUE_CAP];
+    uint64_t weather_last_seal_ms;
     unsigned head, count;
     uint64_t last_t, watermark_us, sealed_window;
     metric_state metric[TB_MAX_KEYS];
@@ -104,12 +107,14 @@ typedef struct {
     uint64_t run_nonce, next_batch_id, queue_batch_id[QUEUE_CAP], last_seal_ms;
     double queue_origin[QUEUE_CAP][3];
     tc_report queue_clock[QUEUE_CAP];
-    int queue_have_clock[QUEUE_CAP];
+    int queue_have_clock[QUEUE_CAP], queue_origin_known[QUEUE_CAP];
+    int origin_known;
     uint64_t raw_clock_boot,raw_clock_utc,queue_raw_boot[QUEUE_CAP],queue_raw_utc[QUEUE_CAP];
     uint32_t raw_clock_uncert,queue_raw_uncert[QUEUE_CAP];
 } app;
 static app state; /* Deliberately fixed storage; no large thread-stack objects. */
 static char wire[WIRE_CAP];
+static char bundle_wire[WIRE_CAP]; /* immutable mixed-type 1 Hz envelope */
 static char default_config_path[4096];
 static int config_exists(const char *path) {
 #ifdef _WIN32
@@ -251,9 +256,11 @@ static void seal(app *a) {
     } else {
         unsigned slot = (a->head + a->count) % QUEUE_CAP;
         a->queue[slot] = a->current;
+        a->queue_weather[slot]=0;
         a->queued_at[slot] = now_ms();
         (void)snprintf(a->queue_session[slot],sizeof(a->queue_session[slot]),"%s",a->live ? a->active_session : a->session);
         memcpy(a->queue_origin[slot],a->origin,sizeof(a->origin));
+        a->queue_origin_known[slot]=a->origin_known;
         a->queue_system[slot]=a->source_system; a->queue_component[slot]=a->source_component;
         a->queue_generation[slot]=a->route_generation;
         a->queue_batch_id[slot]=++a->next_batch_id;
@@ -266,6 +273,55 @@ static void seal(app *a) {
     a->have_sealed = 1;
     a->current.n = 0;
     a->last_seal_ms=now_ms();
+}
+/* Same immutable ring and HTTP204 release contract for grouped SI weather.
+ * A sender interval seals a host collection window; it is NOT sensor time. */
+static void seal_weather(app *a) {
+    unsigned slot;
+    if(!a->weather_current.n) return;
+    if(a->count==QUEUE_CAP) {
+        ++a->loss.queue_windows; a->loss.queue_samples+=a->weather_current.n;
+    } else {
+        slot=(a->head+a->count)%QUEUE_CAP;
+        a->weather_queue[slot]=a->weather_current; a->queue_weather[slot]=1;
+        a->queued_at[slot]=now_ms();
+        (void)snprintf(a->queue_session[slot],sizeof(a->queue_session[slot]),"%s",a->active_session);
+        memcpy(a->queue_origin[slot],a->origin,sizeof(a->origin));
+        a->queue_origin_known[slot]=a->origin_known;
+        a->queue_system[slot]=a->source_system; a->queue_component[slot]=a->source_component;
+        a->queue_generation[slot]=a->route_generation;
+        a->queue_batch_id[slot]=++a->next_batch_id;
+        a->queue_have_clock[slot]=tc_get_report(&a->clock,&a->queue_clock[slot]);
+        ++a->count;
+    }
+    weather_batch_init(&a->weather_current,now_ms());
+    a->weather_last_seal_ms=now_ms();
+}
+static void ingest_weather(app *a,const mi_event *e) {
+    const weather_sample *s=&e->weather; unsigned k;
+    lock(&a->mutex);
+    a->source_system=e->sysid; a->source_component=e->compid;
+    if(!a->weather_current.n) weather_batch_init(&a->weather_current,now_ms());
+    if(weather_batch_add(&a->weather_current,s)) {
+        ++a->diag.accepted; a->diag.last_receipt_ms=now_ms();
+        if(a->weather_current.n>a->weather_current.raw_n) ++a->loss.raw_samples;
+        /* TUI overview aggregates metric counts only. Wire groups retain each
+         * sensor's identity and independent statistics. */
+        for(k=0;k<a->diag.key_n && strcmp(a->diag.keys[k].key,s->metric==WEATHER_TEMPERATURE ? "hyg_temperature" : "hyg_humidity");++k) {}
+        if(k<TB_MAX_KEYS) {
+            tm_key *key=&a->diag.keys[k];
+            if(k==a->diag.key_n) { memset(key,0,sizeof(*key)); ++a->diag.key_n; }
+            (void)strcpy(key->key,s->metric==WEATHER_TEMPERATURE ? "hyg_temperature" : "hyg_humidity");
+            (void)strcpy(key->unit,s->metric==WEATHER_TEMPERATURE ? "K" : "1");
+            ++key->observations; key->t_us=s->has_time ? s->t_us : 0;
+            key->seq=s->seq; key->value=s->value; key->have_value=1;
+        }
+        if(s->has_position) {
+            a->diag.have_position=1; memcpy(a->diag.p,s->p,sizeof(s->p)); memcpy(a->diag.v,s->v,sizeof(s->v));
+            a->diag.time_uncert_us=s->time_uncert_us; a->diag.pos_error_m=s->pos_error_m;
+        }
+    } else ++a->loss.rejected;
+    unlock(&a->mutex);
 }
 static void ingest(app *a, const tb_sample *input) {
     tb_sample sample = *input;
@@ -303,14 +359,18 @@ static void ingest(app *a, const tb_sample *input) {
             a->metric[k].last_t = s->t_us;
             a->metric[k].last_seq = s->seq;
             ++a->diag.accepted;
-            a->diag.key_n = a->metric_n;
             {
-                tm_key *key = &a->diag.keys[k];
+                unsigned row; tm_key *key;
+                for(row=0;row<a->diag.key_n && strcmp(a->diag.keys[row].key,s->key);++row) {}
+                if(row<TB_MAX_KEYS) {
+                if(row==a->diag.key_n) { memset(&a->diag.keys[row],0,sizeof(a->diag.keys[row])); ++a->diag.key_n; }
+                key = &a->diag.keys[row];
                 (void)strcpy(key->key, s->key);
                 (void)strcpy(key->unit, s->unit);
                 ++key->observations;
                 key->t_us = s->t_us; key->seq = s->seq;
                 key->value = s->value; key->have_value = isfinite(s->value);
+                }
             }
             a->diag.have_position = 1;
             memcpy(a->diag.p, s->p, sizeof(s->p));
@@ -329,7 +389,7 @@ static void ingest(app *a, const tb_sample *input) {
 }
 static void mavlink_event(void *context,const mi_event *event) {
     app *a=context;
-    if(a->test_mode) {
+    if(a->test_mode==1) {
         if(event->kind==MI_RESET) {
             lock(&a->mutex);
             ++a->route_generation;
@@ -340,7 +400,8 @@ static void mavlink_event(void *context,const mi_event *event) {
         }
         return; /* Test mode never uploads weather observations or statistics. */
     }
-    if(event->kind==MI_SAMPLE) {
+    if(event->kind==MI_WEATHER_SAMPLE) { ingest_weather(a,event); return; }
+    if(event->kind==MI_SAMPLE && a->test_mode!=2) {
         tb_sample sample=event->sample; unsigned k;
         (void)cfg_unit_for_key(&a->config,sample.key,sample.unit,sizeof(sample.unit));
         lock(&a->mutex);
@@ -353,7 +414,8 @@ static void mavlink_event(void *context,const mi_event *event) {
     }
     lock(&a->mutex);
     if(event->kind==MI_RESET) {
-        seal(a);
+        seal(a); seal_weather(a);
+        a->origin_known=!a->config.origin_auto;
         a->metric_n=0; a->have_last=a->have_sealed=0; a->watermark_us=0;
         a->source_system=event->sysid; a->source_component=event->compid;
         a->diag.key_n=0; memset(a->diag.keys,0,sizeof(a->diag.keys));
@@ -363,7 +425,7 @@ static void mavlink_event(void *context,const mi_event *event) {
         (void)snprintf(a->active_session,sizeof(a->active_session),"%.28s.%016" PRIx64 ".%u",
                        a->session,a->run_nonce,a->route_generation);
     } else if(event->kind==MI_ORIGIN) {
-        memcpy(a->origin,event->origin,sizeof(a->origin));
+        memcpy(a->origin,event->origin,sizeof(a->origin)); a->origin_known=1;
     } else if(event->kind==MI_CLOCK) {
         a->raw_clock_boot=event->boot_us; a->raw_clock_utc=event->utc_us; a->raw_clock_uncert=event->uncert_us;
         if(event->uncert_us!=UINT32_MAX && tc_anchor(&a->clock,event->boot_us,event->utc_us,event->uncert_us,0))
@@ -420,11 +482,12 @@ static void input_status(void *context,const ri_report *report) {
      * read/frame once, without treating a change of the displayed lane as data. */
     a->diag.input_bytes=report->total_bytes;
     a->diag.input_lines=report->total_frames;
-    if(a->test_mode) capture_test_record(a,report);
+    if(a->test_mode==1) capture_test_record(a,report);
     a->diag.parsed_frames=report->mav.frames; a->diag.bad_crc=report->mav.bad_crc;
     a->diag.unknown_message=report->mav.unknown_message;
     a->diag.no_navigation=report->mav.no_navigation;
     a->diag.pending_overflow=report->mav.pending_overflow;
+    a->diag.weather_reboot_dropped=report->mav.weather_reboot_dropped;
     a->diag.signed_rejected=report->mav.signed_rejected;
     a->diag.no_clock=report->mav.no_clock;
     a->diag.wrong_clock_component=report->mav.wrong_clock_component;
@@ -499,7 +562,7 @@ static int http_open(http *h, const tb_config *config) {
         h->route[n + c.dwExtraInfoLength] = 0;
     }
     h->flags = c.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
-    h->session = WinHttpOpen(L"mavlink_telemetry_data_router/0.6.1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    h->session = WinHttpOpen(L"mavlink_telemetry_data_router/0.7.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                             WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!h->session) return 0;
     if (!WinHttpSetTimeouts(h->session, (int)config->connect_timeout_ms,
@@ -651,6 +714,32 @@ static int encode_test(app *a,unsigned head,unsigned n) {
     }
     return test_append(&used,"]}\n") ? (int)used : 0;
 }
+static int encode_weather(app *a,unsigned head) {
+    size_t used=0; int n; const double *origin=a->queue_origin[head];
+    if(!test_append(&used,"{\"schema\":\"mavlink_weather_v1\",\"stream\":") || !test_quote(&used,a->stream) ||
+       !test_append(&used,",\"records\":[{\"seq\":%" PRIu64 ",\"generation\":%u,\"session\":",a->queue_batch_id[head],a->queue_generation[head]) ||
+       !test_quote(&used,a->queue_session[head]) ||
+       !test_append(&used,",\"source\":{\"sysid\":%u,\"compid\":%u},\"frame\":\"ENU\",\"origin_wgs84\":[%.17g,%.17g,%.17g],"
+         "\"time_basis\":\"pixhawk_boot_us\",\"host_time_basis\":\"collector_monotonic_ms\",\"clock_model\":",
+         (unsigned)a->queue_system[head],(unsigned)a->queue_component[head],origin[0],origin[1],origin[2])) return 0;
+    if(!a->queue_origin_known[head]) {
+        char *start=strstr(wire,"\"origin_wgs84\":["), *end;
+        if(start && (end=strchr(start,']'))!=NULL) {
+            start+=15; /* retain the colon; replace the numeric array */
+            memmove(start+4,end+1,used-(size_t)(end+1-wire)+1);
+            memcpy(start,"null",4); used=strlen(wire);
+        }
+    }
+    n=clock_json(a->queue_have_clock[head] ? &a->queue_clock[head] : NULL,wire+used,sizeof(wire)-used);
+    if(n<0 || (size_t)n>=sizeof(wire)-used) return 0;
+    used+=(size_t)n;
+    if(!test_append(&used,",\"weather\":")) return 0;
+    weather_batch_prepare(&a->weather_queue[head]);
+    n=weather_batch_json(&a->weather_queue[head],wire+used,sizeof(wire)-used);
+    if(n<0) return 0;
+    used+=(size_t)n;
+    return test_append(&used,"}]}\n") ? (int)used : 0;
+}
 static int encode(app *a, unsigned head, unsigned n, losses l, const tc_report *report) {
     unsigned i;
     int k;
@@ -733,6 +822,28 @@ static int encode(app *a, unsigned head, unsigned n, losses l, const tc_report *
     memcpy(wire + used, "]}\n", 4);
     return (int)(used + 3);
 }
+static int encode_bundle(app *a,unsigned head,unsigned n,losses loss) {
+    unsigned i; size_t used=0; int bytes,prefix;
+    prefix=snprintf(bundle_wire,sizeof(bundle_wire),"{\"schema\":\"mavlink_router_bundle_v1\",\"records\":[");
+    if(prefix<0 || (size_t)prefix>=sizeof(bundle_wire)) return 0;
+    used=(size_t)prefix;
+    for(i=0;i<n;++i) {
+        unsigned slot=(head+i)%QUEUE_CAP;
+        bytes=a->queue_weather[slot] ? encode_weather(a,slot) : encode(a,slot,1,loss,a->queue_have_clock[slot] ? &a->queue_clock[slot] : NULL);
+        if(bytes<=0) return 0;
+        prefix=snprintf(bundle_wire+used,sizeof(bundle_wire)-used,"%s{\"kind\":\"%s\",\"payload\":",i ? "," : "",a->queue_weather[slot] ? "weather" : "telemetry");
+        if(prefix<0 || (size_t)prefix>=sizeof(bundle_wire)-used) return 0;
+        used+=(size_t)prefix;
+        if((size_t)bytes+4>=sizeof(bundle_wire)-used) return 0;
+        memcpy(bundle_wire+used,wire,(size_t)bytes); used+=(size_t)bytes;
+        bundle_wire[used++]='}';
+    }
+    if(used+4>=sizeof(bundle_wire)) return 0;
+    memcpy(bundle_wire+used,"]}\n",4); used+=3;
+    memcpy(wire,bundle_wire,used+1);
+    return (int)used;
+}
+
 static double precise_ms(void) {
 #ifdef _WIN32
     LARGE_INTEGER ticks, frequency;
@@ -802,6 +913,7 @@ static void *sender(void *arg)
     for (;;) {
         uint64_t now = now_ms(), completed;
         unsigned n, head;
+        int is_weather, mixed=0;
         int eof, bytes, ok, have_clock, show_errors = 1;
         long status = 0;
         unsigned error = 0;
@@ -811,13 +923,24 @@ static void *sender(void *arg)
         if (now < next) { pause_ms((unsigned)(next - now > 100 ? 100 : next - now)); continue; }
         lock(&a->mutex);
         if (!a->test_mode && a->current.n && (a->eof || (a->live && now>=a->last_seal_ms && now-a->last_seal_ms>=interval))) seal(a);
+        if(a->test_mode!=1 && a->weather_current.n && (a->eof || (now>=a->weather_last_seal_ms && now-a->weather_last_seal_ms>=interval))) seal_weather(a);
         head = a->head;
+        is_weather=a->count && a->queue_weather[head];
         n = a->count < a->config.max_windows ? a->count : a->config.max_windows;
-        if(a->live && !a->test_mode) {
+        /* One logical collection interval can hold both weather and legacy
+         * chunks. Even max_windows=1 must drain those two types together. */
+        if(a->live && a->test_mode!=1 && n==1 && a->count>=2 && SEND_WINDOWS>=2 && QUEUE_CAP>=2 &&
+           a->queue_weather[head]!=a->queue_weather[(head+1)%QUEUE_CAP] &&
+           !strcmp(a->queue_session[head],a->queue_session[(head+1)%QUEUE_CAP])) n=2;
+        if(a->live && a->test_mode!=1 && n) {
             unsigned same=1;
-            while(same<n && !strcmp(a->queue_session[(head+same)%QUEUE_CAP],a->queue_session[head])) ++same;
-            if(n) n=same;
+            while(same<n && !strcmp(a->queue_session[(head+same)%QUEUE_CAP],a->queue_session[head])) {
+                if(a->queue_weather[(head+same)%QUEUE_CAP]!=a->queue_weather[head]) mixed=1;
+                ++same;
+            }
+            n=same;
         }
+        if(is_weather && !mixed) n=1;
         eof = a->eof;
         loss = a->loss;
         if(a->live && n) {
@@ -826,7 +949,7 @@ static void *sender(void *arg)
         unlock(&a->mutex);
         if (!n && eof) break;
         encode_start = precise_ms();
-        bytes = n ? (a->test_mode ? encode_test(a,head,n) : encode(a, head, n, loss, have_clock ? &report : NULL)) : 0;
+        bytes = n ? (mixed ? encode_bundle(a,head,n,loss) : is_weather ? encode_weather(a,head) : a->test_mode==1 ? encode_test(a,head,n) : encode(a, head, n, loss, have_clock ? &report : NULL)) : 0;
         encode_ms = precise_ms() - encode_start;
         if (n && !bytes) {
             fprintf(stderr, "JSON capacity exceeded\n");
@@ -853,6 +976,13 @@ static void *sender(void *arg)
             a->diag.http_status = status; a->diag.error_code = error;
             a->diag.last_rtt_ms = post_ms;
             if (ok) {
+                unsigned released;
+                for(released=0;released<n;++released) {
+                    unsigned slot=(a->head+released)%QUEUE_CAP;
+                    memset(&a->weather_queue[slot],0,sizeof(a->weather_queue[slot]));
+                    memset(&a->queue[slot],0,sizeof(a->queue[slot]));
+                    memset(&a->test_queue[slot],0,sizeof(a->test_queue[slot]));
+                }
                 a->head = (a->head + n) % QUEUE_CAP;
                 a->count -= n;
                 if (dry) ++a->diag.dry_releases;
@@ -928,11 +1058,11 @@ int main(int argc, char **argv) {
     a->monitor_enabled = TB_MONITOR_DEFAULT;
     a->config_path = default_config();
     if (argc == 2 && strcmp(argv[1], "--sizes") == 0) {
-        printf("sample=%zu batch=%zu state=%zu wire=%zu input_storage=%zu auxiliary_storage=%zu static_total=%zu\n",
-               sizeof(tb_sample), sizeof(tb_batch), sizeof(state), sizeof(wire), ri_storage_bytes(), sizeof(default_config_path)+sizeof(stop_requested), sizeof(state) + sizeof(wire) + ri_storage_bytes()+sizeof(default_config_path)+sizeof(stop_requested));
+        printf("sample=%zu batch=%zu state=%zu wire=%zu bundle=%zu input_storage=%zu auxiliary_storage=%zu static_total=%zu\n",
+               sizeof(tb_sample), sizeof(tb_batch), sizeof(state), sizeof(wire), sizeof(bundle_wire), ri_storage_bytes(), sizeof(default_config_path)+sizeof(stop_requested), sizeof(state) + sizeof(wire) + sizeof(bundle_wire) + ri_storage_bytes()+sizeof(default_config_path)+sizeof(stop_requested));
         return 0;
     }
-    if(argc==1 || !strcmp(argv[1],"--interactive") || !strcmp(argv[1],"--headless") || !strcmp(argv[1],"--test-heartbeat")) {
+    if(argc==1 || !strcmp(argv[1],"--interactive") || !strcmp(argv[1],"--headless") || !strcmp(argv[1],"--test-heartbeat") || !strcmp(argv[1],"--test-weather")) {
         if(config_exists(a->config_path)) {
             if(!cfg_load(a->config_path,&a->config,SEND_WINDOWS,error,sizeof(error))) {
                 fprintf(stderr,"Configuration: %s\n",error); return 1;
@@ -964,12 +1094,13 @@ int main(int argc, char **argv) {
     } else {
         fprintf(stderr, "Usage: mavlink_telemetry_data_router_headless URL|- STREAM SESSION LAT LON ALT [--summary] [--interactive]\n"
                         "   or: mavlink_telemetry_data_router_interactive --config telemetry.ini [--headless]\n"
-                        "   test: --test-heartbeat [--server-url http://127.0.0.1:21000/ingest]\n"
+                        "   test: --test-heartbeat | --test-weather [--server-url http://127.0.0.1:21000/ingest]\n"
                         "TUI: e edit, Enter validate, s save for restart; telemetry stays in memory.\n");
         return 1;
     }
     for (i = (unsigned)option_start; i < (unsigned)argc; ++i) {
         if (!strcmp(argv[i],"--test-heartbeat")) a->test_mode=1;
+        else if(!strcmp(argv[i],"--test-weather")) a->test_mode=2;
         else if(!strcmp(argv[i],"--server-url") && i+1<(unsigned)argc) {
             if(!cfg_set(&a->config,"url",argv[++i],error,sizeof(error))) { fprintf(stderr,"Configuration: %s\n",error); return 1; }
             server_override=1;
@@ -981,10 +1112,10 @@ int main(int argc, char **argv) {
     }
     if(a->test_mode && !server_override)
         (void)cfg_set(&a->config,"url","http://127.0.0.1:21000/ingest",error,sizeof(error));
-    if(a->test_mode && strcmp(a->config.input_mode,"mavlink")) { fprintf(stderr,"Heartbeat test requires MAVLink input\n"); return 1; }
+    if(a->test_mode && strcmp(a->config.input_mode,"mavlink")) { fprintf(stderr,"Sensor test requires MAVLink input\n"); return 1; }
     if(a->test_mode) {
         char safe_url[2048]; cfg_safe_url(a->config.url,safe_url,sizeof(safe_url));
-        fprintf(stderr,"TEST MODE: heartbeat and coordinates only; HTTP/TCP server %s\n",safe_url);
+        fprintf(stderr,"TEST MODE: %s; HTTP/TCP server %s\n",a->test_mode==1 ? "heartbeat and coordinates only" : "hygrometer temperature/humidity with acquisition time, position and statistics",safe_url);
     }
     if (!cfg_validate(&a->config, SEND_WINDOWS, error, sizeof(error))) {
         fprintf(stderr, "Configuration: %s\n", error); return 1;
@@ -997,9 +1128,11 @@ int main(int argc, char **argv) {
     if(curl_global_init(CURL_GLOBAL_DEFAULT)!=CURLE_OK) return 1;
 #endif
     a->last_seal_ms=now_ms();
+    a->weather_last_seal_ms=now_ms();
     a->url = a->config.url; a->stream = a->config.stream;
     a->session = a->config.session; a->summary = a->config.summary;
     memcpy(a->origin, a->config.origin, sizeof(a->origin));
+    a->origin_known=!a->config.origin_auto;
     a->diag.started_ms = now_ms(); a->diag.dry_run = !strcmp(a->url, "-");
     a->diag.test_mode=a->test_mode;
 #ifdef _WIN32

@@ -47,7 +47,7 @@ typedef struct {
     tc_report clock;
     char active_source[256], source_status[32], source_error[160];
     uint64_t parsed_frames, bad_crc, unknown_message, no_navigation;
-    uint64_t pending_overflow, signed_rejected;
+    uint64_t pending_overflow, signed_rejected, weather_reboot_dropped;
     uint64_t no_clock, wrong_clock_component, invalid_value, late_observation;
     unsigned device_n, pending_observations, selected_system, selected_component, gps_fix;
     tm_device devices[TM_MAX_DEVICES];

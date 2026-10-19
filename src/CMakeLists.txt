@@ -1,4 +1,4 @@
-add_library(telemetry STATIC telemetry.c time_sync.c)
+add_library(telemetry STATIC telemetry.c time_sync.c weather.c)
 target_include_directories(telemetry PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 add_library(telemetry_ui STATIC config.c monitor.c)
 add_library(router_input STATIC router_input.c input_transport.c mavlink_input.c)
@@ -49,4 +49,4 @@ endif()
 
 install(TARGETS mavlink_telemetry_data_router_headless mavlink_telemetry_data_router_interactive RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(TARGETS telemetry ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(FILES telemetry.h time_sync.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/${PROJECT_NAME})
+install(FILES telemetry.h time_sync.h weather.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/${PROJECT_NAME})

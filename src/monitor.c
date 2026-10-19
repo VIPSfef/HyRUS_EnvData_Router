@@ -401,7 +401,7 @@ static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
     else (void)snprintf(source_name,sizeof(source_name),"%.*s",255,s->active_source);
     write_text(&w,"[monitor] state=%s mode=%s uptime=%.1fs boundary=%s\n",
             status(s),s->test_mode ? "TEST-HTTP" : s->dry_run ? "DRY" : "HTTP",(double)elapsed(s->now_ms,s->started_ms)/1000,
-            mav ? (s->test_mode ? "MAVLink-test-HB+position" : "MAVLink") : "normalized-CSV");
+            mav ? (s->test_mode==2 ? "MAVLink-test-weather" : s->test_mode==1 ? "MAVLink-test-HB+position" : "MAVLink") : "normalized-CSV");
     write_text(&w,"ACTIVE endpoint=%s\n",endpoint);
     if(mav && c->origin_auto)
         write_text(&w,"ACTIVE stream=%.64s session=%.64s origin=auto(GLOBAL_POSITION_INT/MSL)\n",c->stream,c->session);
@@ -450,6 +450,7 @@ static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
                 s->parsed_frames,s->bad_crc,s->unknown_message);
         write_text(&w,"MAVLink signed_rejected=%" PRIu64 " no_nav=%" PRIu64 " pending=%u drop=%" PRIu64 "\n",
                 s->signed_rejected,s->no_navigation,s->pending_observations,s->pending_overflow);
+        if(s->weather_reboot_dropped) write_text(&w,"weather samples discarded at clock reset=%" PRIu64 "\n",s->weather_reboot_dropped);
         if(compact) write_text(&w,"decode clock=%" PRIu64 " other_clock=%" PRIu64 " invalid=%" PRIu64 " late=%" PRIu64 "\n",
                 s->no_clock,s->wrong_clock_component,s->invalid_value,s->late_observation);
         else {

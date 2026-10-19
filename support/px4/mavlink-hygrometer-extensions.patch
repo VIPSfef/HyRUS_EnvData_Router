@@ -1,0 +1,16 @@
+diff --git a/message_definitions/v1.0/common.xml b/message_definitions/v1.0/common.xml
+index cc64dc2d..85538423 100644
+--- a/message_definitions/v1.0/common.xml
++++ b/message_definitions/v1.0/common.xml
+@@ -8431,6 +8431,11 @@
+       <field type="uint8_t" name="id" instance="true">Hygrometer ID</field>
+       <field type="int16_t" name="temperature" units="cdegC">Temperature</field>
+       <field type="uint16_t" name="humidity" units="c%">Humidity</field>
++      <extensions/>
++      <!-- Local, optional extensions used by mavlink_telemetry_data_router. -->
++      <field type="uint64_t" name="time_boot_us" units="us" invalid="0">Local extension: acquisition timestamp since boot; 0 if unknown.</field>
++      <field type="uint32_t" name="device_id" invalid="0">Local extension: PX4 device identifier; 0 if unknown.</field>
++      <field type="uint32_t" name="time_uncertainty_us" units="us" invalid="UINT32_MAX">Local extension: acquisition timestamp uncertainty bound; UINT32_MAX if unknown.</field>
+     </message>
+   </messages>
+ </mavlink>

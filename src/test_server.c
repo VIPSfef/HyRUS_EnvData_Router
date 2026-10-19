@@ -12,6 +12,7 @@
 #include <inttypes.h>
 #include <math.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -345,17 +346,138 @@ static int validate_record(const ts_json *j,unsigned record) {
     }
     return 1;
 }
+static int token_u64_string(const ts_json *j,unsigned token,uint64_t *value) {
+    const ts_token *t;
+    if(token>=j->count) return 0;
+    t=&j->token[token];
+    return t->kind=='"' && t->end>t->start+2 &&
+           unsigned_number(j->text+t->start+1,t->end-t->start-2,value);
+}
+static int nonempty_string(const ts_json *j,unsigned token) {
+    return token<j->count && j->token[token].kind=='"' &&
+           j->token[token].end>j->token[token].start+2;
+}
+static int null_token(const ts_json *j,unsigned token) {
+    return token<j->count && j->token[token].kind=='n';
+}
+static int nullable_nonnegative(const ts_json *j,unsigned token) {
+    double value;
+    return null_token(j,token) || (token_double(j,token,&value) && value>=0.0);
+}
+static int vector3(const ts_json *j,unsigned token) {
+    unsigned i,n=0; double value;
+    if(token>=j->count || j->token[token].kind!='[') return 0;
+    for(i=token+1;i<j->token[token].next;i=j->token[i].next)
+        if(++n>3 || !token_double(j,i,&value)) return 0;
+    return n==3;
+}
+static int weather_sample_record(const ts_json *j,unsigned sample,int humidity) {
+    unsigned t=field(j,sample,"t_us"),p=field(j,sample,"position_m"),v=field(j,sample,"velocity_mps");
+    unsigned tu=field(j,sample,"time_uncertainty_us"),nu=field(j,sample,"navigation_uncertainty_m");
+    unsigned pu=field(j,sample,"position_uncertainty_m");
+    uint64_t number,quality; double value;
+    int known_time=!null_token(j,t),known_position=!null_token(j,p);
+    if(!token_double(j,field(j,sample,"value"),&value) || value<0 || (humidity && value>1) ||
+       !nullable_nonnegative(j,field(j,sample,"measurement_variance")) ||
+       !nullable_nonnegative(j,nu) || !nullable_nonnegative(j,pu) ||
+       !token_uint(j,field(j,sample,"quality"),&quality) || quality>UINT32_MAX ||
+       !token_uint(j,field(j,sample,"seq"),&number) || number>UINT32_MAX ||
+       (known_time && !token_u64_string(j,t,&number)) ||
+       (!null_token(j,tu) && (!token_uint(j,tu,&number) || number>=UINT32_MAX))) return 0;
+    if(known_position) {
+        if(!known_time || !vector3(j,p) || !vector3(j,v)) return 0;
+    } else if(!null_token(j,v) || !null_token(j,nu) || !null_token(j,pu)) return 0;
+    if(!known_time && !null_token(j,tu)) return 0;
+    if(((quality&UINT32_C(0x08000000))!=0)==known_time ||
+       ((quality&UINT32_C(0x04000000))!=0)==known_position) return 0;
+    return 1;
+}
+static int weather_body_record(const ts_json *j,unsigned record) {
+    unsigned weather=field(j,record,"weather"),source=field(j,record,"source");
+    unsigned measurements=field(j,weather,"measurements"),groups=0;
+    uint64_t value,total_n,total_raw,total_dropped,sum_n=0,sum_raw=0,sum_dropped=0;
+    uint64_t ids[16]; unsigned instances[16],metrics[16];
+    static const char *const names[]={"temperature","humidity"};
+    if(!nonempty_string(j,field(j,record,"session")) ||
+       !token_uint(j,field(j,record,"generation"),&value) ||
+       !token_uint(j,field(j,record,"seq"),&value) ||
+       !token_uint(j,field(j,source,"sysid"),&value) || !value || value>255 ||
+       !token_uint(j,field(j,source,"compid"),&value) || value>255 ||
+       !token_uint(j,field(j,weather,"si_registry"),&value) || value!=1 ||
+       !token_u64_string(j,field(j,weather,"host_window_ms"),&value) ||
+       !token_uint(j,field(j,weather,"n"),&total_n) || !total_n || total_n>UINT32_MAX ||
+       !token_uint(j,field(j,weather,"raw_n"),&total_raw) || total_raw>128 ||
+       !token_uint(j,field(j,weather,"raw_dropped"),&total_dropped) || total_dropped>UINT32_MAX ||
+       total_raw+total_dropped!=total_n) return 0;
+    if(!token_text(j,field(j,record,"frame"),"ENU") ||
+       !token_text(j,field(j,record,"time_basis"),"pixhawk_boot_us") ||
+       !token_text(j,field(j,record,"host_time_basis"),"collector_monotonic_ms")) return 0;
+    {
+        unsigned origin=field(j,record,"origin_wgs84");
+        if(!null_token(j,origin)) {
+            unsigned item; double latitude,longitude;
+            if(!vector3(j,origin)) return 0;
+            item=origin+1;
+            if(!token_double(j,item,&latitude) || latitude < -90 || latitude > 90) return 0;
+            item=j->token[item].next;
+            if(!token_double(j,item,&longitude) || longitude < -180 || longitude > 180) return 0;
+        }
+    }
+    for(unsigned metric=0;metric<2;++metric) {
+        unsigned array=field(j,measurements,names[metric]);
+        if(array>=j->count || j->token[array].kind!='[') return 0;
+        for(unsigned g=array+1;g<j->token[array].next;g=j->token[g].next) {
+            unsigned stats=field(j,g,"statistics"),samples=field(j,g,"samples"),raw_count=0;
+            unsigned rep=field(j,g,"representative");
+            uint64_t id,instance,n,raw,dropped,known,first=0,last=0;
+            double mean,minimum,maximum,representative;
+            if(groups>=16 || !token_uint(j,field(j,g,"sensor_id"),&id) || id>UINT32_MAX ||
+               !token_uint(j,field(j,g,"sensor_instance"),&instance) || instance>255 ||
+               !weather_sample_record(j,rep,(int)metric) ||
+               !token_uint(j,field(j,stats,"n"),&n) || !n || n>UINT32_MAX ||
+               !token_uint(j,field(j,g,"raw_n"),&raw) || raw>128 ||
+               !token_uint(j,field(j,g,"raw_dropped"),&dropped) || dropped>UINT32_MAX || raw+dropped!=n ||
+               !token_uint(j,field(j,stats,"time_known_n"),&known) || known>n ||
+               !token_double(j,field(j,stats,"mean"),&mean) ||
+               !token_double(j,field(j,stats,"min"),&minimum) || minimum<0 ||
+               !token_double(j,field(j,stats,"max"),&maximum) || maximum<minimum ||
+               mean<minimum || mean>maximum || (metric && maximum>1) ||
+               !token_double(j,field(j,rep,"value"),&representative) || representative<minimum || representative>maximum ||
+               !nullable_nonnegative(j,field(j,stats,"variance")) ||
+               (null_token(j,field(j,stats,"variance"))!=(n==1)) ||
+               samples>=j->count || j->token[samples].kind!='[') return 0;
+            if(known) {
+                if(!token_u64_string(j,field(j,stats,"t_start_us"),&first) ||
+                   !token_u64_string(j,field(j,stats,"t_end_us"),&last) || first>last) return 0;
+            } else if(!null_token(j,field(j,stats,"t_start_us")) || !null_token(j,field(j,stats,"t_end_us"))) return 0;
+            for(unsigned previous=0;previous<groups;++previous)
+                if(ids[previous]==id && instances[previous]==instance && metrics[previous]==metric) return 0;
+            ids[groups]=id; instances[groups]=(unsigned)instance; metrics[groups++]=metric;
+            for(unsigned sample=samples+1;sample<j->token[samples].next;sample=j->token[sample].next) {
+                uint64_t timestamp;
+                if(++raw_count>128 || !weather_sample_record(j,sample,(int)metric)) return 0;
+                if(token_u64_string(j,field(j,sample,"t_us"),&timestamp) &&
+                   (!known || timestamp<first || timestamp>last)) return 0;
+            }
+            if(raw_count!=raw) return 0;
+            sum_n+=n; sum_raw+=raw; sum_dropped+=dropped;
+        }
+    }
+    return groups && sum_n==total_n && sum_raw==total_raw && sum_dropped==total_dropped;
+}
 static int validate_body(const char *body,size_t length,unsigned records[TS_RECORD_CAP],unsigned *count) {
     ts_json *j=&server.json;
-    unsigned array,i;
+    unsigned array,i; int weather;
     j->text=body; j->size=length; j->pos=0; j->count=0; *count=0;
     if(parse_value(j,0)==TS_NONE) return 0;
     whitespace(j);
-    if(j->pos!=j->size || !token_text(j,field(j,0,"schema"),"mavlink_router_test_v1")) return 0;
+    weather=token_text(j,field(j,0,"schema"),"mavlink_weather_v1");
+    if(j->pos!=j->size || (!weather && !token_text(j,field(j,0,"schema"),"mavlink_router_test_v1")) ||
+       (weather && !nonempty_string(j,field(j,0,"stream")))) return 0;
     array=field(j,0,"records");
     if(array==TS_NONE || j->token[array].kind!='[') return 0;
     for(i=array+1;i<j->token[array].next;i=j->token[i].next) {
-        if(*count>=TS_RECORD_CAP || !validate_record(j,i)) return 0;
+        if(*count>=TS_RECORD_CAP || !(weather ? weather_body_record(j,i) : validate_record(j,i))) return 0;
         records[(*count)++]=i;
     }
     return *count>0;
@@ -391,33 +513,84 @@ static void dashboard(void) {
     fprintf(stderr,"TCP HTTP http://%s:%u/ingest  uptime=%.1fs\n",server.bind,server.port,(double)(now_ms()-server.started)/1000.0);
     fprintf(stderr,"requests=%" PRIu64 " accepted=%" PRIu64 " records=%" PRIu64 " rejected=%" PRIu64 "\n",server.requests,server.accepted,server.records,server.rejected);
     fputs("HTTP 204 = complete validated records displayed; memory-only diagnostic.\n",stderr);
-    fputs("Ctrl+C stops. Recent heartbeat and position records:\n",stderr);
+    fputs("Ctrl+C stops. Recent heartbeat, position and weather records:\n",stderr);
     if(!visible) fputs("Waiting for the router test stream...\n",stderr);
     for(unsigned i=0;i<visible;++i) fprintf(stderr,"%.*s\n",(int)(columns ? columns-1 : 79),server.log[(start+i)%TS_LOG_CAP].text);
     fflush(stderr);
+}
+static void log_line(const char *format,...) {
+    va_list args;
+    ts_log *line=&server.log[server.log_next];
+    va_start(args,format); (void)vsnprintf(line->text,sizeof(line->text),format,args); va_end(args);
+    server.log_next=(server.log_next+1)%TS_LOG_CAP;
+    if(server.log_n<TS_LOG_CAP) ++server.log_n;
+}
+static void print_weather(unsigned record) {
+    ts_json *j=&server.json;
+    unsigned weather=field(j,record,"weather"),measurements=field(j,weather,"measurements"),source=field(j,record,"source");
+    uint64_t seq=0,sysid=0,compid=0;
+    static const char *const names[]={"temperature","humidity"};
+    (void)token_uint(j,field(j,record,"seq"),&seq);
+    (void)token_uint(j,field(j,source,"sysid"),&sysid);
+    (void)token_uint(j,field(j,source,"compid"),&compid);
+    for(unsigned metric=0;metric<2;++metric) {
+        unsigned array=field(j,measurements,names[metric]);
+        for(unsigned group=array+1;group<j->token[array].next;group=j->token[group].next) {
+            unsigned rep=field(j,group,"representative"),stats=field(j,group,"statistics");
+            unsigned position=field(j,rep,"position_m");
+            uint64_t id=0,instance=0,n=0,raw=0,dropped=0,t=0,uncertainty=0,quality=0;
+            double value=0,mean=0,variance=0; char variance_text[32],uncertainty_text[32];
+            int have_t=token_u64_string(j,field(j,rep,"t_us"),&t);
+            int have_variance=token_double(j,field(j,stats,"variance"),&variance);
+            (void)token_uint(j,field(j,group,"sensor_id"),&id);
+            (void)token_uint(j,field(j,group,"sensor_instance"),&instance);
+            (void)token_uint(j,field(j,stats,"n"),&n);
+            (void)token_uint(j,field(j,group,"raw_n"),&raw);
+            (void)token_uint(j,field(j,group,"raw_dropped"),&dropped);
+            (void)token_double(j,field(j,rep,"value"),&value);
+            (void)token_double(j,field(j,stats,"mean"),&mean);
+            (void)token_uint(j,field(j,rep,"quality"),&quality);
+            if(have_variance) (void)snprintf(variance_text,sizeof(variance_text),"%.6g",variance);
+            else (void)snprintf(variance_text,sizeof(variance_text),"unknown");
+            if(token_uint(j,field(j,rep,"time_uncertainty_us"),&uncertainty))
+                (void)snprintf(uncertainty_text,sizeof(uncertainty_text),"%" PRIu64 "us",uncertainty);
+            else (void)snprintf(uncertainty_text,sizeof(uncertainty_text),"unknown");
+            log_line("#%" PRIu64 " %" PRIu64 ".%" PRIu64 " %s sensor=%" PRIu64 "/%" PRIu64 " value=%.6g%s",
+                     seq,sysid,compid,names[metric],id,instance,value,metric ? " RH fraction" : " K");
+            log_line("  n=%" PRIu64 " mean=%.6g variance=%s raw=%" PRIu64 " omitted=%" PRIu64,
+                     n,mean,variance_text,raw,dropped);
+            if(have_t) log_line("  boot_us=%" PRIu64 " dt=%s q=%08" PRIx64,t,uncertainty_text,quality);
+            else log_line("  acquisition time=unknown (standard 5-byte HYGROMETER)");
+            if(!null_token(j,position)) {
+                double p[3]={0,0,0}; unsigned item=position+1;
+                for(unsigned k=0;k<3;++k) { (void)token_double(j,item,&p[k]); item=j->token[item].next; }
+                log_line("  position ENU=[%.3f,%.3f,%.3f] m",p[0],p[1],p[2]);
+            } else log_line("  acquisition position=unknown");
+        }
+    }
 }
 static int print_record(unsigned record) {
     ts_json *j=&server.json;
     unsigned heartbeat=field(j,record,"heartbeat"),position=field(j,record,"position");
     uint64_t seq=0,sysid=0,compid=0,type=0,autopilot=0,age=0;
-    ts_log *line=&server.log[server.log_next];
-    (void)token_uint(j,field(j,record,"seq"),&seq);
-    (void)token_uint(j,field(j,heartbeat,"sysid"),&sysid);
-    (void)token_uint(j,field(j,heartbeat,"compid"),&compid);
-    (void)token_uint(j,field(j,heartbeat,"type"),&type);
-    (void)token_uint(j,field(j,heartbeat,"autopilot"),&autopilot);
-    if(j->token[position].kind=='n')
-        (void)snprintf(line->text,sizeof(line->text),"#%" PRIu64 " heartbeat %" PRIu64 ".%" PRIu64 " type=%" PRIu64 " autopilot=%" PRIu64 " position=unavailable",seq,sysid,compid,type,autopilot);
+    if(token_text(j,field(j,0,"schema"),"mavlink_weather_v1")) print_weather(record);
     else {
-        double lat=0,lon=0,alt=0;
-        int have_age=token_uint(j,field(j,record,"coordinate_age_ms"),&age);
-        (void)token_double(j,field(j,position,"lat_deg"),&lat);
-        (void)token_double(j,field(j,position,"lon_deg"),&lon);
-        (void)token_double(j,field(j,position,"alt_msl_m"),&alt);
-        (void)snprintf(line->text,sizeof(line->text),"#%" PRIu64 " HB %" PRIu64 ".%" PRIu64 " lat=%.7f lon=%.7f alt=%.2fm age=%s%" PRIu64 "ms",seq,sysid,compid,lat,lon,alt,have_age ? "" : "?",age);
+        (void)token_uint(j,field(j,record,"seq"),&seq);
+        (void)token_uint(j,field(j,heartbeat,"sysid"),&sysid);
+        (void)token_uint(j,field(j,heartbeat,"compid"),&compid);
+        (void)token_uint(j,field(j,heartbeat,"type"),&type);
+        (void)token_uint(j,field(j,heartbeat,"autopilot"),&autopilot);
+        if(j->token[position].kind=='n')
+            log_line("#%" PRIu64 " heartbeat %" PRIu64 ".%" PRIu64 " type=%" PRIu64 " autopilot=%" PRIu64 " position=unavailable",seq,sysid,compid,type,autopilot);
+        else {
+            double lat=0,lon=0,alt=0;
+            int have_age=token_uint(j,field(j,record,"coordinate_age_ms"),&age);
+            (void)token_double(j,field(j,position,"lat_deg"),&lat);
+            (void)token_double(j,field(j,position,"lon_deg"),&lon);
+            (void)token_double(j,field(j,position,"alt_msl_m"),&alt);
+            log_line("#%" PRIu64 " HB %" PRIu64 ".%" PRIu64 " lat=%.7f lon=%.7f alt=%.2fm age=%s%" PRIu64 "ms",seq,sysid,compid,lat,lon,alt,have_age ? "" : "?",age);
+        }
     }
-    server.log_next=(server.log_next+1)%TS_LOG_CAP;
-    if(server.log_n<TS_LOG_CAP) ++server.log_n;
     if(!server.ansi) {
         int quoted=0,escape=0;
         /* Emit one compact JSON record per line. Literal ESC/control bytes are

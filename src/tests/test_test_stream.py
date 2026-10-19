@@ -164,7 +164,9 @@ def validate_records(server, port, require_position, retry, mode, expected_posit
         assert len(positions) >= 2, records
         if mode == "coordinates":
             assert any(item["coordinate_age_ms"] >= 500 for item in positions), positions
-            assert all(item["coordinate_age_ms"] < 1000 for item in positions), positions
+            # The validity interval must span more than one 1Hz capture tick.
+            # A 500..1000ms age band can be skipped solely by capture phase.
+            assert all(item["coordinate_age_ms"] < 2500 for item in positions), positions
             assert records[-1]["position"] is None and records[-1]["coordinate_age_ms"] is None, records
         elif mode == "reboot":
             assert len({item["session"] for item in records}) == 2, records
@@ -180,7 +182,7 @@ def validate_records(server, port, require_position, retry, mode, expected_posit
 
 
 def client_case(executable, directory, mode, implicit_config=False):
-    duration = 1800 if mode == "no-heartbeat" else 5600 if mode == "reboot" else 4400
+    duration = 1800 if mode == "no-heartbeat" else 5600 if mode in ("reboot", "coordinates") else 4400
     with CaptureServer(retry=mode == "heartbeat") as server:
         # Keep the destination reserved until after process creation. If the
         # child's first bind races us, its normal reconnect path retries; no
@@ -194,7 +196,7 @@ def client_case(executable, directory, mode, implicit_config=False):
             "session": "test-session", "input_mode": "mavlink", "serial_port": "none",
             "auto_scan": 0, "websocket_url": "", "udp_enabled": 1,
             "udp_bind": "127.0.0.1", "udp_port": port,
-            "probe_ms": 2000, "link_timeout_ms": 4000 if mode == "reboot" else 1000, "reconnect_ms": 100,
+            "probe_ms": 2000, "link_timeout_ms": 4000 if mode == "reboot" else 2500 if mode == "coordinates" else 1000, "reconnect_ms": 100,
             "duration_ms": duration, "send_interval_ms": 1000,
             "connect_timeout_ms": 500, "io_timeout_ms": 500, "refresh_ms": 250,
         }

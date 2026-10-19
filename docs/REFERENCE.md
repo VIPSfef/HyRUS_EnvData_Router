@@ -1,4 +1,4 @@
-# 기술 참조 — mavlink_telemetry_data_router 0.6.1
+# 기술 참조 — mavlink_telemetry_data_router 0.7.0
 
 처음 실행할 때는 [README](../README.md)를 읽는다. 이 문서의 명령은 저장소 루트 기준이다. 기본 입력은 바이너리 MAVLink이고, CSV는 명시적인 개발용 재생 모드다.
 
@@ -58,6 +58,52 @@ UDP를 제외한 설정 포트와 WebSocket에는 연결 후, 자동 검색 포�
 
 토큰은 환경변수에 둔다. URL query는 화면에서 숨기지만 설정 파일에는 원문으로 저장된다. URL userinfo와 fragment는 거부한다. Windows timeout은 WinHTTP 단계별이며 Linux 총 HTTP timeout은 connect+2×io로 적용한다. DNS/TLS/OS까지 포함한 하드 실시간 상한을 뜻하지 않는다.
 
+## HYGROMETER_SENSOR와 SI 관측 구조
+
+공식 common 메시지 `HYGROMETER_SENSOR`(12920, CRC_EXTRA 20)의 기본 본문은 5 B이다. 필드 선언 순서와 wire 순서는 다르며 wire offset은 온도 int16(0), 습도 uint16(2), 센서 instance uint8(4)이다. 온도는 0.01°C, 상대습도는 0.01%이므로 수집기에 들어온 정수 `T`, `H`를 다음 식으로 변환한다.
+
+```text
+temperature_K = T * 0.01 + 273.15
+humidity_fraction = H * 0.0001
+variance_SI = scale^2 * variance_source
+```
+
+예를 들어 2345와 6520은 각각 296.60 K(23.45°C), 0.6520(65.20%)이다. 이 값은 하나의 온습도 패킷에서 나왔지만 통계는 `(metric, sensor_id, sensor_instance)`별로 분리된다. source의 system/component/session과 ENU 원점은 바깥 전송 레코드에 속한다. 서로 다른 센서·소스·부팅 시계를 합치지 않는다.
+
+`weather.h`의 `WEATHER_SI_REGISTRY=1`이 temperature→K, humidity→비율을 정의한다. 새 온습도 JSON은 단위 문자열을 매 표본마다 반복하지 않는다. 기존 key–value schema3의 `unit_map`은 단위 표시이며 값을 SI로 변환하는 설정이 아니다. 따라서 일반 압력·내부 온도 등 기존 경로의 단위까지 새 구조와 같다고 가정하지 않는다.
+
+공식 기본 메시지에는 측정시각·품질·측정 불확도·위치가 없다. 기본 메시지의 측정시각을 수신시각으로 치환하지 않는다. 원본 값과 통계는 보존하되 `t_us`, `position_m`, `velocity_mps`는 null이다. `sensor_id=0`은 device ID 미상이며 공식 `id`는 `sensor_instance`로 유지한다.
+
+선택 PX4 패치는 기본 본문 뒤에 `time_boot_us:uint64`(offset5), `device_id:uint32`(13), `time_uncertainty_us:uint32`(17)를 추가한다. **이것은 공식 표준이 아닌 로컬 MAVLink 2 확장**이다. 최대21 B이며 끝 0바이트 생략을 허용한다. 확장 측정시각은 PX4 부팅 기준 µs, 0은 미상이고 상대 시각 불확도 UINT32_MAX는 미상이다. 같은 source의 실제 항법 두 점 사이에서만 위치를 보간한다. 항법을 얻지 못해도 원본 관측을 버리지 않고 위치를 null로 남긴다.
+
+그룹 JSON의 구성은 다음과 같다. temperature/humidity 아래 센서 배열을 사용하며 필드 이름을 관측 종류의 별도 키로 등록하지 않는다.
+
+```text
+weather: {
+  si_registry: 1,
+  host_window_ms: "collector monotonic window start",
+  n, raw_n, raw_dropped,
+  measurements: {
+    temperature: [{sensor_id, sensor_instance, representative, statistics, samples, raw_n, raw_dropped}],
+    humidity:    [{sensor_id, sensor_instance, representative, statistics, samples, raw_n, raw_dropped}]
+  }
+}
+```
+
+`representative`와 `samples[]`는 `t_us`(decimal string/null), `position_m`·`velocity_mps`(ENU/null), `value`(SI), `measurement_variance`(SI²/null), `time_uncertainty_us`, `navigation_uncertainty_m`, `position_uncertainty_m`, `quality`, `seq`를 갖는다. 표본의 측정 불확도는 알 수 없으면 null이며 패킷의 해상도를 측정 정확도로 바꾸지 않는다. `position_uncertainty_m`은 알려진 항법 오차와 `|v|·time_uncertainty_us/1e6`의 합인 현재 속도 기반 추정이며 교정된 절대상한이 아니다.
+
+대표 표본은 알려진 측정시각·위치, 알려진 위치 오차 추정, 그 크기, 알려진 측정분산, 그 크기, 알려진 시각 오차와 그 크기, 결정적인 표본 순서 순으로 선택한다. 원본 표본의 값·시각·위치를 함께 유지하며 통계 평균을 대표 좌표에서의 측정값처럼 사용하지 않는다. quality의 `0x08000000`은 측정시각 미상, `0x04000000`은 측정 위치 미상이다. 기존 미인증 시계 플래그 등 다른 비트도 보존한다. 품질 비트의 숫자 크기를 센서 정확도 순위로 해석하지 않는다.
+
+`statistics`는 n·평균·표본분산 `M2/(n−1)`·min/max와 `time_known_n`·측정시각 시작/끝을 갖는다. n<2이면 분산은 null이다. 측정시각 범위는 그 시각을 아는 표본만 사용하며 `time_known_n=0`이면 양 끝도 null이다. 시각 미상 표본도 평균·분산 n에는 포함된다. 이 분산은 이동에 따른 실제 공간 변화와 잡음을 모두 포함하며 단일 센서 측정의 불확도와 다르다.
+
+한 온습도 배치의 원본은 최대128개, 그룹은 최대16개다. 원본 한도 초과 표본도 통계에 반영하고 raw_dropped를 기록한다. 그룹 한도 초과와 잘못된 물리량은 거부 수로 집계한다. 상대습도는 0..1, 온도는 0 K 이상, 유효 값·좌표·속도는 유한해야 한다. 미래 항목은 SI 사전 버전과 식별자를 늘려 정의해야 하며 알 수 없는 단위를 추측하지 않는다.
+
+시험 모드 `--test-weather`는 `mavlink_weather_v1` envelope의 `records[]`에 `{seq,generation,session,source,frame,origin_wgs84,time_basis,host_time_basis,clock_model,weather}`를 넣는다. 순번·시각의 64비트 표현 규약은 각 schema를 따른다. 서버는 `(stream, session, seq)`로 중복 제거하고 요청 전체 검사·수락 뒤204로 답해야 한다. 실패·202·응답 단절에서는 동일 순번과 관측을 재전송한다. `--summary`는 기존 key–value 출력에 적용하며 온습도 원본을 생략하지 않는다.
+
+PX4의 정확한 기준 커밋·습도 배율 교정·XML 적용·재생성·가상 센서 명령은 [support/px4](../support/px4/README.md)에 있다. HYGROMETER_SENSOR는 온도와 상대습도를 재는 hygrometer의 센서 인스턴스를 전달하는 메시지다. 비행제어기 내부 barometer/IMU 온도를 주변 대기 온도로 간주하지 않는다. 표준에 다른 센서 메시지도 있지만 공통적인 측정시각·품질·이동 관측 통계를 모두 제공하는 한 가지 범용 기상 메시지가 되는 것은 아니다.
+
+공식 근거: [HYGROMETER_SENSOR](https://mavlink.io/en/messages/common.html#HYGROMETER_SENSOR), [MAVLink 2 확장과 CRC](https://mavlink.io/en/guide/serialization.html), [SI](https://www.bipm.org/en/publications/si-brochure).
+
 ## 키–값, 위치와 시각
 
 NAMED_VALUE_FLOAT/INT의 이름을 key로 사용하며 새 키는 자동 등록한다. 표준 wire value는 float32/int32이며 NAMED_VALUE_* 이름은 wire 규격상 최대10바이트다. 단위는 메시지에 없어 unit_map을 쓰며 미지정은 unknown이다. 키 최대31자 `[A-Za-z_][A-Za-z0-9_.-]*`, 단위 최대15자 ASCII 규약, 활성 소스당 기본 최대16키를 사용한다. 같은 키의 단위는 한 실행 설정에서 고정한다.
@@ -74,9 +120,24 @@ SYSTEM_TIME의 원시 boot/UTC 쌍은 raw_clock_anchor로 보존한다. 기본 �
 
 MAVLink 입력은200ms 제한 재정렬 뒤 시각순으로 처리한다. 수신 후200ms 대기는 재정렬만 끝내며 측정시각·좌표·원천 boot watermark를 만들어 내지 않는다. 너무 늦은 입력, 중복, 다른 컴포넌트 시계는 별도 거부 수로 표시한다. 32bit-ms wrap은 확장하고 큰 boot 후퇴는 새 epoch로 분리한다. 재연결·부트 재설정 시 미확인 이전 묶음의 ID·원점·시각은 바꾸지 않는다.
 
+## 혼합 관측의 전송 묶음
+
+운용 모드에서 기존 key–value와 새 온습도 묶음이 함께 대기하면 기본1초 요청 주기를 유지하면서 다음 형식으로 완성 묶음을 보낸다. 기본 최대4개이며, 혼합 시 아래의 최소2조각 규칙을 따른다. 각 payload는 원래의 완전한 envelope다. 한 종류만 대기하면 기존 schema3 또는 mavlink_weather_v1을 직접 보낸다.
+
+```json
+{"schema":"mavlink_router_bundle_v1","records":[
+  {"kind":"telemetry","payload":{"schema":3,"stream":"...","batches":[]}},
+  {"kind":"weather","payload":{"schema":"mavlink_weather_v1","stream":"...","records":[]}}
+]}
+```
+
+위 예시는 구조만 나타내며 생략된 식별자·원점·원본·통계는 실제 payload에 들어간다. 서로 다른 소스 세션을 한 요청으로 합치지 않는다. 각 내부 자료의 `(stream,session,batch_id)` 또는 `(stream,session,seq)`를 중복 키로 유지한다. 서버는 내부 레코드까지 모두 수락한 경우에만204로 답해야 한다. TCP21000 선택 시험 서버는 heartbeat/weather 시험 envelope를 검사하는 진단 도구이며 일반 schema3·혼합 bundle 수집 서버를 대신하지 않는다.
+
+기존·온습도가 매초 한 묶음씩 생기면 큐 유입은 초당2개다. 요청당1개만 처리하면 정상 서버에도 큐가 증가하므로 두 종류가 함께 대기할 때는 `max_windows=1`이어도 최소2개의 종류별 조각을 한 요청으로 묶는다. 한 종류만 있으면 기존 한도를 유지하고 기본값은4다. 실시간 요청 주기, 느린 서버, 재시도, 서로 다른 측정시각 구간 등으로 유입이 처리량을 넘으면 고정 큐가 포화할 수 있으며 손실을 표시한다. 원본은 디스크로 흘려 쓰지 않는다.
+
 ## 출력과 서버 확인 — schema3
 
-실제 MAVLink의 최상위 JSON은 schema3다. stream/session, ENU origin_wgs84, source{sysid,compid,epoch,altitude_datum:MSL}, field_order, 누적 loss, clock_model, 선택 raw_clock_anchor, batches를 포함한다. 세션은 설정 session에 OS 난수 기반 실행 ID와 소스 세대를 붙여 부팅/연결 시계를 분리한다.
+기존 key–value 관측만 담은 실제 MAVLink의 최상위 JSON은 schema3다. 온습도 및 혼합 관측 envelope는 위 절을 따른다. stream/session, ENU origin_wgs84, source{sysid,compid,epoch,altitude_datum:MSL}, field_order, 누적 loss, clock_model, 선택 raw_clock_anchor, batches를 포함한다. 세션은 설정 session에 OS 난수 기반 실행 ID와 소스 세대를 붙여 부팅/연결 시계를 분리한다.
 
 각 batch는 **불변 batch_id**와 측정시각 window_us, n/raw_n/raw_dropped, 키별 통계·원본·해당 묶음의 clock_model/선택 raw_clock_anchor를 갖는다. 같은 측정시각 1초 구간이 여러 batch로 나뉠 수 있다. 서버는 `(stream,session,batch_id)`로 중복 제거하고 window_us로 재집계한다. schema2 CSV의 `(stream,session,window_us)` 중복 키를 schema3에 적용하면 정상 후속 묶음을 잃는다.
 

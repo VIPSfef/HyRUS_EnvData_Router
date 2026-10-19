@@ -85,7 +85,7 @@ void mi_init(mi_input *m, const mi_options *o, mi_emit_fn emit, void *context)
 void mi_link_reset(mi_input *m)
 { if (m) { m->used = 0; m->needed = 0; } }
 void mi_get_report(const mi_input *m, mi_report *r)
-{ if (m && r) { *r = m->report; r->pending = m->pending_count; } }
+{ if (m && r) { *r = m->report; r->pending = m->pending_count + m->weather_pending_count; } }
 
 static mi_device *device(mi_input *m, uint8_t sysid, uint8_t compid, uint64_t now)
 {
@@ -106,7 +106,9 @@ static mi_device *device(mi_input *m, uint8_t sysid, uint8_t compid, uint64_t no
 static void reset_clock(mi_input *m)
 {
     m->report.no_navigation += m->pending_count;
+    m->report.weather_reboot_dropped += m->weather_pending_count;
     m->pending_count = 0; m->nav_count = 0;
+    m->weather_pending_count = 0; m->weather_seq = 0;
     m->high_boot_us = m->wrap_ms = m->last_emitted_us = m->last_watermark_us = 0;
     m->last_boot_ms = m->next_seq = m->emitted_seq = 0; m->have_boot = m->have_emitted = 0;
     m->gps_error_m = NAN; m->gps_accuracy_ms = 0;
@@ -236,6 +238,66 @@ static int align_sample(mi_input *m, tb_sample *s)
     }
     return 0;
 }
+/* Weather retains observations even without navigation; unknown location is
+ * explicit. Scan bounded 128 pending slots and 32 nav points; never extrapolate. */
+static void emit_weather(mi_input *m, const weather_sample *sample)
+{
+    mi_event e;
+    memset(&e,0,sizeof(e)); e.kind=MI_WEATHER_SAMPLE;
+    e.sysid=m->report.selected_system; e.compid=m->report.selected_component;
+    e.epoch=m->epoch; e.weather=*sample; e.boot_us=sample->t_us;
+    ++m->report.observations;
+    if(m->emit) m->emit(m->context,&e);
+}
+static void weather_observation(mi_input *m,const uint8_t *p,unsigned length,uint64_t now)
+{
+    weather_sample s; uint64_t stamp=0; unsigned metric;
+    if(u16(p+2)>10000 || (double)i16(p)*.01 < -273.15) { ++m->report.invalid_value; return; }
+    if(m->weather_seq>UINT32_MAX-2u) reset_clock(m);
+    memset(&s,0,sizeof(s)); s.sensor_instance=p[4];
+    s.sensor_id=length>13 ? u32(p+13) : 0;
+    s.measurement_variance=NAN; s.pos_error_m=NAN;
+    s.time_uncert_us=length>17 ? u32(p+17) : UINT32_MAX;
+    s.quality=MI_QUALITY_CLOCK_UNSIGNED;
+    /* Standard 5-byte packet has NO acquisition timestamp. Local MAVLink2
+     * extensions append boot-us/device/uncertainty without changing CRC20. */
+    if(length>5 && u64(p+5) && boot_usec(m,u64(p+5),&stamp)) {
+        s.has_time=1; s.t_us=stamp;
+    }
+    for(metric=WEATHER_TEMPERATURE;metric<=WEATHER_HUMIDITY;++metric) {
+        s.metric=(uint8_t)metric;
+        s.value=metric==WEATHER_TEMPERATURE ? (double)i16(p)*.01+273.15 : (double)u16(p+2)*.0001;
+        s.seq=++m->weather_seq;
+        if(!s.has_time) emit_weather(m,&s);
+        else if(m->weather_pending_count<WEATHER_CAPACITY) {
+            unsigned slot=m->weather_pending_count++;
+            m->weather_pending[slot].sample=s;
+            m->weather_pending[slot].received_ms=now;
+            m->weather_pending[slot].aligned=0;
+        } else ++m->report.pending_overflow;
+    }
+}
+static void flush_weather(mi_input *m,uint64_t now,int finishing)
+{
+    unsigned j=0;
+    while(j<m->weather_pending_count) {
+        weather_sample *s=&m->weather_pending[j].sample;
+        uint64_t received=m->weather_pending[j].received_ms;
+        if(!m->weather_pending[j].aligned) {
+            tb_sample aligned; memset(&aligned,0,sizeof(aligned)); aligned.t_us=s->t_us;
+            if(align_sample(m,&aligned)) {
+                memcpy(s->p,aligned.p,sizeof(s->p)); memcpy(s->v,aligned.v,sizeof(s->v));
+                s->pos_error_m=aligned.pos_error_m; s->has_position=1;
+                m->weather_pending[j].aligned=1;
+            }
+        }
+        if(finishing || (now>=received && now-received>=200)) {
+            if(!s->has_position) ++m->report.no_navigation;
+            emit_weather(m,s);
+            m->weather_pending[j]=m->weather_pending[--m->weather_pending_count];
+        } else ++j;
+    }
+}
 static void flush_pending(mi_input *m, uint64_t watermark, uint64_t now, int finishing)
 {
     unsigned cache;
@@ -300,18 +362,19 @@ static void flush_pending(mi_input *m, uint64_t watermark, uint64_t now, int fin
         m->last_watermark_us = watermark; m->report.watermark_us = watermark;
         event(m, MI_WATERMARK, watermark);
     }
-    m->report.pending = m->pending_count;
+    m->report.pending = m->pending_count + m->weather_pending_count;
 }
 void mi_tick(mi_input *m, uint64_t now)
 {
     uint64_t watermark;
     if (!m) return;
     watermark = m->high_boot_us > MI_REORDER_US ? m->high_boot_us - MI_REORDER_US : 0;
+    flush_weather(m,now,0);
     flush_pending(m, watermark, now, 0);
 }
 void mi_finish(mi_input *m, uint64_t now)
 {
-    if (m) flush_pending(m, m->high_boot_us, now, 1);
+    if (m) { flush_weather(m,now,1); flush_pending(m, m->high_boot_us, now, 1); }
 }
 static void global_navigation(mi_input *m, const uint8_t *p, uint64_t now)
 {
@@ -362,7 +425,7 @@ static void global_navigation(mi_input *m, const uint8_t *p, uint64_t now)
     add_nav(m, &nav);
 }
 static void packet(mi_input *m, uint32_t id, const uint8_t *p, uint8_t sysid,
-                   uint8_t compid, uint8_t sequence, uint64_t now)
+                   uint8_t compid, uint8_t sequence, unsigned length, uint64_t now)
 {
     mi_device *d = device(m, sysid, compid, now);
     uint64_t stamp;
@@ -393,11 +456,12 @@ static void packet(mi_input *m, uint32_t id, const uint8_t *p, uint8_t sysid,
     if (!m->report.selected_system || !m->report.selected_component ||
         m->report.selected_system != sysid) return;
     if (m->report.selected_component != compid) {
-        if (id == 251 || id == 252 || id == 29 || id == 137 || id == 143 || id == 105)
+        if (id == 251 || id == 252 || id == 29 || id == 137 || id == 143 || id == 105 || id == 12920)
             ++m->report.wrong_clock_component;
         return;
     }
-    if (id == 2) {
+    if(id==12920) weather_observation(m,p,length,now);
+    else if (id == 2) {
         uint64_t utc = u64(p);
         stamp = boot_ms(m, u32(p + 8));
         if (utc >= MI_UNIX_MIN_US && utc < MI_UNIX_MAX_US && m->emit) {
@@ -492,7 +556,7 @@ static void parse(mi_input *m, uint64_t now)
         } else {
             memset(payload, 0, sizeof(payload)); memcpy(payload, m->frame + header, length);
             ++m->report.frames;
-            packet(m, id, payload, m->frame[v2 ? 5 : 3], m->frame[v2 ? 6 : 4], m->frame[v2 ? 4 : 2], now);
+            packet(m, id, payload, m->frame[v2 ? 5 : 3], m->frame[v2 ? 6 : 4], m->frame[v2 ? 4 : 2], (unsigned)length, now);
         }
         m->used -= total;
         if (m->used) memmove(m->frame, m->frame + total, m->used);

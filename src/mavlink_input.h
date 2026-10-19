@@ -2,6 +2,7 @@
 #define MAVLINK_INPUT_H
 
 #include "telemetry.h"
+#include "weather.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -34,7 +35,7 @@ typedef struct {
     uint64_t unsupported_flags, signed_rejected, sequence_gaps, duplicates;
     uint64_t observations, no_navigation, no_clock, wrong_clock_component;
     uint64_t invalid_value, pending_overflow, late_observation, nav_rejected;
-    uint64_t device_overflow, reboots, sequence_wraps;
+    uint64_t device_overflow, reboots, sequence_wraps, weather_reboot_dropped;
     uint32_t devices, pending;
     uint8_t selected_system, selected_component, gps_fix;
     uint64_t boot_us, watermark_us;
@@ -44,12 +45,13 @@ typedef struct {
     mi_device device[MI_DEVICE_CAP];
 } mi_report;
 
-typedef enum { MI_SAMPLE, MI_CLOCK, MI_RESET, MI_WATERMARK, MI_ORIGIN } mi_event_kind;
+typedef enum { MI_SAMPLE, MI_CLOCK, MI_RESET, MI_WATERMARK, MI_ORIGIN, MI_WEATHER_SAMPLE } mi_event_kind;
 typedef struct {
     mi_event_kind kind;
     uint8_t sysid, compid;
     uint32_t epoch;
     tb_sample sample;
+    weather_sample weather;
     uint64_t boot_us, utc_us;
     uint32_t uncert_us;
     double origin[3]; /* MI_ORIGIN: WGS84 lat/lon, MSL altitude */
@@ -72,6 +74,9 @@ typedef struct {
     unsigned nav_count;
     mi_pending pending[MI_PENDING_CAP];
     unsigned pending_count;
+    struct { weather_sample sample; uint64_t received_ms; uint8_t aligned; } weather_pending[WEATHER_CAPACITY];
+    unsigned weather_pending_count;
+    uint32_t weather_seq;
     uint64_t high_boot_us, wrap_ms, last_emitted_us, last_watermark_us;
     uint32_t last_boot_ms, epoch, next_seq, emitted_seq;
     uint8_t have_boot, have_emitted, origin_set;
@@ -90,8 +95,9 @@ void mi_feed(mi_input *input, const uint8_t *bytes, size_t count,
              uint64_t host_monotonic_ms);
 void mi_tick(mi_input *input, uint64_t host_monotonic_ms);
 /* Flush the final reorder tail at a controlled stream boundary. Only samples
- * with actual bracketing navigation are emitted; unavailable navigation is
- * counted and discarded. Call before changing channels or ending a session. */
+ * on the legacy path require actual bracketing navigation; otherwise they are
+ * counted and discarded. Weather values are preserved with unknown positions
+ * when navigation is unavailable. Call before changing channels or ending a session. */
 void mi_finish(mi_input *input, uint64_t host_monotonic_ms);
 void mi_get_report(const mi_input *input, mi_report *report);
 /* Discard only a partial frame when switching byte streams, never concatenate
