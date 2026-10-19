@@ -1,7 +1,6 @@
-# Flat UTF-8 key=value configuration. Restart the sender to apply edits.
-# Give every Pixhawk boot/run a new session before sending new data.
-# This example is safe dry output; replace "-" with your own HTTPS endpoint.
-# Authenticate through the named environment variable; never paste a token here.
+# UTF-8 key=value settings. Saved edits apply on restart; observations stay in RAM.
+# Session is a readable prefix; live mode adds a unique run/source ID.
+# "-" is dry JSON output, not HTTP.
 url=-
 stream=env1
 session=replace-for-each-boot
@@ -17,6 +16,33 @@ refresh_ms=1000
 idle_warn_ms=2000
 ack_warn_ms=5000
 summary=0
-# Windows applies connect/I/O timeouts per stage. Linux total HTTP timeout is
-# connect_timeout_ms + 2 * io_timeout_ms. Warning thresholds only affect the monitor.
-# Saving edits does not retarget pending batches; restart with the saved file.
+
+# Native binary MAVLink discovery. For normalized CSV, use input_mode=csv.
+input_mode=mavlink
+serial_port=auto
+serial_baud=115200
+websocket_url=
+auto_scan=1
+probe_ms=2000
+link_timeout_ms=5000
+reconnect_ms=1000
+# 0 selects the first matching autopilot; devices remain visible in the monitor.
+target_system=0
+target_component=0
+# UINT32_MAX: source timing uncertainty is unknown, not zero.
+system_time_uncert_us=4294967295
+# Explicit interpolation acceleration assumption, not a measured bound.
+accel_bound_mps2=10
+# 0 runs continuously; positive limits input capture duration.
+duration_ms=0
+# Optional arbitrary units, e.g. temp:C;humidity:%;pm25:ug/m3
+unit_map=
+# First valid GLOBAL_POSITION_INT chooses lat/lon and MSL altitude origin.
+# 0 uses the fixed origin fields above; CSV always uses its explicit origin.
+origin_auto=1
+
+# WebSocket uses ws:// or wss:// and carries binary MAVLink frames.
+# Do not put credentials in URLs. UI hides query values; files retain them.
+# Token values stay in the environment named by token_env; only its NAME is saved.
+# Windows applies HTTP I/O timeouts per stage. Linux total HTTP timeout is
+# connect_timeout_ms + 2 * io_timeout_ms. Warning thresholds affect the monitor.

@@ -88,7 +88,7 @@ jobs:
         run: python src/tests/test_sender.py build/${{ matrix.preset }}/mavlink_telemetry_data_router_headless${{ matrix.suffix }}
       - name: Confirmed batch release
         run: python src/tests/test_confirmation.py build/${{ matrix.preset }}/mavlink_telemetry_data_router_headless${{ matrix.suffix }}
-      - name: Monitor settings and POSIX PTY tests
+      - name: Interactive settings and POSIX PTY tests
         run: python src/tests/test_monitor.py build/${{ matrix.preset }}/mavlink_telemetry_data_router_headless${{ matrix.suffix }} --interactive-executable build/${{ matrix.preset }}/mavlink_telemetry_data_router_interactive${{ matrix.suffix }}
       - name: Maximum JSON capacity
         run: python src/tests/test_sender_limits.py build/${{ matrix.preset }}/mavlink_telemetry_data_router_headless${{ matrix.suffix }}

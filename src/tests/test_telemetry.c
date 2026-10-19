@@ -129,6 +129,39 @@ static int check_uncertainty_statistics(void)
     return 1;
 }
 
+static int check_unknown_position_error(void)
+{
+    tb_batch b;
+    tb_sample s=sample(1,1,"sensor","u",10);
+    tb_nav a,c;
+    char json[65536];
+    const tb_stat *st;
+    tb_batch_init(&b,0);
+    s.pos_error_m=NAN;
+    CHECK(tb_sample_valid(&s));
+    CHECK(tb_batch_add(&b,&s));
+    st=find_stat(&b,"sensor"); CHECK(st && st->n==1 && st->position_n==0);
+    tb_batch_prepare(&b); CHECK(tb_batch_json(&b,json,sizeof(json))>0);
+    CHECK(strstr(json,"\"position_error_n\":0") && strstr(json,"\"position_error_mean_m\":null"));
+    CHECK(strstr(json,"123,1234,null,"));
+    CHECK(!strstr(json,"nan") && !strstr(json,"NaN"));
+    s.t_us++; s.seq++; s.pos_error_m=2; s.v[0]=s.v[1]=s.v[2]=0;
+    CHECK(tb_batch_add(&b,&s));
+    st=find_stat(&b,"sensor"); CHECK(st && st->n==2 && st->position_n==1);
+    CHECK(st->mean_position_error_m==2 && st->max_position_error_m==2);
+    s.t_us++; s.seq++; s.pos_error_m=NAN; CHECK(tb_batch_add(&b,&s));
+    s.t_us++; s.seq++; s.pos_error_m=4; CHECK(tb_batch_add(&b,&s));
+    st=find_stat(&b,"sensor"); CHECK(st && st->n==4 && st->position_n==2);
+    CHECK(st->mean_position_error_m==3 && st->max_position_error_m==4);
+    memset(&a,0,sizeof(a)); memset(&c,0,sizeof(c)); c.t_us=100000;
+    a.pos_error_m=NAN; c.pos_error_m=1;
+    CHECK(tb_align(&a,&c,50000,10,&s) && isnan(s.pos_error_m));
+    CHECK(tb_sample_valid(&s));
+    tb_batch_prepare(&b); CHECK(tb_batch_json(&b,json,sizeof(json))>0);
+    CHECK(strstr(json,"\"position_error_n\":2") && strstr(json,"\"position_error_mean_m\":3"));
+    return 1;
+}
+
 static int check_rejection(void)
 {
     tb_batch b;
@@ -158,7 +191,7 @@ static int check_rejection(void)
         bad=s; bad.time_uncert_us=20001; CHECK(rejected_unchanged(&b,&bad));
         bad=s; bad.nav_age_us=200001; CHECK(rejected_unchanged(&b,&bad));
         bad=s; bad.pos_error_m=-1; CHECK(rejected_unchanged(&b,&bad));
-        bad=s; bad.pos_error_m=NAN; CHECK(rejected_unchanged(&b,&bad));
+        bad=s; bad.pos_error_m=NAN; CHECK(tb_sample_valid(&bad));
         bad=s; bad.pos_error_m=INFINITY; CHECK(rejected_unchanged(&b,&bad));
         bad=s; bad.key[0]='\0'; CHECK(rejected_unchanged(&b,&bad));
         bad=s; memset(bad.key,'x',sizeof(bad.key)); CHECK(rejected_unchanged(&b,&bad));
@@ -303,6 +336,8 @@ static int fixture(const char *kind)
         s.p[2]=120.125+i*0.1;
         if(!strcmp(kind,"large_time")) s.utc_us=UINT64_MAX;
         if(i==2) s.utc_us=0;
+        if(!strcmp(kind,"unknown_position")) s.pos_error_m=NAN;
+        if(!strcmp(kind,"mixed_position") && (i%2)==0) s.pos_error_m=NAN;
         if(!tb_batch_add(&b,&s)) return 0;
     }
     tb_batch_prepare(&b);
@@ -353,6 +388,6 @@ int main(int argc,char **argv)
     if(argc!=1) return 2;
     if(!check_statistics() || !check_canonical_order() || !check_uncertainty_statistics() || !check_rejection() ||
         !check_keys_and_time_edges() || !check_capacity_statistics() ||
-        !check_alignment() || !check_serializer_bounds()) return 1;
+        !check_alignment() || !check_unknown_position_error() || !check_serializer_bounds()) return 1;
     printf("PASS %u C checks\n",checks); return 0;
 }

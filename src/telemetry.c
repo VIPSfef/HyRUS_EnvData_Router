@@ -27,7 +27,7 @@ static int text_valid(const char *s, size_t size, int unit)
 static int nav_valid(const double p[3], const float v[3], float error)
 {
     unsigned i;
-    if (!isfinite(error) || error < 0 || error > 1e9f) return 0;
+    if (!isnan(error) && (!isfinite(error) || error < 0 || error > 1e9f)) return 0;
     for (i = 0; i < 3; ++i)
         if (!isfinite(p[i]) || fabs(p[i]) > 1e9 ||
             !isfinite(v[i]) || fabs((double)v[i]) > 1e9) return 0;
@@ -55,15 +55,23 @@ void tb_batch_init(tb_batch *b, uint64_t window_us)
 static void stat_add(tb_stat *st, const tb_sample *s)
 {
     double x = s->value, delta;
-    double speed = sqrt((double)s->v[0] * s->v[0] +
-                        (double)s->v[1] * s->v[1] +
-                        (double)s->v[2] * s->v[2]);
-    double error = s->pos_error_m + speed * s->time_uncert_us / 1e6;
+    if (isfinite(s->pos_error_m)) {
+        double speed = sqrt((double)s->v[0] * s->v[0] +
+                            (double)s->v[1] * s->v[1] +
+                            (double)s->v[2] * s->v[2]);
+        double error = s->pos_error_m + speed * s->time_uncert_us / 1e6;
+        ++st->position_n;
+        if (st->position_n == 1)
+            st->mean_position_error_m = st->max_position_error_m = error;
+        else {
+            st->mean_position_error_m += (error - st->mean_position_error_m) / st->position_n;
+            if (error > st->max_position_error_m) st->max_position_error_m = error;
+        }
+    }
     if (!st->n) {
         st->n = 1;
         st->mean = st->min = st->max = x;
         st->mean_time_uncert_us = st->max_time_uncert_us = s->time_uncert_us;
-        st->mean_position_error_m = st->max_position_error_m = error;
         return;
     }
     ++st->n;
@@ -73,10 +81,8 @@ static void stat_add(tb_stat *st, const tb_sample *s)
     if (x < st->min) st->min = x;
     if (x > st->max) st->max = x;
     st->mean_time_uncert_us += (s->time_uncert_us - st->mean_time_uncert_us) / st->n;
-    st->mean_position_error_m += (error - st->mean_position_error_m) / st->n;
     if (s->time_uncert_us > st->max_time_uncert_us)
         st->max_time_uncert_us = s->time_uncert_us;
-    if (error > st->max_position_error_m) st->max_position_error_m = error;
 }
 
 int tb_batch_add(tb_batch *b, const tb_sample *s)
@@ -227,18 +233,21 @@ int tb_batch_json_mode(const tb_batch *b, char *buf, size_t cap, int include_raw
             j ? "," : "", st->key, st->unit, st->n);
         if (!st->n)
             put(&w, "null,\"variance\":null,\"min\":null,\"max\":null,"
-                "\"time_uncert_mean_us\":null,\"time_uncert_max_us\":null,"
-                "\"position_error_mean_m\":null,\"position_error_max_m\":null}");
+                "\"time_uncert_mean_us\":null,\"time_uncert_max_us\":null");
         else {
             put(&w, "%.17g,\"variance\":", st->mean);
             if (st->n < 2) put(&w, "null");
             else put(&w, "%.17g", st->m2 / (st->n - 1));
             put(&w, ",\"min\":%.17g,\"max\":%.17g,"
-                "\"time_uncert_mean_us\":%.17g,\"time_uncert_max_us\":%.17g,"
-                "\"position_error_mean_m\":%.17g,\"position_error_max_m\":%.17g}",
-                st->min, st->max, st->mean_time_uncert_us, st->max_time_uncert_us,
-                st->mean_position_error_m, st->max_position_error_m);
+                "\"time_uncert_mean_us\":%.17g,\"time_uncert_max_us\":%.17g",
+                st->min, st->max, st->mean_time_uncert_us, st->max_time_uncert_us);
         }
+        put(&w, ",\"position_error_n\":%" PRIu32, st->position_n);
+        if (!st->position_n)
+            put(&w, ",\"position_error_mean_m\":null,\"position_error_max_m\":null}");
+        else
+            put(&w, ",\"position_error_mean_m\":%.17g,\"position_error_max_m\":%.17g}",
+                st->mean_position_error_m, st->max_position_error_m);
     }
     put(&w, "],\"raw\":[");
     for (j = 0; include_raw && j < b->raw_n && !w.failed; ++j) {
@@ -249,8 +258,9 @@ int tb_batch_json_mode(const tb_batch *b, char *buf, size_t cap, int include_raw
         for (i = 0; i < 3; ++i) put(&w, ",%.9g", (double)s->v[i]);
         if (isnan(s->value)) put(&w, ",null");
         else put(&w, ",%.17g", s->value);
-        put(&w, ",%" PRIu32 ",%" PRIu32 ",%.9g,", s->time_uncert_us,
-            s->nav_age_us, (double)s->pos_error_m);
+        put(&w, ",%" PRIu32 ",%" PRIu32 ",", s->time_uncert_us, s->nav_age_us);
+        if (isnan(s->pos_error_m)) put(&w, "null,");
+        else put(&w, "%.9g,", (double)s->pos_error_m);
         if (s->utc_us) put(&w, "\"%" PRIu64 "\",%" PRIu32 "]",
                            s->utc_us, s->utc_uncert_us);
         else put(&w, "null,null]");

@@ -6,6 +6,12 @@
 #include "telemetry.h"
 #include "time_sync.h"
 
+#define TM_MAX_DEVICES 32u
+typedef struct {
+    uint8_t sysid, compid, type, autopilot, base_mode, system_status, have_heartbeat;
+    uint32_t custom_mode;
+    uint64_t last_seen_ms;
+} tm_device;
 typedef struct {
     char key[TB_KEY_BYTES], unit[TB_UNIT_BYTES];
     uint64_t observations, t_us;
@@ -13,7 +19,6 @@ typedef struct {
     double value;
     int have_value;
 } tm_key;
-
 typedef struct {
     uint64_t now_ms, started_ms;
     int stop, eof, failed, dry_run;
@@ -40,18 +45,23 @@ typedef struct {
     float pos_error_m;
     uint64_t utc_us;
     tc_report clock;
+    char active_source[256], source_status[32], source_error[160];
+    uint64_t parsed_frames, bad_crc, unknown_message, no_navigation;
+    uint64_t pending_overflow, signed_rejected;
+    uint64_t no_clock, wrong_clock_component, invalid_value, late_observation;
+    unsigned device_n, pending_observations, selected_system, selected_component, gps_fix;
+    tm_device devices[TM_MAX_DEVICES];
 } tm_snapshot;
 
-/* Root owns the thread and synchronization; snapshot must return a consistent
- * bounded copy and set stop when monitoring should finish. Active configuration
- * is immutable. Editing only changes a private draft; save applies on restart.
- * Keyboard input uses CONIN$ or /dev/tty, never the CSV input stream.
- * Console drawing goes to stderr; redirected stderr gets plain 1 Hz snapshots.
- * This module does not stop the receiver or change any process-global locale. */
+/* Root owns thread synchronization; snapshot returns a bounded consistent copy.
+ * Active configuration is immutable. Private draft saves apply on restart.
+ * Keyboard is CONIN$ or /dev/tty. With CSV console stdin, editing is disabled;
+ * MAVLink input does not consume stdin, so console editing remains available.
+ * stderr receives the dashboard, or plain 1 Hz snapshots when redirected. */
 void tm_run(void *context, void (*snapshot)(void *, tm_snapshot *),
             const tb_config *active, const char *config_path);
-/* One plain snapshot; no escapes, terminal input or configuration writes.
- * Does not display an endpoint or credential value. Useful for --monitor-once. */
+/* One plain snapshot; no terminal input or writes. URL queries and credentials
+ * are hidden. Useful for tests or a one-shot diagnostic. */
 void tm_render(FILE *out, const tm_snapshot *snapshot, const tb_config *active);
 
 #endif

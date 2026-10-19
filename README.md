@@ -1,105 +1,121 @@
 # mavlink_telemetry_data_router
 
-이동 중인 센서에서 받은 **관측값·측정시각·위치·속도**를 모아 서버로 전달하는 프로그램입니다. Windows x64와 Linux x64에서 사용합니다. Intel과 AMD에는 같은 x64 실행 파일을 사용합니다.
+**MAVLink 스트림을 자동으로 찾아 관측값을 수집하고, 메모리에 모았다가 서버로 보내는 상시 중계 프로그램**입니다. Windows x64와 Linux x64를 지원합니다.
 
-예를 들어 100 Hz로 들어온 관측을 한 개씩 서버에 보내는 대신, **1초 구간의 원본 100개와 통계를 묶어** 전송합니다. 기본 설정은 원본을 보존하며, 서버 요청 시작 간격은 최소 1초입니다.
+Windows의 COM, Linux의 tty 또는 설정한 WebSocket에서 MAVLink v1/v2를 직접 읽습니다. 매 관측을 사람이 입력하거나 다른 CSV 변환기를 실행할 필요가 없습니다.
 
-## 무엇을 실행하면 되나요?
+## 어떤 파일을 실행하나요?
 
-두 프로그램 중 **하나만** 실행하세요. 둘 다 수신·통계 처리·서버 전송을 자체적으로 수행합니다.
-
-| 실행 파일 이름 | 사용할 때 |
+| 프로그램 | 용도 |
 |---|---|
-| `mavlink_telemetry_data_router_interactive` | 화면에서 수신량·전송 상태를 보고 설정을 편집할 때 |
-| `mavlink_telemetry_data_router_headless` | 화면 없이 자동 운용하거나 다른 프로그램에서 실행할 때 |
+| `mavlink_telemetry_data_router_interactive` | 기기 목록·수신 상태·서버 전송 상태를 보며 설정을 편집할 때 |
+| `mavlink_telemetry_data_router_headless` | 화면 없이 계속 수집·중계할 때 |
 
-Windows 파일에는 `.exe`가 붙습니다. **interactive를 쓰기 위해 headless를 따로 켤 필요가 없습니다.**
+Windows에는 `.exe`가 붙습니다. **둘 중 하나만 실행**하세요. interactive 자체가 수신·처리·전송을 수행합니다.
 
-현재 입력은 MAVLink 해독기가 만든 **정규화 CSV**입니다. Pixhawk의 UART/UDP MAVLink 패킷을 직접 해독하는 기능과 최종 저장 서버는 포함하지 않습니다.
+실행 파일은 `build/windows-x64/` 또는 `build/linux-x64/`에 각각 두 개씩 있습니다. 배포 ZIP/TAR.GZ 안에서는 `bin/`에 있습니다. 소스는 `src/`, 선택한 개발 검사 결과는 `build/<OS>/tests/`, 배포물은 `build/packages/`에 둡니다.
 
-```text
-센서/Pixhawk → MAVLink 해독·시각/좌표 정렬 → 이 프로그램 → HTTP/HTTPS 저장 서버
-```
+## 먼저 설정하고 실행하기
 
-## 파일은 어디에 있나요?
-
-소스를 받은 폴더에서 실행 파일은 다음 위치에 있습니다. 소스만 내려받았다면 아래 빌드 절차를 먼저 수행하세요.
-
-```text
-src/                             프로그램·개발 검사 소스
-config/telemetry.ini.example     설정 예제
-examples/example.csv             실행 확인용 가상 관측
-build/
-  windows-x64/
-    mavlink_telemetry_data_router_headless.exe
-    mavlink_telemetry_data_router_interactive.exe
-    tests/                       개발 검사를 선택한 경우에만 생성
-  linux-x64/
-    mavlink_telemetry_data_router_headless
-    mavlink_telemetry_data_router_interactive
-    tests/                       개발 검사를 선택한 경우에만 생성
-  packages/                      Windows ZIP, Linux TAR.GZ, 소스 패키지
-```
-
-Windows와 Linux용 운용 프로그램은 **각각 2개, 합계 4개**입니다. 실행 파일은 자신이 사용할 OS의 것으로 선택합니다. 배포 ZIP/TAR.GZ를 받았다면 두 프로그램은 압축 안의 `bin/`에 있습니다. 아래 실행 예제는 소스 폴더 기준이므로 배포본에서는 프로그램 경로를 `bin/`으로 바꾸고 설정·예제 경로도 실제 위치에 맞춥니다.
-
-## 먼저 예제로 실행하기
-
-아래 명령은 **저장소 루트 폴더**에서 실행합니다. 기본 설정의 `url=-`는 서버에 접속하지 않고 JSON을 출력하는 시험 모드입니다. 여기서는 JSON을 버리고 상태 화면만 봅니다.
+아래 명령은 소스 폴더 기준입니다. 설정 예제를 복사합니다.
 
 Windows PowerShell:
 
 ```powershell
 Copy-Item .\config\telemetry.ini.example .\telemetry.ini
-Get-Content .\examples\example.csv | .\build\windows-x64\mavlink_telemetry_data_router_interactive.exe --config .\telemetry.ini 1>$null
+.\build\windows-x64\mavlink_telemetry_data_router_interactive.exe --config .\telemetry.ini
 ```
 
 Linux:
 
 ```sh
 cp config/telemetry.ini.example telemetry.ini
-./build/linux-x64/mavlink_telemetry_data_router_interactive --config ./telemetry.ini < examples/example.csv > /dev/null
+./build/linux-x64/mavlink_telemetry_data_router_interactive --config ./telemetry.ini
 ```
 
-예제 파일을 모두 읽으면 프로그램이 종료됩니다. 계속 갱신되는 화면과 설정 편집을 사용하려면 실제 해독기의 CSV 출력을 연결해야 합니다. 다음 `your_decoder`는 그 해독기 실행 명령으로 바꿉니다.
+관측 스트림은 프로그램이 자동으로 읽습니다. 위 명령 뒤에 데이터를 파이프로 넣지 않습니다.
 
-```sh
-your_decoder | ./build/linux-x64/mavlink_telemetry_data_router_interactive --config ./telemetry.ini
+설정 파일을 지정하지 않으면 현재 폴더의 `telemetry.ini`, 그다음 실행 파일 옆의 `telemetry.ini`를 찾습니다. 둘 다 없으면 실행 파일 옆에 기본 설정을 만들고 자동 탐색을 시작합니다.
+
+**예제의 `url=-`는 JSON 미리보기 모드이며 서버 전송이 아닙니다.** 실제 운용 전에 `url`을 서버 주소로 바꾸세요. 미리보기 JSON과 화면을 함께 보고 싶지 않다면 Windows에서는 명령 뒤에 `1>$null`, Linux에서는 `>/dev/null`을 붙입니다.
+
+## 어떤 설정을 바꾸면 되나요?
+
+```ini
+input_mode=mavlink
+serial_port=auto
+serial_baud=115200
+websocket_url=
+auto_scan=1
+url=https://YOUR_SERVER/ingest
+stream=weather
+session=flight-a
+send_interval_ms=1000
+origin_auto=1
+unit_map=temp:C;humidity:%;pm25:ug/m3
 ```
 
-화면 없이 실행하려면 같은 위치의 `_headless` 프로그램을 선택합니다.
-
-## 실제 서버로 보내기
-
-`telemetry.ini`에서 우선 다음 항목을 설정합니다.
-
-| 항목 | 설정할 내용 |
+| 설정 | 의미 |
 |---|---|
-| `url` | 서버의 수신 주소. 예: `https://YOUR_SERVER/ingest` |
-| `stream` | 관측 장치나 데이터 흐름을 구분하는 이름 |
-| `session` | Pixhawk 부팅 또는 관측 실행마다 새로 정하는 식별자 |
-| `origin_lat`, `origin_lon`, `origin_alt` | 위치 좌표의 기준 원점. 위도·경도·타원체고 |
-| `token_env` | 인증 토큰을 담을 환경변수 이름. 기본 `TB_TOKEN` |
+| `serial_port` | Windows `COM5`, Linux `/dev/ttyACM0`처럼 우선 확인할 포트. `auto`는 자동 탐색, `none`은 우선 포트 없음 |
+| `serial_baud` | 장치와 일치하는 통신 속도. 기본 115200 |
+| `websocket_url` | 선택 사항. `ws://HOST/path` 또는 `wss://HOST/path`의 **바이너리 MAVLink** 스트림 |
+| `auto_scan` | `1`이면 다른 COM/tty도 검색. `0`이면 지정한 포트·WebSocket만 사용 |
+| `url` | 관측을 전송할 HTTP/HTTPS 서버 주소 |
+| `stream`, `session` | 장치 흐름과 관측 실행을 구분하는 이름. 실제 송신 세션에는 실행·소스 변경 식별자가 붙음 |
+| `origin_auto` | 기본 `1`: 첫 유효 전역 항법 위치를 지역 좌표 원점으로 사용. `0`: 지정한 원점 사용 |
+| `unit_map` | 선택 사항. 키에 단위를 부여하는 `키:단위;키:단위` 목록 |
 
-인증 토큰 **값**은 설정 파일 대신 지정한 환경변수에 넣습니다. `send_interval_ms=1000`은 서버 요청 시작 간격이며 센서 수신 빈도를 제한하지 않습니다.
+인증 토큰 값은 `token_env`에 지정한 환경변수에 넣습니다. 기본 환경변수 이름은 `TB_TOKEN`입니다. 설정 파일에는 토큰 값 대신 환경변수 이름을 저장합니다.
 
-interactive 화면에서 `e`로 설정을 열고, 항목을 고쳐 Enter로 확인한 다음 `s`로 저장할 수 있습니다. **저장한 설정은 재시작 후 적용**됩니다. 미확인 자료가 남았다면 먼저 정상 전송을 마친 뒤 재시작하세요.
+interactive에서 `e`로 설정을 열고 항목 편집 후 Enter로 확인, `s`로 저장합니다. **저장은 재시작 후 적용**됩니다. 미확인 관측이 남았다면 먼저 전송을 마친 뒤 재시작하세요.
 
-화면에서는 수신률, 거부·누락 수, 대기 큐, HTTP 결과, 서버 확인 수, GPS 시각 추정 상태를 확인할 수 있습니다. 전체 설정과 키보드 조작은 [상세 사용법](docs/REFERENCE.md#상태-모니터와-서버-설정)에 있습니다.
+## 실행 후 자동으로 하는 일
 
-## 서버가 꺼져 있으면 어떻게 되나요?
+1. 설정한 포트와 WebSocket을 우선 확인하고, 필요하면 다른 COM/tty를 순서대로 탐색합니다.
+2. CRC가 맞는 MAVLink를 발견하면 해당 채널을 유지합니다. 데이터가 끊기면 다시 탐색합니다.
+3. HEARTBEAT에서 시스템·컴포넌트 ID, 기기 종류와 PX4/ArduPilot 등의 정보를 확인해 목록으로 보여 줍니다.
+4. 선택한 비행제어기의 시계에 속한 키–값 관측에 위치·속도·부팅 경과시각을 연결합니다.
+5. 비어 있지 않은 관측만 원본·통계와 함께 묶어 기본 1초 간격으로 서버에 보냅니다.
+6. 서버가 확정 수락한 묶음에 HTTP 204로 응답하면 해당 메모리 공간을 재사용합니다.
 
-입력이 계속 열려 있는 동안에는 관측 수신과 interactive 화면 갱신이 계속됩니다. 전송에 실패한 자료는 메모리에 보관하고 다시 시도합니다.
+관측은 **메모리에만** 유지합니다. 서버에 연결되지 않아도 수신은 계속하지만 메모리가 가득 차면 새 묶음을 버리고 손실을 표시합니다. 종료 시 남은 미확인 자료는 소실됩니다.
 
-서버가 모든 배치를 확정 수락한 뒤 **HTTP 204**를 반환하면 해당 자료의 메모리 공간을 재사용합니다. 200·202 등 다른 응답이나 연결 실패는 확정 수락으로 처리하지 않습니다. 서버도 배치 식별자로 중복을 제거해야 합니다.
+하트비트·항법만 있고 수집할 관측값이 없으면 서버에 빈 요청을 보내지 않습니다. 요청이 느리거나 실패하면 재시도하므로 정확한 정시 도착이나 무조건 초당 한 번의 성공을 보장하지는 않습니다.
 
-메모리는 무한하지 않습니다. 대기 큐는 최대 8개 구간이고, 가득 차면 새 구간을 버리며 손실을 표시합니다. 관측은 디스크에 자동 저장하지 않습니다. 입력이 끝난 뒤에도 전송 실패가 계속되면 미전송 수를 알리고 종료하므로, 남은 메모리 자료는 소실됩니다.
+## 어떤 데이터를 수집하나요?
 
-## 소스에서 빌드하기
+기본 키–값 운반 형식은 MAVLink `NAMED_VALUE_FLOAT`와 `NAMED_VALUE_INT`입니다. **온도·습도·미세먼지 같은 항목을 코드에 고정하지 않고 새 키를 자동 등록**합니다. 이름이 추가됐다는 이유로 프로그램을 다시 만들 필요가 없습니다. 현재 한 소스 세션의 키 한도는 16개이며 초과는 거부 수로 표시합니다.
 
-CMake 3.21 이상과 Ninja, 대상 OS의 x64 C 컴파일러가 필요합니다. 일반 빌드는 운용 프로그램 2개만 만듭니다.
+이 메시지에는 단위가 없으므로 `unit_map`에서 지정합니다. 미지정 단위는 `unknown`으로 보존합니다. 기본 압력·온도 메시지와 유효 필드가 표시된 HIGHRES_IMU도 수집합니다.
 
-Windows는 LLVM-MinGW의 x64 Clang과 Ninja를 PATH에 둔 뒤 실행합니다.
+MAVLink 패킷 CRC·하트비트는 직접 검사합니다. 알 수 없는 메시지는 미해독 수로 표시하고 다른 메시지 수신을 계속합니다. XML이 다른 임의의 새로운 메시지를 내용 정의 없이 추측해 해독하지는 않습니다.
+
+다른 컴포넌트의 경과시각을 비행제어기 시각과 임의로 섞지 않습니다. 기기 목록에는 표시하되, 시계 관계가 확인되지 않은 관측은 거부 사유를 표시합니다.
+
+## 위치·시각과 통계를 어떻게 보존하나요?
+
+원본에는 키·단위·값과 그 관측의 부팅 시각·위치·속도·품질이 남습니다. 시각이 붙은 실제 항법 사이에서만 위치를 보간하며, 위치를 연결할 수 없는 관측은 보류한 뒤 사유와 함께 누락 수로 표시합니다.
+
+첫 전역 항법 위치를 자동 원점으로 사용할 수 있습니다. 실제 MAVLink 항법의 고도 기준은 MSL이며 타원체고로 바꾸어 표기하지 않습니다. 위치 오차를 모르면 JSON `null`로 보냅니다.
+
+`SYSTEM_TIME`의 원시 boot/UTC 대응점도 보존합니다. 그 오차를 알 수 없는 기본 상태에서는 관측별 UTC 추정은 미상으로 남깁니다. `system_time_uncert_us`에 검증한 오차를 지정하면 UTC 추정과 불확실도를 함께 계산합니다.
+
+1초마다 보내는 묶음과 측정시각의 1초 구간은 다릅니다. 같은 측정 구간이 여러 전송 묶음으로 나뉠 수 있어도, 원본 시각은 바꾸지 않습니다. 서버는 `schema:3`의 **`(stream, session, batch_id)`로 중복을 제거**하고 같은 구간의 자료를 합쳐야 합니다. 통계만으로 이동 경로의 원본을 완전히 복원할 수 없으므로 기본값은 원본 포함입니다.
+
+## 화면과 종료
+
+- `d`: 하트비트로 발견한 장치 목록
+- `k`: 관측값과 전체 진단
+- 위/아래: 목록 이동
+- `e`: 설정 편집, Enter: 검증, `s`: 저장
+- Ctrl+C: 수신 종료 후 대기 자료 전송을 시도하고 종료
+
+서버 오류·CRC 오류·미해독 메시지·위치 없음·시계 불일치·지연 관측·큐 손실을 구분해 확인할 수 있습니다. 서버는 모든 묶음을 확정 수락한 뒤 204를 보내야 합니다. TCP ACK나 HTTP 200/202는 이 확인을 대신하지 않습니다.
+
+## 빌드·설치
+
+CMake 3.21 이상, Ninja, 대상 OS의 x64 C 컴파일러가 필요합니다. Windows는 LLVM-MinGW x64 Clang을 PATH에 두고 실행합니다.
 
 ```powershell
 cmake --preset windows-x64
@@ -107,38 +123,33 @@ cmake --build --preset windows-x64
 cmake --build --preset package-windows-x64
 ```
 
-Linux는 회사 GitLab 등의 저장소 화면에서 복사한 clone URL을 사용합니다. 아래 자리표시자를 실제 주소로 바꿉니다.
+Linux에서는 회사 GitLab 등의 실제 clone URL을 사용합니다.
 
 ```sh
 sudo apt-get update
-sudo apt-get install git cmake ninja-build build-essential libcurl4-openssl-dev
+sudo apt-get install git cmake ninja-build build-essential libcurl4-openssl-dev python3
 git clone YOUR_REPOSITORY_CLONE_URL mavlink_telemetry_data_router
 cd mavlink_telemetry_data_router
 cmake --preset linux-x64
 cmake --build --preset linux-x64
-cmake --build --preset package-linux-x64
 sh install.sh
 ```
 
-Linux 설치 기본 위치는 `$HOME/.local/bin`이며 `PREFIX=/원하는/경로 sh install.sh`로 바꿀 수 있습니다. Linux 실행에도 libcurl와 호환되는 시스템 라이브러리가 필요합니다.
+기본 설치 위치는 `$HOME/.local/bin`이며 `PREFIX=/원하는/경로 sh install.sh`로 변경합니다. Windows에서 Linux x64도 [교차 컴파일](docs/REFERENCE.md#빌드와-개발-검사)할 수 있습니다.
 
-Windows에서 Linux용 파일도 교차 컴파일할 수 있습니다. 절차·컴파일러 경로 설정·Debug 빌드는 [상세 빌드 안내](docs/REFERENCE.md#cmake-소스빌드패키지-트리)를 참고하세요.
+## test_ 프로그램은 무엇인가요?
 
-## test_ 프로그램은 왜 있나요?
+개발자가 수정 후 오류를 찾는 도구이며 운용 중 실행하거나 배포할 필요가 없습니다. 검사 코드는 운용 프로그램에 들어가지 않습니다.
 
-`test_`로 시작하는 파일은 **개발자가 변경 후 오류를 확인하는 검사 도구**입니다. 수집기나 서버가 아니며 운용 프로그램이 호출하지도 않습니다. 평소에 실행하거나 배포할 필요가 없습니다.
-
-| 개발 검사 | 확인하는 것 |
+| 검사 | 확인 대상 |
 |---|---|
-| `test_telemetry` | 평균·분산, 관측 순서, 용량 초과, 위치 보간, JSON 생성 |
-| `test_time_sync` | UTC 추정, 시계 드리프트, 큰 시각 값, 잘못된 동기화 입력 |
-| `test_config` | 설정값 범위, 인증정보 숨김, 한글 경로, 저장 실패 시 기존 파일 보존 |
+| `test_telemetry` | 통계·관측 순서·용량·보간·JSON |
+| `test_time_sync` | UTC 추정·드리프트·극단 시각 |
+| `test_config` | 설정 검증·저장·한글 경로·비밀정보 표시 방지 |
+| `test_mavlink_input` | 실제 바이너리 패킷 CRC·장치 식별·위치 연결·재부팅 |
+| `test_input_transport` | WebSocket·분할 프레임·ping/pong·가상 tty |
 
-세 검사를 하나의 프로그램으로 합칠 수도 있습니다. 현재는 **어느 부분이 실패했는지 구분하기 쉽도록** 나눴습니다. 검사 코드는 운용 프로그램에 포함되지 않으므로, 분리된 검사 프로그램이 있어도 운용 중 CPU·메모리 사용이나 실행 파일 크기는 늘지 않습니다.
-
-검토 결과 검사는 유지하고 **필요할 때만 빌드**하도록 했습니다. 기본값은 `BUILD_TESTING=OFF`이며, 검사를 켜면 결과를 `build/<OS>/tests/`에 따로 만듭니다. 배포 ZIP/TAR.GZ에는 운용 프로그램 2개와 문서·설정 예제 등이 들어가며 `test_` 실행 파일은 제외됩니다.
-
-개발자가 Windows에서 검사하려면:
+원인을 구분하기 위해 나눈 검사들입니다. **기본 빌드는 검사 OFF**이며, 선택하면 `tests/` 하위 폴더에 만듭니다. CTest는 위 검사와 실제 MAVLink→HTTP 통합 시험을 실행합니다.
 
 ```powershell
 cmake --preset windows-x64-tests
@@ -146,13 +157,11 @@ cmake --build --preset windows-x64-tests
 ctest --preset windows-x64-tests
 ```
 
-Linux에서는 위 이름의 `windows`를 `linux`로 바꿉니다. CTest가 세 검사기를 실행하고 결과를 모아 보여 줍니다. HTTP 재시도·서버 확인·동시 수신·interactive 화면은 별도 Python 통합 검사로 확인합니다.
-
-검사 프리셋은 같은 플랫폼 빌드 폴더를 재사용합니다. 일반 프리셋으로 다시 구성하면 검사가 OFF로 돌아가지만, 이미 생성된 `tests/` 파일을 자동 삭제하지는 않습니다. 그 파일은 실행 중인 서비스가 아닙니다.
+Linux에서는 `windows`를 `linux`로 바꿉니다. 일반 프리셋으로 다시 구성하면 검사는 OFF가 되지만 이미 생성된 `tests/` 파일은 자동 삭제하지 않습니다.
 
 ## 상세 자료와 검증 범위
 
-- [기술 참조](docs/REFERENCE.md): 입력 CSV·키/단위 규칙, GPS/UTC·좌표, 통계·오차 추정, 서버 규약, 교차 빌드, 전체 검사 절차
-- [검토·검증 기록](docs/REVIEW.md): 실제 시험 결과, 계산량·메모리, 알려진 한계
+- [기술 참조](docs/REFERENCE.md): 전체 설정·좌표/시각·출력 규약·교차 빌드·CSV 재생
+- [검토·검증 기록](docs/REVIEW.md): 실제 시험과 계산량·메모리·한계
 
-Windows x64는 실제 실행 시험을 통과했습니다. Linux x64 파일은 Windows에서 실제 교차 컴파일하고 ELF 형식·의존성을 확인했으며, Linux에서의 직접 실행은 아직 검증하지 않았습니다.
+Windows에서는 실제 바이너리 MAVLink를 WebSocket으로 받아 HTTP 서버에 전송하는 자동 시험을 통과했습니다. Linux x64는 실제 교차 빌드했으며 Linux에서의 직접 실행과 실제 Pixhawk/물리 COM 연결은 아직 검증하지 않았습니다.

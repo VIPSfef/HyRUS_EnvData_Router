@@ -1,210 +1,108 @@
-# 기술 참조 — mavlink_telemetry_data_router
+# 기술 참조 — mavlink_telemetry_data_router 0.5.0
 
-처음 사용하는 경우 [README](../README.md)부터 읽는다. 이 문서의 명령은 저장소 루트에서 실행한다. 설정 전체 항목, 입력 CSV, 시각·좌표·통계 규약, 교차 빌드와 서버 구현자를 위한 상세 자료다.
+처음 실행할 때는 [README](../README.md)를 읽는다. 이 문서의 명령은 저장소 루트 기준이다. 기본 입력은 바이너리 MAVLink이고, CSV는 명시적인 개발용 재생 모드다.
 
-고속 이동 센서의 관측을 보존하고, 1초 구간별 원본·통계를 묶어 HTTP/HTTPS로 보내는 C99 프로그램이다.
-기본은 **원본 + 통계**이며 `--summary`는 원본을 생략한다. 수신 빈도와 HTTP 요청 빈도를 분리한다.
+## 자동 입력과 채널 선택
 
-## 구성과 연결 범위
+기본 `input_mode=mavlink`에서는 stdin을 읽지 않는다. 우선 포트가 있으면 그 포트, 지정 WebSocket, 자동 검색한 다른 직렬 포트를 순서대로 확인한다. `serial_port=auto`이면 WebSocket이 있으면 먼저 확인한 뒤 검색 포트를 확인한다. 한 번에 한 입력 채널을 유지한다.
 
-`MAVLink 해독기/시각·좌표 정렬 → 정규화 CSV 또는 C API → 고정 큐 → 송신 스레드 → 서버`.
-실제 MAVLink wire 해독기, UART/UDP 입출력, 최종 저장 서버는 포함하지 않는다.
-기존 해독기는 아래 CSV를 출력하거나 `tb_sample`을 채워 `src/telemetry.c/.h`에 연결한다.
-임의 숫자 `key/unit/value`를 처리하므로 해독된 새 key 추가에 코어 소스 변경이 필요 없다.
-새 MAVLink wire 메시지 자체에는 송수신 측 dialect 정의와 해독 라이브러리 업데이트가 필요하다.
-문자열·배열 값, 센서 교정, 좌표 변환, 순서 재정렬은 상위 어댑터의 책임이다.
+Windows는 QueryDosDevice로 COM 후보를 찾고, Linux는 `/dev/serial/by-id/*`, `/dev/ttyACM*`, `/dev/ttyUSB*`를 탐색해 장치 중복을 제거한다. 검색 시 포트를 열지 않으며 실제 확인 순서에 도달한 포트만 연다. 통신 속도는 지정한 `serial_baud`를 사용한다.
 
-## 상태 모니터와 서버 설정
+WebSocket은 클라이언트로 접속하며 바이너리 데이터만 MAVLink 바이트 스트림으로 처리한다. ws/wss, 분할 프레임, ping/pong, 부분 TCP 읽기와 TLS 인증서 검증을 지원한다. 텍스트/JSON WebSocket은 별도 변환 없이는 입력하지 않는다.
 
-`mavlink_telemetry_data_router_headless`는 헤드리스 수집·중계기이고, `mavlink_telemetry_data_router_interactive`는 같은 수집·중계 기능에 TUI를 기본으로 켠 실행 파일이다. `mavlink_telemetry_data_router_headless --interactive`도 같은 기능을 제공한다.
-모니터 자체가 수집·중계 프로그램이므로 별도 `mavlink_telemetry_data_router_headless` 프로세스를 실행하지 않는다. 둘 중 하나만 실행한다.
-최종 수신 서버가 꺼져 있어도 모니터와 입력 수신은 계속 동작하고 재시도한다. 미확인 자료는 고정 RAM 큐에 남으며 큐가 가득 차면 새 구간을 버리고 손실을 표시한다.
-관측 입력은 계속 표준입력으로 받고 화면과 진단은 표준오류로 출력한다. 입력은 MAVLink 해독기에서 정규화한 CSV다.
-화면은 기본1Hz이며, 입력/송신/화면이 각각 다른 스레드에서 동작한다. 관측은 메모리에만 유지하고 설정만 파일로 저장한다.
+MAVLink CRC가 맞는 프레임을 받으면 해당 채널을 유지한다. `probe_ms` 안에 없으면 다음 후보로, 연결 후 `link_timeout_ms` 동안 유효 프레임이 없으면 다시 탐색한다. 등록한 채널 밖의 임의 네트워크 주소를 검색하지 않는다.
 
-| 진단 항목 | 판단에 쓰는 의미 |
+기기는 HEARTBEAT의 system/component ID, MAV_TYPE, MAV_AUTOPILOT로 식별한다. component ID 숫자만으로 종류를 추측하지 않는다. 종류를 모르는 기기는 미상으로 표시한다. `target_system=0`, `target_component=0`은 첫 비행제어기를 선택한다. 다른 기기들은 목록에 남지만 시계가 다른 관측을 자동 합치지는 않는다.
+
+설정한 포트와 WebSocket에는 연결 후, 자동 검색 포트에는 유효 MAVLink 확인 후 1Hz로 중계기 HEARTBEAT를 알린다. 비행 명령·arming·임무 명령은 보내지 않는다. source system255/component191, type ONBOARD_CONTROLLER/autopilot INVALID를 사용한다.
+
+## 설정 전체
+
+설정은 UTF-8 `key=value`이며 알 수 없는 키·중복·잘린 행·범위 밖 값은 시작 전에 거부한다. Windows 한글 경로를 지원한다. 변경은 원자적으로 저장하고 재시작 후 적용한다.
+
+| 항목 | 기본 / 범위 |
 |---|---|
-| 전체·키별 observations/s, 최신 값·순번 | 센서/해독기 입력 중단, 특정 key 갱신 중단 |
-| accepted/rejected, 순번 gaps, raw/queue 손실 | 입력 규칙 위반과 메모리 용량 초과를 구분 |
-| 큐 사용량·최장 대기시간·전송 중 구간 수 | 서버 장애·지연으로 미확인 자료가 쌓이는지 |
-| HTTP 상태·오류 코드, 204 ACK 수·재시도·응답시간 | TCP 전달과 서버의 확정 수락을 구분 |
-| 인코딩 시간·요청 시도 바이트 | 직렬화 비용과 재전송 부하 확인(실제 선로 바이트가 아님) |
-| boot 시각·watermark·열린 구간 | 입력은 조용하지만 구간 마감 선언을 기다리는 상태 확인 |
-| ENU 위치·속도, 상대 시각 불확실도·항법 age·위치오차 추정 | 이동 관측의 시공간 품질 확인 |
-| UTC ESTIMATED/UNKNOWN/STALE, anchor 수·age·드리프트·잔차 | 시계 모델의 가용성과 오래됨 확인 |
-| ACTIVE 설정·token 환경변수 set/missing | 현재 적용된 서버·전송 조건과 인증 준비 확인 |
+| url | HTTP/HTTPS 주소 또는 JSON 미리보기 `-` |
+| stream, session | ASCII 영숫자·`_-.`, 1–64자 |
+| token_env | `TB_TOKEN`, 인증 환경변수 이름만 저장 |
+| origin_lat/lon/alt | 고정 원점. 실제 MAVLink에서는 위·경도 deg, MSL m |
+| origin_auto | 1: 첫 유효 GLOBAL_POSITION_INT를 원점으로 고정, 0: 지정값 |
+| input_mode | mavlink 또는 csv |
+| serial_port | auto, none, COM 이름 또는 tty 경로 |
+| serial_baud | 115200. 지원: 9600/19200/38400/57600/115200/230400/460800/921600 |
+| websocket_url | 빈 값 또는 ws/wss 주소, 최대2047자 |
+| auto_scan | 1, 자동 직렬 포트 검색 |
+| probe_ms | 2000, 100–60000 |
+| link_timeout_ms | 5000, 100–3600000 |
+| reconnect_ms | 1000, 100–60000 |
+| target_system/component | 0 자동, 1–255 지정 |
+| system_time_uncert_us | 4294967295 미상. 검증한 source SYSTEM_TIME 오차를 µs로 지정 |
+| accel_bound_mps2 | 10, 0–1e6. 위치 보간용 가속도 가정 |
+| duration_ms | 0 무기한, 양수는 입력 수집 제한 시간 |
+| unit_map | 빈 값 또는 `temp:C;humidity:%;pm25:ug/m3` |
+| send_interval_ms | 1000, 1000–60000. 재시도 포함 요청 시작 간격 |
+| connect_timeout_ms/io_timeout_ms | 각각1000, 100–60000 |
+| max_windows | 4, 요청당 최대4묶음 |
+| refresh_ms | 1000, 250–10000 |
+| idle_warn_ms/ack_warn_ms | 2000/5000, 250–3600000. 화면 경고 기준 |
+| summary | 0 원본 포함, 1 원본 생략 |
 
-`SENDING / RETRY / IDLE / WAIT_WATERMARK` 등 상태를 표시한다. 마지막 상태/오류 코드는 마지막 완료 요청의 결과이며 전송 중에는 과거 결과다.
-ACK 수는 확인된 **요청 수**다(한 요청에 여러 구간 가능). `DRY`의 `dry_releases`는 화면 출력 성공이며 서버 ACK가 아니다.
-입력 bytes/lines/idle에는 주석·제어 행도 포함한다. 관측률과 key별 n에는 받아들인 관측만 포함하고 NaN도 한 관측으로 센다.
-GPS fix·원본 MAVLink CRC·wire 패킷 손실률은 현재 입력 경계에서 알 수 없어 `n/a`다. 관측 순번 gap을 MAVLink 헤더 손실률로 해석하지 않는다.
-UTC/위치오차는 추정 지표이며 시계 모델이 실제 센서 지연·GPS 품질을 자동 검증하지 않는다. STALE 경고는 화면 진단이고 저장된 과거 관측의 UTC를 바꾸지 않는다.
+토큰은 환경변수에 둔다. URL query는 화면에서 숨기지만 설정 파일에는 원문으로 저장된다. URL userinfo와 fragment는 거부한다. Windows timeout은 WinHTTP 단계별이며 Linux 총 HTTP timeout은 connect+2×io로 적용한다. DNS/TLS/OS까지 포함한 하드 실시간 상한을 뜻하지 않는다.
 
-Windows PowerShell에서 첫 예제를 실행한다. `-`는 외부 전송 없이 JSON을 내보내는 시험 모드다.
+## 키–값, 위치와 시각
 
-```powershell
-Copy-Item .\config\telemetry.ini.example .\telemetry.ini
-Get-Content .\examples\example.csv | .\build\windows-x64\mavlink_telemetry_data_router_interactive.exe --config .\telemetry.ini 1>$null
-```
+NAMED_VALUE_FLOAT/INT의 이름을 key로 사용하며 새 키는 자동 등록한다. 표준 wire value는 float32/int32이며 NAMED_VALUE_* 이름은 wire 규격상 최대10바이트다. 단위는 메시지에 없어 unit_map을 쓰며 미지정은 unknown이다. 키 최대31자 `[A-Za-z_][A-Za-z0-9_.-]*`, 단위 최대15자 ASCII 규약, 활성 소스당 기본 최대16키를 사용한다. 같은 키의 단위는 한 실행 설정에서 고정한다.
 
-실제 운용은 MAVLink 해독기의 CSV 출력을 파이프로 연결한다. 짧은 예제 파일은 EOF 직후 종료하므로, 계속 갱신되는 화면/설정 편집은 실행 중인 입력 소스에서 사용한다.
-Linux 예: `your_decoder | mavlink_telemetry_data_router_interactive --config ./telemetry.ini`.
-실제 서버 URL로 운용할 때 JSON 표준출력은 비어 있다. 시험 모드에서 JSON도 터미널에 출력하면 TUI와 섞이므로 `/dev/null` 또는 PowerShell `$null`로 보낸다.
-관측 저장을 원하지 않으면 JSON 출력을 파일로 리디렉션하지 않는다.
+SCALED_PRESSURE/2/3 및 HIGHRES_IMU의 유효 압력·온도 필드도 처리한다. HIGHRES_IMU의 서로 다른 instance는 키를 구분한다. 알 수 없는 메시지·서명 검증 없는 signed 프레임은 수와 사유를 표시하고 넘어간다. 새로운 값 이름은 코드 변경이 필요 없지만, 정의가 없는 새 wire 메시지를 자동 해독하지는 않는다.
 
-- `e`: 설정 화면. 위/아래 또는 번호+Enter로 필드를 선택하고 편집한다.
-- `Ctrl+U`: 필드 지우기, Backspace: 한 글자 지우기, Enter: 검증, Esc: 편집 취소.
-- `s`: 검증된 설정을 임시 파일에 완성한 뒤 원자적으로 교체한다. 실패 시 기존 설정을 보존한다.
-- Esc 또는 `q`: 설정 화면에서 돌아온다. 저장하지 않은 변경은 버린다. `q`는 수집기를 종료하지 않는다.
+GLOBAL_POSITION_INT의 boot-ms와 위치/속도를 사용한다. NED 속도는 ENU `(vy,vx,-vz)`로 바꾼다. 위치는 지정 또는 첫 유효 WGS84 위·경도 원점의 지역 반경 투영이고 고도는 MSL 차이다. 이는 지역 근사이며 geoid 변환이 아니다. 원점 불명인 LOCAL_POSITION_NED 좌표를 같은 좌표계라고 가정하지 않는다.
 
-**저장된 변경은 재시작 후 적용**한다. 실행 중 ACTIVE 서버/stream/session/좌표 원점은 고정하므로 미확인 배치가 다른 서버/식별자로 이동하지 않는다.
-재시작은 입력 소스를 정상 종료해 큐를 확인받은 후 수행한다. 실패 종료의 pending 자료는 RAM에만 있으므로 프로세스 종료와 함께 사라진다.
-세션은 Pixhawk boot/관측 원점을 식별하도록 설정하고, boot/원점이 바뀌면 새 session을 지정한다.
-키보드는 Windows `CONIN$` 또는 Linux `/dev/tty`에서 읽는다. CSV stdin 자체가 터미널이면 편집을 비활성화해 같은 입력을 가로채지 않는다.
-표준오류가 리디렉션되면 ANSI 제어문자 없이 1Hz 상태를 출력하고 편집은 비활성화된다. 터미널에서는 위/아래로 key 목록을 스크롤한다.
+실제 양쪽 항법이 있을 때만 선형 보간하고 최대200ms 간격을 허용한다. `A*Δt²/8` 항은 가속도 가정 A가 실제 상한일 때만 상한이다. 항법이 없어 연결할 수 없는 관측은 보류 후 no_navigation으로 집계한다. 고속 NAV 이력에서 밀려나도 이미 계산한 실제 보간 결과는 관측에 보존한다.
 
-설정은 UTF-8 `key=value`다. Windows 한글 경로를 지원하며 알 수 없는 키·중복·범위 밖 값·잘린 행은 시작 전에 거부한다.
+센서 boot-ms 양자화의 상대 오차는1000µs로 둔다. GPS_RAW_INT의 유효 h_acc/v_acc가 없으면 위치오차는 미상이다. HDOP를 미터 오차로 오인하지 않는다. 미상은 raw와 통계에 null이며 position_error_n이 오차를 알 수 있는 유효 값의 수다.
 
-| 설정 | 기본값 / 범위 |
-|---|---|
-| url | 필수. `https://HOST/path`, `http://HOST/path`, 시험용 `-`; URL userinfo 금지 |
-| stream, session | 필수. ASCII 영숫자/`_-.`, 1–64자 |
-| token_env | `TB_TOKEN`. 토큰 **값** 대신 환경변수 이름 |
-| origin_lat/lon/alt | 기본0. WGS84 deg/deg/타원체고 m; 실제 관측 원점으로 설정 |
-| send_interval_ms | 1000, 1000–60000; 재시도 포함 요청 시작 간격 |
-| connect_timeout_ms / io_timeout_ms | 각각1000, 100–60000 |
-| max_windows | 4, 1–컴파일 한도4; 요청당 최대 구간 수 |
-| refresh_ms | 1000, 250–10000; 터미널 화면 갱신 |
-| idle_warn_ms / ack_warn_ms | 2000 / 5000, 250–3600000; 화면 경고 기준 |
-| summary | 0. 1이면 전송 원본을 생략하고 통계만 전송 |
+SYSTEM_TIME의 원시 boot/UTC 쌍은 raw_clock_anchor로 보존한다. 기본 오차 미상에서는 관측별 UTC를 만들지 않는다. 지정한 오차가 있으면 최근16anchor 중심화 OLS와 ±500ppm 필터, 마지막 anchor 뒤10초 외삽 한도로 UTC/오차를 추정한다. 추정오차는 입력 오차·RTT/2·잔차·드리프트 가정의 합이며 교정된 절대상한이나95%신뢰구간이 아니다.
 
-Windows I/O timeout은 단계별 제한이다. Linux 총 요청 timeout은 `connect_timeout_ms + 2*io_timeout_ms`다. 동일한 전체 요청 최악시간을 보장하는 설정이 아니다.
-토큰은 OS 환경에서 제공한다. 화면에는 환경변수 이름과 set/missing만 보이고 URL query는 숨긴다. 설정 파일에는 query 문자열이 그대로 저장되므로 인증정보는 query 대신 토큰 환경변수로 관리한다.
-모드 선택은 `--interactive` / `--headless`를 사용한다. 이전 `--monitor` / `--no-monitor` 옵션도 호환용으로 허용한다. 기존 위치 인자 실행법과 `--summary`, `--sizes`는 유지하며 `--headless`로 화면을 끌 수 있다.
+MAVLink 입력은200ms 제한 재정렬 뒤 시각순으로 처리한다. 수신 후200ms 대기는 재정렬만 끝내며 측정시각·좌표·원천 boot watermark를 만들어 내지 않는다. 너무 늦은 입력, 중복, 다른 컴포넌트 시계는 별도 거부 수로 표시한다. 32bit-ms wrap은 확장하고 큰 boot 후퇴는 새 epoch로 분리한다. 재연결·부트 재설정 시 미확인 이전 묶음의 ID·원점·시각은 바꾸지 않는다.
 
-## CMake 소스·빌드·패키지 트리
+## 출력과 서버 확인 — schema3
 
-모든 프로그램·테스트 소스는 `src/`에, 생성 파일과 네 실행 파일은 `build/`에 둔다.
-기본 빌드는 **Windows x64 수집기/모니터와 Linux x64 수집기/모니터**다. Intel/AMD x64에 같은 실행 파일을 사용한다.
-Debug는 별도 선택 사항이며 기본 네 실행 파일을 덮어쓰지 않는다.
+실제 MAVLink의 최상위 JSON은 schema3다. stream/session, ENU origin_wgs84, source{sysid,compid,epoch,altitude_datum:MSL}, field_order, 누적 loss, clock_model, 선택 raw_clock_anchor, batches를 포함한다. 세션은 설정 session에 OS 난수 기반 실행 ID와 소스 세대를 붙여 부팅/연결 시계를 분리한다.
+
+각 batch는 **불변 batch_id**와 측정시각 window_us, n/raw_n/raw_dropped, 키별 통계·원본·해당 묶음의 clock_model/선택 raw_clock_anchor를 갖는다. 같은 측정시각 1초 구간이 여러 batch로 나뉠 수 있다. 서버는 `(stream,session,batch_id)`로 중복 제거하고 window_us로 재집계한다. schema2 CSV의 `(stream,session,window_us)` 중복 키를 schema3에 적용하면 정상 후속 묶음을 잃는다.
+
+서버는 요청의 모든 묶음을 영속 저장/영속 큐 수락한 뒤 **204**를 반환한다. 이미 수락한 중복에도204를 반환한다. 200/202/오류/응답 단절은 자료와 ID를 유지해 다시 보낸다. TCP ACK는 이 애플리케이션 확인을 대체하지 않는다.
+
+raw는 다음17필드다. t_us/window_us/utc_us와64bit 누적 계수는 정밀도를 위해 십진 문자열이다. 미상 값·오차·UTC는 null이다.
 
 ```text
-mavlink-server-transfer/
-├── CMakeLists.txt
-├── CMakePresets.json           # 공유 빌드·테스트·패키지 설정
-├── cmake/                     # 아키텍처 검증·툴체인 설정
-├── src/
-│   ├── CMakeLists.txt
-│   ├── sender.c
-│   ├── telemetry.c / telemetry.h
-│   ├── time_sync.c / time_sync.h
-│   ├── config.c / config.h
-│   ├── monitor.c / monitor.h
-│   └── tests/                 # C·Python 검증 소스
-├── config/telemetry.ini.example
-├── examples/example.csv
-├── docs/REVIEW.md
-└── build/
-    ├── windows-x64/
-    │   ├── mavlink_telemetry_data_router_headless.exe
-    │   ├── mavlink_telemetry_data_router_interactive.exe
-    │   └── tests/              # 개발 검사 활성화 시 생성
-    ├── linux-x64/
-    │   ├── mavlink_telemetry_data_router_headless
-    │   ├── mavlink_telemetry_data_router_interactive
-    │   └── tests/              # 개발 검사 활성화 시 생성
-    ├── packages/              # CPack ZIP/TGZ, 소스 패키지
-    └── stage/                 # 설치 트리
+t_us,seq,quality,key,unit,east_m,north_m,up_m,ve_mps,vn_mps,vu_mps,value,time_uncert_us,nav_age_us,pos_error_m,utc_us,utc_uncert_us
 ```
 
-`build/`와 개인별 `CMakeUserPresets.json`은 Git에서 제외한다. 공유 설정은 `CMakePresets.json`으로 관리한다.
-빌드·테스트 결과와 플랫폼별 실제 실행 범위는 [검증 기록](REVIEW.md)을 확인한다.
-Windows 검증을 Linux 검증으로 간주하지 않는다. 한 OS의 native preset만 실행하면 해당 OS의 두 파일이 생성된다.
-나머지 OS에서도 같은 소스를 빌드하거나, 대상 라이브러리를 갖춘 명시적 교차 툴체인을 사용해야 한다.
+seq는 키별 중계 관측 순번이며 MAVLink 공용8bit헤더 순번이 아니다. quality는 원본 품질 비트와 위치오차 미상 등의 플래그다. 값·좌표는 재시도 중 재계산하지 않는다. 최상위 clock_model/raw_clock_anchor는 첫 묶음 기준의 진단이다. 각 batch에도 마감 당시 모델·원시 anchor를 따로 보존한다. 이 진단으로 raw를 재계산하지 않으며, 각 raw의 UTC/오차는 해당 관측을 처리한 당시의 추정이다.
 
-### 공유 preset
+통계는 키별 Welford 평균·표본분산 M2/(n−1)·min/max, 상대시각 오차와 추정위치 오차 요약이다. n<2 분산은null, position_error_n0이면 위치오차 요약도null이다. 평균은 표본 가중이며 거리/시간 가중이나 센서 정확도 신뢰구간이 아니다. 여러 batch의 평균을 단순 평균하지 말고 n·평균·M2로 결합해야 한다.
 
-CMake 3.21 이상과 Ninja를 사용한다. 기본 최적화는 실행 파일 크기를 줄이는 `MinSizeRel`이다.
+큐는 미확인8묶음, 요청당최대4묶음, 원본최대512행/묶음이다. 원본초과분도 통계에는 포함하고 누락 수를 기록한다. 큐가 가득 차면 새 묶음을 버리고 전송 중 자료를 덮어쓰지 않는다. --summary는 원본을 생략해 위치별 원본 복원에 불충분하다.
 
-| 목적 | Windows x64 | Linux x64 |
+수신·관측처리, HTTP 인코딩/송신, TUI는 분리되어 있다. Windows WebSocket은 고정 수신 버퍼 작업자를 추가로 쓴다. 포트 검색은 프레임마다 수행하지 않는다. 파서 O(bytes×log(known messages)), device최대32·pending512·nav32로 모든 큐를 제한한다. pending 정렬·보간은 고정 상한이 있으나 하드 WCET를 주장하지 않는다. `--sizes`는 관리하는 고정 수집/송신/입력/경로 저장공간 합이며 스택·OS·TLS·libcurl 내부 메모리는 제외한다.
+
+## 빌드와 개발 검사
+
+CMake3.21+, Ninja, C99 x64 컴파일러가 필요하다. Windows WinHTTP/bcrypt, Linux libcurl/pthread를 사용한다. 기본 MinSizeRel은 검사 OFF이며 Windows/Linux 각각 두 운용 파일을 만든다.
+
+| 작업 | Windows | Linux |
 |---|---|---|
-| 구성 | `cmake --preset windows-x64` | `cmake --preset linux-x64` |
-| 빌드 | `cmake --build --preset windows-x64` | `cmake --build --preset linux-x64` |
-| 개발 검사 구성·빌드·실행 | 아래 선택 검사 절차 | 아래 선택 검사 절차 |
-| 설치 트리 | `cmake --install build/windows-x64` | `cmake --install build/linux-x64` |
-| 패키지 | `cmake --build --preset package-windows-x64` | `cmake --build --preset package-linux-x64` |
-| Debug 구성·빌드 | `windows-x64-debug` | `linux-x64-debug` |
+| 구성/빌드 | windows-x64 | linux-x64 |
+| 선택 검사 구성/빌드/CTest | windows-x64-tests | linux-x64-tests |
+| Debug 구성/빌드 | windows-x64-debug | linux-x64-debug |
+| 패키지 빌드 | package-windows-x64 | package-linux-x64 |
 
-일반·Debug 빌드는 `BUILD_TESTING=OFF`다. `windows-x64-tests`와 `linux-x64-tests`만 개발 검사를 활성화하며 기존 플랫폼 빌드 폴더를 재사용한다. 검사 실행 파일은 그 안의 `tests/`에 모인다.
+각 이름에 `cmake --preset`, `cmake --build --preset`, `ctest --preset`을 맞춰 사용한다. package는 build 명령만 쓴다. 검사 프리셋은 같은 build/<OS>를 재사용하고 tests/에 결과를 둔다. 기본 프리셋 재구성은 검사를 OFF로 돌리지만 이전 검사 파일은 삭제하지 않는다.
 
-Debug는 위 명령의 preset 이름을 바꾸며 결과는 `build/windows-x64-debug/`, `build/linux-x64-debug/`에 생성한다.
-CPack 패키지는 `build/packages/`에 모으며 관측 자료는 패키지나 디스크에 저장하지 않는다.
-설치 기본 위치는 `build/stage/<platform>/`이다. 실제 시스템 설치는 `cmake --install build/linux-x64 --prefix "$HOME/.local"`처럼 명시한다.
+컴파일러·Ninja 경로는 -DCMAKE_C_COMPILER, -DCMAKE_MAKE_PROGRAM 또는 Git 제외 CMakeUserPresets.json에서 지정한다. 서로 다른 컴파일러의 캐시를 섞지 않는다. 컴파일러의 x86-64 매크로와 포인터8바이트를 확인하며 Intel/AMD에 같은 바이너리를 쓴다.
 
-### Windows x64
-
-LLVM-MinGW의 x64 `clang`과 Ninja를 PATH에 둔 환경에서 실행한다.
-MSVC 대상 Clang을 쓰면 x64 Visual Studio 개발 환경과 해당 Windows SDK가 필요하다.
-같은 빌드 디렉터리에서 서로 다른 컴파일러의 캐시를 섞지 않는다.
-
-```powershell
-cmake --preset windows-x64
-cmake --build --preset windows-x64
-cmake --build --preset package-windows-x64
-Copy-Item .\config\telemetry.ini.example .\telemetry.ini
-Get-Content .\examples\example.csv | .\build\windows-x64\mavlink_telemetry_data_router_interactive.exe --config .\telemetry.ini 1>$null
-```
-
-컴파일러 경로가 PATH에 없다면 첫 구성 때 `-DCMAKE_C_COMPILER=C:/YOUR_TOOLCHAIN/bin/clang.exe`로 지정한다.
-머신별 설정을 보존할 때는 저장소 루트에 다음 `CMakeUserPresets.json`을 만들고 로컬 경로를 입력한다.
-공유 preset에는 개인 절대 경로를 넣지 않는다. 로컬 preset도 기본 `build/windows-x64`를 사용한다.
-
-```json
-{
-  "version": 3,
-  "configurePresets": [
-    {
-      "name": "windows-local",
-      "inherits": "windows-x64",
-      "cacheVariables": {
-        "CMAKE_C_COMPILER": "C:/YOUR_TOOLCHAIN/bin/clang.exe",
-        "CMAKE_MAKE_PROGRAM": "C:/YOUR_NINJA/ninja.exe"
-      }
-    }
-  ]
-}
-```
-
-최초 구성은 `cmake --preset windows-local`, 이후 빌드·테스트는 공유 `windows-x64` preset을 사용한다.
-`TB_TARGET_ARCH=x64`는 컴파일러의 **실제 출력 대상 검사 조건**이며 컴파일러 타깃을 바꾸는 옵션이 아니다.
-32비트·다른 아키텍처이면 구성 단계에서 실패하고, `src/tests/test_arch.py`가 실제 PE/ELF 실행 파일도 검사한다.
-
-### Linux x64 설치·빌드
-
-Ubuntu/Debian x64의 개발 도구·libcurl가 필요하다. Windows는 WinHTTP, Linux는 libcurl와 pthread를 사용한다.
-실제 프로젝트 화면에서 복사한 clone URL로 자리표시자를 바꾼다.
-
-```sh
-sudo apt-get update
-sudo apt-get install git cmake ninja-build build-essential libcurl4-openssl-dev python3
-git clone YOUR_REPOSITORY_CLONE_URL mavlink_telemetry_data_router
-cd mavlink_telemetry_data_router
-cmake --preset linux-x64
-cmake --build --preset linux-x64
-cmake --build --preset package-linux-x64
-sh install.sh
-```
-
-`install.sh`는 기본 `build/linux-x64/`를 사용하고 `$HOME/.local/bin/mavlink_telemetry_data_router_headless`와 `mavlink_telemetry_data_router_interactive`에 설치한다.
-`PREFIX=/원하는/경로 sh install.sh`로 설치 위치를 바꾸고 `BUILD_DIR=/원하는/빌드경로`로 빌드 위치를 바꾼다.
-실행 환경에도 x64 동적 로더와 libcurl/TLS 라이브러리가 필요하며 정적 단일 바이너리 배포를 보장하지 않는다.
-Ubuntu/PX4/Gazebo 의존성이 없는 중계기이며 특정 Ubuntu 버전의 실행 검증은 검증 기록과 구분한다.
-
-### Windows에서 Linux x64도 교차 빌드
-
-이 작업 폴더에는 Windows x64 두 파일과 Linux x64 두 파일을 실제로 생성했다. Windows 실행 시험은 통과했으며 Linux는 교차 빌드·ELF·의존성 검사까지 수행했다. Linux 런타임 실행은 검증하지 않았다.
-
-Windows의 LLVM-MinGW Clang22/LLD, Ninja, Python3.9 이상을 PATH에 둔 뒤 아래를 실행한다. 일반 Linux native 빌드에는 이 절차가 필요 없다.
+Windows에서 Linux를 교차 빌드할 때는 LLVM-MinGW Clang22/LLD, Ninja, Python3.9+를 PATH에 두고 다음을 수행한다. 실제 Linux에서 native 빌드할 때는 이 절차가 필요 없다.
 
 ```powershell
 python -m pip install --target build/toolchains/python-deps zstandard
@@ -220,136 +118,41 @@ cmake --build build/linux-x64 --parallel 2
 cmake --build build/linux-x64 --target package
 ```
 
-준비 스크립트는 공식 Ubuntu22.04 패키지를 HTTPS로 받고 SHA256를 확인한 뒤 `build/toolchains/`에만 추출한다. 패키지를 OS에 설치하거나 패키지 설치 스크립트를 실행하지 않는다. sysroot와 Python 추가 모듈은 배포물에 포함하지 않는다.
-생성 ELF는 glibc2.34 이상과 OpenSSL 계열 `libcurl.so.4`를 필요로 한다. 교차 패키징은 TGZ 안의 두 실행 파일 권한도 `0755`로 보정한다.
-교차 빌드 디렉터리를 Linux로 복사해 native CMake 캐시로 재사용하지 않는다. Linux에서 새로 빌드할 때는 소스만 가져와 native preset으로 구성한다.
-### 개발자용 검사·패키지
+공식 Ubuntu22.04 패키지를 HTTPS로 받고SHA256를 확인해 build/toolchains에 추출한다. OS 패키지 설치 스크립트를 실행하지 않고 sysroot를 배포물에 넣지 않는다. 생성 ELF는 glibc2.34+와 OpenSSL 계열 libcurl.so.4를 사용한다. Windows에서 만든 Linux TGZ의 실행 권한도0755로 보정한다. 교차 CMake 캐시를 Linux native 캐시로 재사용하지 않는다.
 
-핵심 검증은 이미 해당 플랫폼으로 빌드한 실행 파일에 수행한다. Linux 예시이며 Windows는 실행 파일에 `.exe`를 붙인다.
+선택 CTest는 코어·시계·설정·MAVLink 검사를 실행한다. 구성 시 Python3가 있으면 transport·실제 router 통합 검사도 등록하며, 교차 빌드에서는 타깃을 실행하지 않는다. 추가 회귀는 다음과 같다(Linux는 실행 파일 .exe 없이 경로를 바꾼다).
 
-```sh
-cmake --preset linux-x64-tests
-cmake --build --preset linux-x64-tests
-ctest --preset linux-x64-tests
-python3 src/tests/test_arch.py build/linux-x64/mavlink_telemetry_data_router_headless --arch x64
-python3 src/tests/test_arch.py build/linux-x64/mavlink_telemetry_data_router_interactive --arch x64
-python3 src/tests/test_core.py --skip-build --executable ./build/linux-x64/tests/test_telemetry --bench
-python3 src/tests/test_sender.py ./build/linux-x64/mavlink_telemetry_data_router_headless
-python3 src/tests/test_confirmation.py ./build/linux-x64/mavlink_telemetry_data_router_headless
-python3 src/tests/test_monitor.py ./build/linux-x64/mavlink_telemetry_data_router_headless --interactive-executable ./build/linux-x64/mavlink_telemetry_data_router_interactive
-python3 src/tests/test_sender_limits.py ./build/linux-x64/mavlink_telemetry_data_router_headless
-cmake --build --preset package-linux-x64
-cmake --build build/linux-x64 --target package_source
+```powershell
+python src/tests/test_core.py --skip-build
+python src/tests/test_sender.py
+python src/tests/test_confirmation.py
+python src/tests/test_monitor.py
+python src/tests/test_sender_limits.py
+python src/tests/test_mavlink_router.py
 ```
 
-GitHub/GitLab CI도 같은 preset·폴더를 사용하며 대상별 실행 파일 두 개와 패키지를 산출물로 보존한다.
-CI 정의를 작성한 것과 CI를 실제 실행해 통과한 것은 구분한다. 자동 원격 게시나 서버 연결은 수행하지 않는다.
-CMake preset 형식은 [CMake 3.21 공식 설명](https://cmake.org/cmake/help/v3.21/manual/cmake-presets.7.html)을 따른다.
+GitHub/GitLab CI도 native검사 프리셋과 같은 경로를 사용한다. CI파일 작성과 원격 실행은 다르며 원격 CI는 여기서 실행하지 않았다. Git배포는 실제 저장소 화면에서 복사한 clone URL로 origin을 설정하고 push한다. 호스트 이름만으로 URL을 추측하지 않는다.
 
-### 원격 저장소 게시
+## 개발용 CSV 재생 — schema2
 
-이 폴더가 저장소 루트다. 회사 GitLab·`prj.uaslaboratory.synology.me`는 실제 clone URL을 설정해 게시한다.
-웹 호스트만으로 clone URL을 추측하지 않는다. 저장소 화면에서 복사한 주소로 자리표시자를 바꾼다.
+CSV는 실제 운용의 필수 입력이 아니다. 저장된 가상 관측으로 회귀 검사할 때 `input_mode=csv`를 명시하거나 다음 위치 인자를 사용한다.
 
-```sh
-git remote add origin YOUR_GITLAB_CLONE_URL
-git push -u origin main
+```powershell
+Get-Content .\examples\example.csv | .\build\windows-x64\mavlink_telemetry_data_router_headless.exe - env1 replay-unique 37 127 100
 ```
 
-## 실행과 관측 입력
-
-`mavlink_telemetry_data_router_headless URL|- STREAM SESSION ORIGIN_LAT ORIGIN_LON ELLIPSOID_ALT [--summary]`
-Windows 예: `Get-Content .\examples\example.csv | .\build\windows-x64\mavlink_telemetry_data_router_headless.exe - env1 trial-unique-001 37 127 100`.
-Linux 예: `mavlink_telemetry_data_router_headless https://SERVER/ingest env1 trial-unique-002 37 127 100 < examples/example.csv`.
-URL `-`는 JSON을 표준출력에 출력한다. `TB_TOKEN`이 있으면 Bearer 인증 헤더에 사용한다.
-STREAM/SESSION은 ASCII 영숫자·`_ - .`의 1~64자다. 매 부팅·실행에 고유 SESSION을 사용한다.
-원점은 실행 동안 고정된 WGS84 위도/경도(deg)·**타원체고(m)**이며 위치/속도는 ENU m/m·s⁻¹다.
-PX4 NED→ENU는 축 `(y,x,-z)` 변환과 원점 일치가 필요하다. MSL 고도와 타원체고의 차이는 어댑터가 보정한다.
-원점·시계가 재설정되면 새 SESSION/프로세스로 시작한다. 프로그램이 시계 종류를 수치 크기로 추측하지 않는다.
-
-관측 한 줄은 다음 **15필드**다. `#` 주석/빈 줄은 무시하고 1,023자를 넘는 줄은 거부한다.
+이 모드만 stdin EOF로 종료한다. 위치 인자의 원점은 기존 CSV 계약에 따라 타원체고이며 실제 MAVLink MSL 고도와 혼합하지 않는다. 관측 한 줄은15필드다.
 
 ```text
 t_us,seq,quality,key,unit,value,east_m,north_m,up_m,ve_mps,vn_mps,vu_mps,time_uncert_us,nav_age_us,pos_error_m
 ```
 
-- `t_us`: 실제 관측시각을 Pixhawk boot microseconds(uint64)로 정렬한 값. PC/서버 수신시각이 아니다.
-- `seq/quality`: uint32. seq는 key별 관측 순번, quality는 의미를 상위에서 정하는 보존용 비트마스크다.
-- `key`: 최대31자 `[A-Za-z_][A-Za-z0-9_.-]*`; `unit`: 최대15자 `[A-Za-z0-9_./%*^+-]+`.
-- `value`: double 숫자 또는 `nan`. 신규 key는 자동 등록하며 기본 최대16개/SESSION, 같은 key의 단위는 SESSION 동안 고정한다.
-- 위치/속도는 그 관측시각의 값이다. `time_uncert_us`는 센서 관측과 항법의 **상대 시각 정렬오차 추정**, 기본 최대20,000µs다.
-- `nav_age_us`는 정렬에 쓴 항법과 관측의 시간 거리이며 보간 시 양쪽 중 큰 거리, 기본 최대200,000µs다.
-- `pos_error_m`는 시각 오차 항을 제외한 위치오차 추정이다. 음수/비유한 값은 거부한다.
-- 위치·속도·유효 value의 절댓값은 ≤1e9다. 물리량별 정상 범위·교정·품질판정은 어댑터가 수행한다.
+전체t는비감소, 키별t와seq는증가해야 한다. 제어 행 `@clock,boot_us,utc_unix_us,gnss_uncert_us,rtt_us`와 `@watermark,W`를 사용한다. watermark는 앞으로t<W가없다는선언이며t==W는허용한다. CSV는 호스트의 조용한 입력만으로 구간을 마감하지 않는다. 다음구간/명시watermark/EOF가마감한다. schema2 중복키는(stream,session,window_us)다.
 
-전체 입력 관측의 t는 비감소, 같은 key의 t와 seq는 각각 엄격히 증가해야 한다. 서로 다른 key는 같은 t를 가질 수 있다.
-UDP 순서 역전은 입력 전에 정렬한다. 같은 측정값을 통신 주기마다 새 관측으로 재등록하지 않는다.
-서로 다른 측정 주기의 key는 새 값이 생겼을 때만 행을 추가한다. 누락값은 JSON null이며 그 key의 통계 n에서 제외된다.
-MAVLink 헤더 8비트 순번은 여러 메시지가 공유하므로 관측 seq로 쓰지 않는다. 시각 없는 메시지는 별도 측정시각 정보가 필요하다.
+## 근거와 적용 한계
 
-## UTC 추정과 구간 마감
+[MAVLink HEARTBEAT](https://mavlink.io/en/services/heartbeat.html), [패킷 직렬화/CRC](https://mavlink.io/en/guide/serialization.html), [common 메시지](https://mavlink.io/en/messages/common.html), [TIMESYNC](https://mavlink.io/en/services/timesync.html)를 따른다. TIMESYNC만으로UTC가생기지는않는다. CRC표는고정된공식 c_library_v2출처이며 생성물라이선스는 src/vendor/MAVLINK_COPYING.txt에보존했다.
 
-제어 행은 `@clock,boot_us,utc_unix_us,gnss_uncert_us,rtt_us`와 `@watermark,W`다.
-clock은 **동일 부팅의 동시 시각 대응점**이다. UTC는 Unix µs이며 GPS/TAI 시간은 상위에서 UTC로 변환한다.
-GNSS·시각 포착 오차 및 SYSTEM_TIME boot-ms 양자화는 gnss_uncert_us에 포함하고 실제 교환 RTT를 제공한다.
-TIMESYNC는 장치 간 상대 시계차/RTT 추정에 쓰며 UTC 기준 자체를 만들어 주지는 않는다.
-최근16개 anchor에 중심화 OLS를 적용하고 기본 ±500ppm 필터·마지막 anchor 후 최대10초 외삽을 사용한다.
-추정 UTC 오차는 max anchor uncertainty + ceil(max RTT/2) + max fit residual + nearest-anchor age × 500ppm + 수치 반올림 여유다.
-이는 제공된 오차/드리프트 가정에 의존하는 **공학적 추정**이며 95% 신뢰구간이나 절대 정확도 보증이 아니다.
-짧은 anchor 간격의 잡음은 엄격한 드리프트 필터에 거부될 수 있다. RTT 비대칭·GPS→UTC 변환·UTC step도 별도 고려한다.
-anchor의 boot/UTC는 각각 증가해야 한다. 부팅/UTC step·불연속은 새 SESSION/모델 초기화가 필요하다.
-anchor 부재·범위 밖·오래된 모델이어도 관측은 보존하고 utc_us/utc_uncert_us를 null로 보낸다. 과거 행은 소급 재보정하지 않는다.
-UTC 절대오차는 상대 time_uncert_us와 별개다. 상대 정렬에 공통인 UTC 오차를 위치오차에 다시 더하지 않는다.
+[OGC SensorThings](https://docs.ogc.org/is/18-088/18-088.html)의 관측시각/결과시각 구분, [SensorML](https://docs.ogc.org/is/23-000/23-000.html)의 시공간 기준틀 구분을 설계에 참고했다. 이 출력이 해당 API와 호환된다는 뜻은 아니다. 통계나 보간으로 미관측 물리장이 유일하게 복원되지는 않는다.
 
-구간은 boot 시각의 `[floor(t/1e6)*1e6, +1초)`다. 다음 구간 관측, EOF, 또는 충분히 진행한 watermark가 마감한다.
-watermark는 앞으로 `t<W` 관측이 오지 않는다는 상위 소스의 선언이다. 이후 `t<W`는 거부하고 `t==W`는 허용한다.
-W는 비감소이며 마지막 관측의 t 이상이어야 한다. 현재 구간이 없어도 기억한다. 이미 마감한 구간은 다시 열지 않는다.
-PC에서 입력이 잠시 없다는 이유로 자동 마감하지 않는다. 따라서 고정1초 지연이나 벽시계 정시 업로드를 보장하지 않는다.
-`examples/example.csv`는 boot0 UTC anchor, 100m/s 이동 중 두 key의 10Hz 관측 세 번, W=2초, 다음 구간의 새 key를 보여 준다.
-
-## 통계·보간·출력 스키마
-
-key마다 Welford로 유효 n·평균·표본분산 M2/(n−1)·최소·최대를 누적한다. n=0 통계와 n<2 분산은 null이다.
-시간 불확도의 평균/최대, `pos_error_m + ||v||*time_uncert_us/1e6`의 평균/최대도 유효 value만 집계한다.
-평균은 표본 가중이며 시간/거리 가중이 아니다. 분산은 센서 정확도·공간 분해능·독립 표본의 신뢰구간이 아니다.
-코어 `tb_align`은 같은 시계·SESSION의 양 끝 항법 사이 선형 보간만 수행하며 외삽/200ms 초과 간격을 거부한다.
-위치오차는 끝점 오차의 선형 보간 + `A*Δt²/8`이다. 마지막 항은 실제 전 구간 가속도 크기가 A 이하일 때만 수학적 상한이다.
-센서 응답/흡입관 지연을 모르면 자동 역보정하지 않는다. 100m/s에서 10Hz는 약10m, 100ms 시간오차도 약10m다.
-원본은 관측 경로의 재집계·보간에 쓸 수 있지만 미관측 물리장을 유일하게 복원하지 못한다. summary는 위치별 원본 복원에 불충분하다.
-
-JSON은 자체 `schema:2`이며 OGC SensorThings/SensorML API 호환을 주장하지 않는다.
-최상위에 stream/session, 고정 ENU 원점, 시계 기준, field_order, 누적 loss, clock_model, batches를 포함한다.
-clock_model은 송신 시점의 모델 진단이며, 각 행 UTC/오차는 수신 시 적용한 추정값을 보존한다.
-각 raw 행의 **17필드**는 출력 field_order 그대로다(입력 CSV 순서와 다름).
-
-```text
-t_us,seq,quality,key,unit,east_m,north_m,up_m,ve_mps,vn_mps,vu_mps,value,time_uncert_us,nav_age_us,pos_error_m,utc_us,utc_uncert_us
-```
-
-t_us/window_us/known utc_us와 누적 loss는 64비트 정밀도를 위해 십진 문자열이다. UTC 미상은 마지막 두 필드 모두 null이다.
-`tb_batch_prepare`가 raw를 (t_us,key,seq), 통계를 key로 정렬한다. 동일 관측 집합·key별 순서를 가진 비포화 배치는 바이트가 일치한다.
-포화 시 먼저 도착한512행만 보존하므로 retained subset은 도착 순서에 의존한다. stats에는 초과 관측도 포함한다.
-
-## 서버·손실·계산량
-
-배치 식별키는 **(stream,session,window_us)**다. 서버는 요청 내 모든 배치를 영속 저장/영속 큐 수락한 뒤에만 204로 ACK한다.
-서버는 식별키로 중복을 제거해야 한다. ACK 유실 재시도가 가능하며 HTTP exactly-once 전달을 보장하지 않는다.
-송신 시작은 초당 최대1회, HTTP 요청 하나에 최대4구간, 완성 대기 큐8개다. 느린 요청 뒤에도 몰아서 시작하지 않는다.
-기본 원시512관측/초는 100Hz × 4key = 400행/초를 수용한다. raw 초과는 raw_dropped와 통계에 반영한다.
-큐 포화는 새 배치를 버리고 전송 중 자료를 보존한다. 전역 손실 카운터는 서로 겹칠 수 있으므로 합산해 손실률로 쓰지 않는다.
-EOF 후 연속 전송3회 실패하면 종료2와 pending을 남긴다. 종료0=정상,1=설정/시작 오류,2=거부·손실·미전송/실행 오류다.
-디스크 spool은 없다. 전원 종료 시 최대 대기8+진행1구간(보존 raw 최대4,608행) 및 그 통계가 소실될 수 있다.
-장기 단절 무손실이 필요하면 상위 원본 기록이나 영속 spool을 추가해야 한다.
-
-수신 추가는 O(16), 경계 복사·초기화는 O(512), 송신 스레드 heapsort는 O(N log N), JSON은 O(N)이다.
-네트워크·정렬·JSON은 송신 스레드에서 수행한다. 초 경계 복사/초기화의 짧은 잠금 비용도 실시간 예산에 포함해야 한다.
-CPU 예산은 `f_observation*C_add + f_window*C_seal + f_request*C_encode`로 나눠 산정한다. 요청 묶음은 원본 정보량을 줄이지 않는다.
-검증 PC에서 sample136B/batch71,840B. 백만 정상 추가의 5회 중앙값은 약76ns/건(초기화 포함, 정렬·JSON·네트워크 제외)이었다.
-이는 MCU 예측값이 아니다. 실제 실행파일/전체 고정 RAM/검증 범위는 [검증 기록](REVIEW.md), 해당 빌드는 `mavlink_telemetry_data_router_headless --sizes`로 확인한다.
-
-## 설계 근거
-
-[OGC SensorThings](https://docs.ogc.org/is/18-088/18-088.html)는 관측 phenomenonTime과 결과 생성 resultTime을 구분한다.
-[OGC SensorML](https://docs.ogc.org/is/23-000/23-000.html)은 시간·공간 기준틀과 시각이 붙은 위치를 명시한다.
-[MAVLink TIMESYNC](https://mavlink.io/en/services/timesync.html)는 반복 교환/RTT 기반 시계차 추정과 필터링을 설명한다.
-[WMO 관측망 품질 지침](https://etrp.wmo.int/pluginfile.php/90334/mod_folder/content/0/INFCOM-3-RWCS-TECHNICAL-GUIDELINES-approved_updates.pdf)은 관측시각과 데이터베이스 수신시각을 구분해 지연을 평가한다.
+실제 센서 지연·GPS정확도·지오이드·서명키 검증과 타컴포넌트 시계 정렬은 장치 통합에서 확인해야 한다. 원본을 디스크에 자동 저장하지 않아 전원 차단/장기장애에는 손실이 발생한다. [검토 기록](REVIEW.md)에 실제 검증 범위를 구분했다.

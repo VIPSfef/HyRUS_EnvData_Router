@@ -59,6 +59,9 @@ def check_fixture(executable: Path, mode: str) -> int:
         assert stat["key"] == "custom_metric" and stat["unit"] == "my_unit"
         values = [] if mode == "missing" else observed_values(n)
         assert stat["n"] == len(values)
+        known_error_n = sum(i != 1 and mode != "missing" and mode != "unknown_position"
+                            and not (mode == "mixed_position" and i % 2 == 0) for i in range(n))
+        assert stat["position_error_n"] == known_error_n
         if not values:
             assert all(stat[k] is None for k in ("mean", "variance", "min", "max",
                 "time_uncert_mean_us", "time_uncert_max_us", "position_error_mean_m", "position_error_max_m"))
@@ -73,8 +76,11 @@ def check_fixture(executable: Path, mode: str) -> int:
         expect_numeric(stat["time_uncert_mean_us"], 123, f"{mode}.time_uncert_mean")
         expect_numeric(stat["time_uncert_max_us"], 123, f"{mode}.time_uncert_max")
         error = 0.25 + math.sqrt(35.5**2 + 2.25**2 + 0.125**2) * 123 / 1e6
-        expect_numeric(stat["position_error_mean_m"], error, f"{mode}.position_error_mean")
-        expect_numeric(stat["position_error_max_m"], error, f"{mode}.position_error_max")
+        if known_error_n:
+            expect_numeric(stat["position_error_mean_m"], error, f"{mode}.position_error_mean")
+            expect_numeric(stat["position_error_max_m"], error, f"{mode}.position_error_max")
+        else:
+            assert stat["position_error_mean_m"] is None and stat["position_error_max_m"] is None
     for i, row in enumerate(result["raw"]):
         assert len(row) == 17
         expected_t = 2**64 - 1 if mode == "large_time" else epoch + i * 1000
@@ -87,7 +93,8 @@ def check_fixture(executable: Path, mode: str) -> int:
         assert row[7] == 120.125 + i * 0.1
         assert row[8:11] == [35.5, -2.25, 0.125]
         assert row[11] == (None if i == 1 or mode == "missing" else 123.12345678901235 + (i % 100) * 0.125)
-        assert row[12:15] == [123, 1234, 0.25]
+        assert row[12:14] == [123, 1234]
+        assert row[14] == (None if mode == "unknown_position" or (mode == "mixed_position" and i % 2 == 0) else 0.25)
         expected_utc = str(2**64 - 1) if mode == "large_time" else None if i == 2 else str(EPOCH + i * 1000)
         assert row[15] == expected_utc
         assert row[16] == (4567 if expected_utc is not None else None)
@@ -116,7 +123,7 @@ def main() -> int:
              str(ROOT / "src" / "tests" / "test_telemetry.c"), "-o", str(executable), "-lm"])
     print(run([str(executable)]), end="")
     lengths = {mode: check_fixture(executable, mode)
-               for mode in ("empty", "single", "normal", "missing", "overflow", "summary", "large_time")}
+               for mode in ("empty", "single", "normal", "missing", "overflow", "summary", "large_time", "unknown_position", "mixed_position")}
     print(f"PASS {len(lengths)} independently parsed JSON fixtures; bytes=" + json.dumps(lengths, sort_keys=True))
     if args.bench:
         bench = json.loads(run([str(executable), "--bench"]), parse_constant=reject_nonfinite)

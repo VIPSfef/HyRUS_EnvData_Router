@@ -1,4 +1,66 @@
-# 검토 기록 — mavlink_telemetry_data_router v0.4.0
+# 검토 기록 — mavlink_telemetry_data_router v0.5.0
+
+검토일: 2026-10-19. 이번 변경은 실제 바이너리 MAVLink 입력부터 서버 확인까지 연결한 자동 수집 중계기다. **이전 0.4.x는 정규화된 CSV를 받는 코어·중계기였으며, 자동 COM/tty/WebSocket 수집 기능이 없었다.** 아래 과거 기록은 그때의 범위를 기록한 것이고 현재 규약은 [기술 참조](REFERENCE.md)를 따른다.
+
+## 이번 구현과 리뷰 결과
+
+- Windows COM, Linux tty와 지정 ws/wss를 설정 순서대로 확인한다. 유효 MAVLink 채널을 유지하고 끊기면 탐색을 재개한다. 기본 입력은 stdin과 독립적이다.
+- CRC 검증과 HEARTBEAT 기기 목록, 비행제어기 선택, 임의 키 등록, boot-ms 확장·재부팅 구분을 연결했다. 알 수 없는 메시지·다른 컴포넌트 시계·미검증 서명은 사유별 수로 표시한다.
+- 위치는 실제 전후 항법으로만 보간한다. 고속 항법 이력에서 밀리기 전에 보간값을 보존하며, 위치 오차 미상은 null로 유지한다. 기본 UTC 오차 미상을 0으로 가정하지 않는다.
+- 새 실시간 schema3는 불변 batch_id를 사용한다. 호스트 1초 전송과 원천 측정 1초 구간을 분리하여 같은 구간의 후속 관측을 받는다. 서버 중복 키는 **(stream,session,batch_id)** 다. CSV schema2만 기존 window_us 중복 키를 쓴다.
+- 재연결 전에 유효한 보류 관측을 처리하고 이전 구간을 이전 session/origin/clock으로 마감한다. 이전 미확인 자료는 새 소스에도 유지한다. 각 묶음에 시계 모델·원시 boot/UTC 앵커를 고정하여 여러 모델을 한 요청으로 보낼 때 해석을 구분했다.
+- 전송 중 큐 슬롯을 계속 점유하고, 요청의 모든 묶음에 대한 서버 204 확인 뒤 재사용한다. 202/실패는 같은 batch_id와 자료를 유지한다. 관측 없는 HEARTBEAT만으로 HTTP 요청을 만들지 않는다.
+- 실행 파일 옆 설정 자동 로드와 TUI 편집·저장을 연결했다. 원본 관측을 디스크에 저장하지 않는다.
+
+## 이번 실제 검증
+
+Windows x64, LLVM-MinGW Clang22.1.8, C99, -Wall/-Wextra/-Wpedantic/-Werror로 확인했다.
+
+| 대상 | 결과 |
+|---|---|
+| 통계/보간 코어 | 2,406개 C 검사, Python 독립 JSON9fixture 통과 |
+| 시계/설정 | 시계110개, 설정592개 검사 통과 |
+| MAVLink wire | CRC·재정렬·고속 항법·오차 미상·자동 원점·wrap/reboot·watermark 경계 등274개 통과 |
+| 실제 WebSocket transport | 분할 바이너리·ping/pong·부분 TCP·잘못된 accept·텍스트 거부·idle 수신 종료·긴 URL7시나리오 통과 |
+| 무인자 실행 | 한글 경로의 실행 파일 옆 설정 로드, stdin 닫힘에도 지정 시간 수집 유지, 설정 덮어쓰기 없음 |
+| 실제 MAVLink→HTTP | 600개 관측의 원본 float32/ENU/속도/UTC/단위/평균/표본분산 독립 대조 통과 |
+| 서버 확인 | 202→204 동안 batch_id·raw·통계·시계 모델/앵커 불변, 확인 후 재전송 없음 |
+| 채널/키 확장 | 없는 COM에서 WS로 전환, PX4/카메라 나열, 새 humidity 키 자동 수집, 75개 원본 보존 |
+| 원천 시계가 느린 경우 | 원천400ms의80관측을 호스트2.25초에 걸쳐 입력, 같은 window_us에서 서로 다른 batch_id로1Hz 전송, 누락/중복 없음 |
+| 빈 입력 | HEARTBEAT만 수신하는 동안 장치 식별 유지, HTTP 요청0 |
+| TUI | 실제 Windows PTY에서 e/번호/Enter/Ctrl+U/s로1000→2000 저장, ACTIVE1000 유지·재시작 적용 안내·종료 복원 확인 |
+| 이전 CSV 경로 | 수신·확정 확인·모니터·최대4개 꽉 찬 구간/16키/64bit 시각 JSON628,162B 검사 통과 |
+| Windows/Linux 결과 | 두 OS의 headless/interactive 실제 빌드, Linux 검사기5개 교차 컴파일 |
+
+MAVLink 통합 시험은 독립 Python bit CRC/RFC6455/로컬 HTTP 서버와 실제 production 실행 파일을 사용했다. stdin은 닫았다. 이 검증을 실제 Pixhawk·물리 COM·회사 서버에 연결한 결과로 해석하지 않는다. Linux ELF 실행·Linux PTY·원격 CI는 여기서 수행하지 않았다.
+
+## 계산량·고정 메모리·시간 예산
+
+--sizes 실측: sample136B, batch71,840B, 앱 상태658,992B, 송신 버퍼1,110,016B, 입력 저장248,960B, 경로/종료 플래그4,100B로 **고정 합2,022,068B(약1.93MiB)** 다. decoder 자체81,808B는 입력 저장에 포함된다. 스택·OS 직렬 버퍼·WinHTTP/libcurl/TLS·CRT의 내부 메모리는 제외하므로 프로세스 RSS나 메모리 상한 전체가 아니다.
+
+M=CRC표235, D=기기32, P=보류512, N=항법32, K=키16, R=원본512로 제한한다. 프레임 CRC/해석은 바이트 수 B에 선형이며 메시지 표 검색은 O(log M), 기기 검색은 O(D)다. 재정렬 전체 flush는 select-min 방식 **O(P²+P*N)** 이며 실제 배출 수가 적으면 O(P) 탐색이 주가 된다. 보간 캐시와 pending 탐색을 포함하므로 패킷당 상수 시간이라고 주장하지 않는다. 전체512개 배출 시 min 선택 방문은 최대512×513/2=131,328회, 보간 이력 방문은 최대512×32=16,384회다. 비교의 세부 분기·좌표 계산·callback 비용은 따로 발생한다.
+
+관측 코어 추가는 O(K), UTC 추정은 O(16anchor), 구간 마감은71,840B 복사와 고정 초기화다. 송신 작업자에서 O(R log R) 정렬과 O(R) JSON 생성 및 HTTP를 처리한다. TUI는 별도 작업자로 작은 진단 snapshot만 복사하며 원본 큐를 매번 복사하지 않는다. Windows WebSocket은 고정 수신 작업자1개를 추가한다. 작업자는 입력·송신·화면의 고정 역할이며 관측마다 스레드나 작업 풀 항목을 만들지 않는다.
+
+예상 CPU 예산은 `f_byte*C_parse + f_packet*C_dispatch + f_tick*C_reorder(P,N) + f_obs*(C_key+ C_clock) + f_seal*C_copy + f_request*C_encode(R) + f_ui*C_render`로 나눈다. 직렬115200bps/8N1에서 wire 상한은 약11,520B/s이고100,000B/s 스트림을 이 baud로 받을 수는 없다. 입력 폴링·OS 버퍼·전송 지연·mutex 구간이 있어 하드 실시간 WCET는 보장하지 않는다. 특히 Windows의 작은 송신 HEARTBEAT도 OS I/O 지연을 포함한다.
+
+1000Hz named+100Hz 항법을 생성하는100,000관측 시험의 이번 실행은0.20552초, 약2.06µs/관측이었다. 입력 생성·독립 참조 CRC·실제 feed·callback을 포함하고 HTTP/TUI를 제외한 로컬 PC 측정이다. 이전 실행의1.38–1.57µs와 차이가 있어 고정 지연 보장으로 쓰지 않는다. 비교용2.06µs를1000관측/초에 단순 곱하면 약2.06ms CPU/초지만, 실제 키 수·pending 포화·I/O·UI 비용은 위 식에 추가해야 한다. MCU/실제 터미널/최악 부하 예측치가 아니다.
+
+## 현재 운용 한계
+
+- 실제 MAVLink message 구조는 common CRC표에 고정된다. 새 NAMED_VALUE 키는 자동 수집하지만 미정의 custom dialect의 새 wire 구조를 추측하지 않는다. NAMED_VALUE 이름은 wire 최대10바이트다.
+- 첫 비행제어기 한 소스 시계를 선택한다. 타컴포넌트 시계 관계, 센서별 지연, 실제 위치 정확도, signed 메시지 키/anti-replay는 아직 장치 통합 대상이다.
+- SYSTEM_TIME만으로 실제 GNSS 절대시각 오차를 알 수 없다. 기본 오차 미상에서는 raw anchor만 보존하며 관측 UTC는 null이다. TIMESYNC 왕복 측정/장치 시각 품질 검증을 구현했다고 주장하지 않는다.
+- 고도는 MSL이고 위치 투영은 지역 근사다. 별도 geoid 변환이나 물리장 복원 모델은 없다. 표본 통계와 원본을 전달하며, 여러 묶음을 합칠 때 n/평균/M2로 재집계한다.
+- 큐8묶음·요청4묶음·원본512행/묶음·키16·보류512·항법32·장치32의 상한을 넘으면 사유별 손실을 표시한다. 장시간 서버 장애/프로세스 종료/정전에서 RAM 자료를 영속 보존하지 않는다.
+- url=-는 명시적 미리보기이고 stdout 성공 뒤 메모리를 재사용한다. 실제 서버 확인이 아니며 운용 URL을 지정해야 한다.
+- Linux는 glibc2.34+ 및 OpenSSL 계열 libcurl.so.4용 ELF64 교차 빌드를 확인했다. Ubuntu26.04/실제 장치/원격 서버에서 실행 검증한 결과는 아니다. 원격 Git 게시도 하지 않았다.
+
+---
+
+아래는 이전 버전의 검토 이력이다. 당시 크기·입력 모드·중복 키·미구현 항목은 현재 설명과 구분한다.
+
+# 0.4.x 과거 검토 기록
 
 이전 검증 기록의 `telemetry_send` / `telemetry_monitor`는 각각 현재 `_headless` / `_interactive` 프로그램의 예전 이름이다. 현재 사용 이름과 개발 검사 선택 방식은 README를 따른다.
 

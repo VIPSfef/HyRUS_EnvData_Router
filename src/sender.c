@@ -1,5 +1,5 @@
 /* HTTP ACK contract: 204 means every request batch was committed by the server. */
-/* C99 receiver example: normalized CSV -> bounded queue -> 1 Hz HTTP batches. */
+/* Automatic MAVLink receiver or explicit CSV replay -> bounded 1 Hz batches. */
 #ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -7,6 +7,8 @@
 #include "time_sync.h"
 #include "config.h"
 #include "monitor.h"
+#include "router_input.h"
+#include <signal.h>
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -20,6 +22,7 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <shellapi.h>
+#include <bcrypt.h>
 typedef CRITICAL_SECTION mutex_t;
 static void lock(mutex_t *m) { EnterCriticalSection(m); }
 static void unlock(mutex_t *m) { LeaveCriticalSection(m); }
@@ -29,6 +32,8 @@ static void pause_ms(unsigned ms) { Sleep(ms); }
 #include <pthread.h>
 #include <time.h>
 #include <curl/curl.h>
+#include <sys/random.h>
+#include <unistd.h>
 typedef pthread_mutex_t mutex_t;
 static void lock(mutex_t *m) { (void)pthread_mutex_lock(m); }
 static void unlock(mutex_t *m) { (void)pthread_mutex_unlock(m); }
@@ -81,10 +86,92 @@ typedef struct {
     tm_snapshot diag;
     uint64_t queued_at[QUEUE_CAP];
     const char *config_path;
-    int monitor_enabled;
+    int monitor_enabled, live;
+    char active_session[65], queue_session[QUEUE_CAP][65];
+    uint8_t source_system, source_component, queue_system[QUEUE_CAP], queue_component[QUEUE_CAP];
+    uint32_t route_generation, queue_generation[QUEUE_CAP];
+    uint64_t run_nonce, next_batch_id, queue_batch_id[QUEUE_CAP], last_seal_ms;
+    double queue_origin[QUEUE_CAP][3];
+    uint64_t source_last_bytes, source_last_frames;
+    tc_report queue_clock[QUEUE_CAP];
+    int queue_have_clock[QUEUE_CAP];
+    uint64_t raw_clock_boot,raw_clock_utc,queue_raw_boot[QUEUE_CAP],queue_raw_utc[QUEUE_CAP];
+    uint32_t raw_clock_uncert,queue_raw_uncert[QUEUE_CAP];
 } app;
 static app state; /* Deliberately fixed storage; no large thread-stack objects. */
 static char wire[WIRE_CAP];
+static char default_config_path[4096];
+static int config_exists(const char *path) {
+#ifdef _WIN32
+    wchar_t wide[4096]; DWORD attributes;
+    if(!MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path,-1,wide,4096)) return 0;
+    attributes=GetFileAttributesW(wide);
+    return attributes!=INVALID_FILE_ATTRIBUTES && !(attributes&FILE_ATTRIBUTE_DIRECTORY);
+#else
+    FILE *file=fopen(path,"rb"); if(!file) return 0; fclose(file); return 1;
+#endif
+}
+static const char *default_config(void) {
+    size_t len; char *slash;
+    if(config_exists("telemetry.ini")) return "telemetry.ini";
+#ifdef _WIN32
+    wchar_t wide[4096];
+    DWORD n=GetModuleFileNameW(NULL,wide,4096);
+    if(!n || n>=4096 || !WideCharToMultiByte(CP_UTF8,0,wide,-1,default_config_path,sizeof(default_config_path),NULL,NULL)) return "telemetry.ini";
+#else
+    ssize_t n=readlink("/proc/self/exe",default_config_path,sizeof(default_config_path)-1);
+    if(n<=0 || (size_t)n>=sizeof(default_config_path)-1) return "telemetry.ini";
+    default_config_path[n]=0;
+#endif
+    slash=strrchr(default_config_path,'/');
+#ifdef _WIN32
+    { char *back=strrchr(default_config_path,'\\'); if(back && (!slash || back>slash)) slash=back; }
+#endif
+    if(!slash) return "telemetry.ini";
+    len=(size_t)(slash-default_config_path)+1;
+    if(len+sizeof("telemetry.ini")>sizeof(default_config_path)) return "telemetry.ini";
+    memcpy(default_config_path+len,"telemetry.ini",sizeof("telemetry.ini"));
+    return default_config_path;
+}
+
+#ifdef _WIN32
+static volatile LONG stop_requested;
+static BOOL WINAPI input_control(DWORD event) {
+    if(event==CTRL_C_EVENT || event==CTRL_BREAK_EVENT || event==CTRL_CLOSE_EVENT || event==CTRL_SHUTDOWN_EVENT) {
+        (void)InterlockedExchange(&stop_requested,1); return TRUE;
+    }
+    return FALSE;
+}
+#else
+static volatile sig_atomic_t stop_requested;
+static void input_control(int event) { (void)event; stop_requested=1; }
+#endif
+static int input_stop(void *context) {
+    app *a=context; int stop;
+    lock(&a->mutex); stop=a->failed; unlock(&a->mutex);
+#ifdef _WIN32
+    return InterlockedCompareExchange(&stop_requested,0,0)!=0 || stop;
+#else
+    return stop_requested || stop;
+#endif
+}
+static void input_signals(void) {
+#ifdef _WIN32
+    (void)SetConsoleCtrlHandler(input_control,TRUE);
+#else
+    struct sigaction action; memset(&action,0,sizeof(action));
+    action.sa_handler=input_control; (void)sigemptyset(&action.sa_mask);
+    (void)sigaction(SIGINT,&action,NULL); (void)sigaction(SIGTERM,&action,NULL);
+#endif
+}
+static int run_nonce(uint64_t *value) {
+#ifdef _WIN32
+    return BCryptGenRandom(NULL,(PUCHAR)value,sizeof(*value),BCRYPT_USE_SYSTEM_PREFERRED_RNG)>=0;
+#else
+    return getrandom(value,sizeof(*value),0)==(ssize_t)sizeof(*value);
+#endif
+}
+
 
 static int separator(char **p, char c) {
     while (isspace((unsigned char)**p)) ++*p;
@@ -155,11 +242,20 @@ static void seal(app *a) {
         unsigned slot = (a->head + a->count) % QUEUE_CAP;
         a->queue[slot] = a->current;
         a->queued_at[slot] = now_ms();
+        (void)snprintf(a->queue_session[slot],sizeof(a->queue_session[slot]),"%s",a->live ? a->active_session : a->session);
+        memcpy(a->queue_origin[slot],a->origin,sizeof(a->origin));
+        a->queue_system[slot]=a->source_system; a->queue_component[slot]=a->source_component;
+        a->queue_generation[slot]=a->route_generation;
+        a->queue_batch_id[slot]=++a->next_batch_id;
+        a->queue_have_clock[slot]=tc_get_report(&a->clock,&a->queue_clock[slot]);
+        a->queue_raw_boot[slot]=a->raw_clock_boot; a->queue_raw_utc[slot]=a->raw_clock_utc;
+        a->queue_raw_uncert[slot]=a->raw_clock_uncert;
         ++a->count;
     }
     a->sealed_window = a->current.window_us;
     a->have_sealed = 1;
     a->current.n = 0;
+    a->last_seal_ms=now_ms();
 }
 static void ingest(app *a, const tb_sample *input) {
     tb_sample sample = *input;
@@ -182,7 +278,7 @@ static void ingest(app *a, const tb_sample *input) {
         (k == a->metric_n && k == TB_MAX_KEYS) ||
         (k < a->metric_n && (strcmp(a->metric[k].unit, s->unit) ||
          s->seq <= a->metric[k].last_seq || s->t_us <= a->metric[k].last_t)) ||
-        (a->have_sealed && w <= a->sealed_window)) {
+        (!a->live && a->have_sealed && w <= a->sealed_window)) {
         ++a->loss.rejected;
     } else {
         if (a->current.n && a->current.window_us != w) seal(a);
@@ -218,6 +314,76 @@ static void ingest(app *a, const tb_sample *input) {
             a->have_last = 1;
             if (a->current.n > a->current.raw_n) ++a->loss.raw_samples;
         } else ++a->loss.rejected;
+    }
+    unlock(&a->mutex);
+}
+static void mavlink_event(void *context,const mi_event *event) {
+    app *a=context;
+    if(event->kind==MI_SAMPLE) {
+        tb_sample sample=event->sample; unsigned k;
+        (void)cfg_unit_for_key(&a->config,sample.key,sample.unit,sizeof(sample.unit));
+        lock(&a->mutex);
+        a->source_system=event->sysid; a->source_component=event->compid;
+        for(k=0;k<a->metric_n && strcmp(a->metric[k].key,sample.key);++k) {}
+        sample.seq=k<a->metric_n ? a->metric[k].last_seq+1 : 1;
+        unlock(&a->mutex);
+        ingest(a,&sample);
+        return;
+    }
+    lock(&a->mutex);
+    if(event->kind==MI_RESET) {
+        seal(a);
+        a->metric_n=0; a->have_last=a->have_sealed=0; a->watermark_us=0;
+        a->source_system=event->sysid; a->source_component=event->compid;
+        a->diag.key_n=0; memset(a->diag.keys,0,sizeof(a->diag.keys));
+        a->diag.have_position=0; tc_init(&a->clock);
+        a->raw_clock_boot=a->raw_clock_utc=0; a->raw_clock_uncert=UINT32_MAX;
+        ++a->route_generation;
+        (void)snprintf(a->active_session,sizeof(a->active_session),"%.28s.%016" PRIx64 ".%u",
+                       a->session,a->run_nonce,a->route_generation);
+    } else if(event->kind==MI_ORIGIN) {
+        memcpy(a->origin,event->origin,sizeof(a->origin));
+    } else if(event->kind==MI_CLOCK) {
+        a->raw_clock_boot=event->boot_us; a->raw_clock_utc=event->utc_us; a->raw_clock_uncert=event->uncert_us;
+        if(event->uncert_us!=UINT32_MAX && tc_anchor(&a->clock,event->boot_us,event->utc_us,event->uncert_us,0))
+            a->diag.last_anchor_receipt_ms=now_ms();
+    } else if(event->kind==MI_WATERMARK && event->boot_us>=a->watermark_us) {
+        a->watermark_us=event->boot_us;
+        if(a->current.n && event->boot_us>=a->current.window_us &&
+           event->boot_us-a->current.window_us>=TB_WINDOW_US) seal(a);
+    }
+    unlock(&a->mutex);
+}
+static void input_status(void *context,const ri_report *report) {
+    app *a=context; unsigned i;
+    lock(&a->mutex);
+    (void)snprintf(a->diag.active_source,sizeof(a->diag.active_source),"%s",report->source);
+    (void)snprintf(a->diag.source_status,sizeof(a->diag.source_status),"%s",report->status);
+    (void)snprintf(a->diag.source_error,sizeof(a->diag.source_error),"%s",report->error);
+    a->diag.input_bytes+=report->mav.bytes>=a->source_last_bytes ? report->mav.bytes-a->source_last_bytes : report->mav.bytes;
+    a->diag.input_lines+=report->mav.frames>=a->source_last_frames ? report->mav.frames-a->source_last_frames : report->mav.frames;
+    a->source_last_bytes=report->mav.bytes; a->source_last_frames=report->mav.frames;
+    a->diag.parsed_frames=report->mav.frames; a->diag.bad_crc=report->mav.bad_crc;
+    a->diag.unknown_message=report->mav.unknown_message;
+    a->diag.no_navigation=report->mav.no_navigation;
+    a->diag.pending_overflow=report->mav.pending_overflow;
+    a->diag.signed_rejected=report->mav.signed_rejected;
+    a->diag.no_clock=report->mav.no_clock;
+    a->diag.wrong_clock_component=report->mav.wrong_clock_component;
+    a->diag.invalid_value=report->mav.invalid_value;
+    a->diag.late_observation=report->mav.late_observation;
+    a->diag.pending_observations=report->mav.pending;
+    a->diag.selected_system=report->mav.selected_system;
+    a->diag.selected_component=report->mav.selected_component;
+    a->diag.gps_fix=report->mav.gps_fix;
+    a->diag.device_n=report->mav.devices<TM_MAX_DEVICES ? report->mav.devices : TM_MAX_DEVICES;
+    for(i=0;i<a->diag.device_n;++i) {
+        const mi_device *d=&report->mav.device[i]; tm_device *out=&a->diag.devices[i];
+        out->sysid=d->sysid; out->compid=d->compid; out->type=d->type; out->autopilot=d->autopilot;
+        out->base_mode=d->base_mode; out->system_status=d->system_status;
+        out->have_heartbeat=d->have_heartbeat;
+        out->custom_mode=d->custom_mode; out->last_seen_ms=d->last_seen_ms;
+        if(d->last_seen_ms>a->diag.last_receipt_ms) a->diag.last_receipt_ms=d->last_seen_ms;
     }
     unlock(&a->mutex);
 }
@@ -275,7 +441,7 @@ static int http_open(http *h, const tb_config *config) {
         h->route[n + c.dwExtraInfoLength] = 0;
     }
     h->flags = c.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
-    h->session = WinHttpOpen(L"mavlink_telemetry_data_router/0.4.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    h->session = WinHttpOpen(L"mavlink_telemetry_data_router/0.5.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                             WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!h->session) return 0;
     if (!WinHttpSetTimeouts(h->session, (int)config->connect_timeout_ms,
@@ -373,42 +539,96 @@ static void http_close(http *h) {
 }
 #endif
 
+static int clock_json(const tc_report *report,char *out,size_t cap) {
+    if(!report) return snprintf(out,cap,"null");
+    return snprintf(out,cap,
+        "{\"anchors\":%u,\"oldest_boot_us\":\"%" PRIu64 "\",\"last_boot_us\":\"%" PRIu64 "\","
+        "\"last_utc_us\":\"%" PRIu64 "\",\"offset_us\":\"%" PRId64 "\","
+        "\"drift_ppm\":%.17g,\"residual_std_us\":%.17g,\"max_residual_us\":%.17g,"
+        "\"anchor_uncert_max_us\":%u,\"rtt_mean_us\":%.17g,\"rtt_max_us\":%u}",
+        (unsigned)report->count,report->oldest_boot_us,report->last_boot_us,
+        report->last_utc_us,report->offset_us,report->drift_ppm,
+        report->residual_std_us,report->max_abs_residual_us,
+        (unsigned)report->anchor_uncert_max_us,report->roundtrip_mean_us,
+        (unsigned)report->roundtrip_max_us);
+}
+
 static int encode(app *a, unsigned head, unsigned n, losses l, const tc_report *report) {
     unsigned i;
     int k;
     size_t used;
+    const double *origin=a->live ? a->queue_origin[head] : a->origin;
     k = snprintf(wire, sizeof(wire),
-        "{\"schema\":2,\"stream\":\"%s\",\"session\":\"%s\",\"frame\":\"ENU\","
+        "{\"schema\":%u,\"stream\":\"%s\",\"session\":\"%s\",\"frame\":\"ENU\","
         "\"origin_wgs84\":[%.17g,%.17g,%.17g],\"time_basis\":\"pixhawk_boot_us\","
         "\"time_epoch\":\"session_boot\",\"utc_basis\":\"unix_us_estimate\","
         "\"field_order\":[\"t_us\",\"seq\",\"quality\",\"key\",\"unit\",\"east_m\",\"north_m\",\"up_m\","
         "\"ve_mps\",\"vn_mps\",\"vu_mps\",\"value\",\"time_uncert_us\",\"nav_age_us\",\"pos_error_m\",\"utc_us\",\"utc_uncert_us\"],"
         "\"loss\":{\"rejected\":\"%" PRIu64 "\",\"sequence_gaps\":\"%" PRIu64 "\","
         "\"queue_windows\":\"%" PRIu64 "\",\"queue_samples\":\"%" PRIu64 "\",\"raw_samples\":\"%" PRIu64 "\"},\"clock_model\":",
-        a->stream, a->session, a->origin[0], a->origin[1], a->origin[2],
+        a->live ? 3u : 2u, a->stream, a->live ? a->queue_session[head] : a->session, origin[0], origin[1], origin[2],
         l.rejected, l.sequence_gaps, l.queue_windows, l.queue_samples, l.raw_samples);
     if (k < 0 || (size_t)k >= sizeof(wire)) return 0;
     used = (size_t)k;
-    if (report) {
-        k = snprintf(wire + used, sizeof(wire) - used,
-            "{\"anchors\":%u,\"oldest_boot_us\":\"%" PRIu64 "\",\"last_boot_us\":\"%" PRIu64 "\","
-            "\"last_utc_us\":\"%" PRIu64 "\",\"offset_us\":\"%" PRId64 "\","
-            "\"drift_ppm\":%.17g,\"residual_std_us\":%.17g,\"max_residual_us\":%.17g,"
-            "\"anchor_uncert_max_us\":%u,\"rtt_mean_us\":%.17g,\"rtt_max_us\":%u},\"batches\":[",
-            (unsigned)report->count, report->oldest_boot_us, report->last_boot_us,
-            report->last_utc_us, report->offset_us, report->drift_ppm,
-            report->residual_std_us, report->max_abs_residual_us,
-            (unsigned)report->anchor_uncert_max_us, report->roundtrip_mean_us,
-            (unsigned)report->roundtrip_max_us);
-    } else k = snprintf(wire + used, sizeof(wire) - used, "null,\"batches\":[");
+    k=clock_json(report,wire+used,sizeof(wire)-used);
     if (k < 0 || (size_t)k >= sizeof(wire) - used) return 0;
     used += (size_t)k;
+    k=snprintf(wire+used,sizeof(wire)-used,",\"batches\":[");
+    if(k<0 || (size_t)k>=sizeof(wire)-used) return 0;
+    used+=(size_t)k;
+    if(a->live) {
+        /* Insert source identity before the batches member without mutable state. */
+        const char *suffix="\"batches\":[";
+        size_t tail=strlen(suffix);
+        if(used<tail) return 0;
+        used-=tail;
+        k=snprintf(wire+used,sizeof(wire)-used,
+          "\"source\":{\"sysid\":%u,\"compid\":%u,\"epoch\":%u,\"altitude_datum\":\"MSL\"},\"batches\":[",
+          (unsigned)a->queue_system[head],(unsigned)a->queue_component[head],a->queue_generation[head]);
+        if(k<0 || (size_t)k>=sizeof(wire)-used) return 0;
+        used+=(size_t)k;
+        if(a->queue_raw_utc[head]) {
+            char uncertainty[32];
+            if(a->queue_raw_uncert[head]==UINT32_MAX) (void)strcpy(uncertainty,"null");
+            else (void)snprintf(uncertainty,sizeof(uncertainty),"%u",a->queue_raw_uncert[head]);
+            used-=strlen("\"batches\":[");
+            k=snprintf(wire+used,sizeof(wire)-used,"\"raw_clock_anchor\":{\"boot_us\":\"%" PRIu64 "\",\"utc_us\":\"%" PRIu64 "\",\"uncert_us\":%s},\"batches\":[",
+                a->queue_raw_boot[head],a->queue_raw_utc[head],uncertainty);
+            if(k<0 || (size_t)k>=sizeof(wire)-used) return 0;
+            used+=(size_t)k;
+        }
+    }
     for (i = 0; i < n; ++i) {
         if (i) wire[used++] = ',';
         tb_batch_prepare(&a->queue[(head + i) % QUEUE_CAP]);
         k = tb_batch_json_mode(&a->queue[(head + i) % QUEUE_CAP], wire + used,
                                sizeof(wire) - used, !a->summary);
         if (k < 0) return 0;
+        if(a->live) {
+            char prefix[1536];
+            unsigned slot=(head+i)%QUEUE_CAP;
+            int part,prefix_n=snprintf(prefix,sizeof(prefix),"{\"batch_id\":\"%" PRIu64 "\",\"clock_model\":",a->queue_batch_id[slot]);
+            if(prefix_n<1 || (size_t)prefix_n>=sizeof(prefix)) return 0;
+            part=clock_json(a->queue_have_clock[slot] ? &a->queue_clock[slot] : NULL,
+                            prefix+prefix_n,sizeof(prefix)-(size_t)prefix_n);
+            if(part<0 || (size_t)part>=sizeof(prefix)-(size_t)prefix_n) return 0;
+            prefix_n+=part;
+            if(a->queue_raw_utc[slot]) {
+                char uncertainty[32];
+                if(a->queue_raw_uncert[slot]==UINT32_MAX) (void)strcpy(uncertainty,"null");
+                else (void)snprintf(uncertainty,sizeof(uncertainty),"%u",a->queue_raw_uncert[slot]);
+                part=snprintf(prefix+prefix_n,sizeof(prefix)-(size_t)prefix_n,
+                    ",\"raw_clock_anchor\":{\"boot_us\":\"%" PRIu64 "\",\"utc_us\":\"%" PRIu64 "\",\"uncert_us\":%s}",
+                    a->queue_raw_boot[slot],a->queue_raw_utc[slot],uncertainty);
+                if(part<0 || (size_t)part>=sizeof(prefix)-(size_t)prefix_n) return 0;
+                prefix_n+=part;
+            }
+            if((size_t)prefix_n+1>=sizeof(prefix) || (size_t)k+(size_t)prefix_n+1>=sizeof(wire)-used) return 0;
+            prefix[prefix_n++]=',';
+            memmove(wire+used+prefix_n,wire+used+1,(size_t)k);
+            memcpy(wire+used,prefix,(size_t)prefix_n);
+            k+=prefix_n-1;
+        }
         used += (size_t)k;
     }
     if (used + 3 >= sizeof(wire)) return 0;
@@ -492,12 +712,19 @@ static void *sender(void *arg)
         tc_report report;
         if (now < next) { pause_ms((unsigned)(next - now > 100 ? 100 : next - now)); continue; }
         lock(&a->mutex);
-        if (a->current.n && a->eof) seal(a);
+        if (a->current.n && (a->eof || (a->live && now>=a->last_seal_ms && now-a->last_seal_ms>=interval))) seal(a);
         head = a->head;
         n = a->count < a->config.max_windows ? a->count : a->config.max_windows;
+        if(a->live) {
+            unsigned same=1;
+            while(same<n && !strcmp(a->queue_session[(head+same)%QUEUE_CAP],a->queue_session[head])) ++same;
+            if(n) n=same;
+        }
         eof = a->eof;
         loss = a->loss;
-        have_clock = tc_get_report(&a->clock, &report);
+        if(a->live && n) {
+            have_clock=a->queue_have_clock[head]; report=a->queue_clock[head];
+        } else have_clock = tc_get_report(&a->clock, &report);
         unlock(&a->mutex);
         if (!n && eof) break;
         encode_start = precise_ms();
@@ -601,13 +828,27 @@ int main(int argc, char **argv) {
     cfg_defaults(&a->config);
     a->config.max_windows = SEND_WINDOWS;
     a->monitor_enabled = TB_MONITOR_DEFAULT;
-    a->config_path = "telemetry.ini";
+    a->config_path = default_config();
     if (argc == 2 && strcmp(argv[1], "--sizes") == 0) {
-        printf("sample=%zu batch=%zu state=%zu wire=%zu static_total=%zu\n",
-               sizeof(tb_sample), sizeof(tb_batch), sizeof(state), sizeof(wire), sizeof(state) + sizeof(wire));
+        printf("sample=%zu batch=%zu state=%zu wire=%zu input_storage=%zu auxiliary_storage=%zu static_total=%zu\n",
+               sizeof(tb_sample), sizeof(tb_batch), sizeof(state), sizeof(wire), ri_storage_bytes(), sizeof(default_config_path)+sizeof(stop_requested), sizeof(state) + sizeof(wire) + ri_storage_bytes()+sizeof(default_config_path)+sizeof(stop_requested));
         return 0;
     }
-    if (argc >= 3 && !strcmp(argv[1], "--config")) {
+    if(argc==1 || !strcmp(argv[1],"--interactive") || !strcmp(argv[1],"--headless")) {
+        if(config_exists(a->config_path)) {
+            if(!cfg_load(a->config_path,&a->config,SEND_WINDOWS,error,sizeof(error))) {
+                fprintf(stderr,"Configuration: %s\n",error); return 1;
+            }
+        } else {
+            (void)cfg_set(&a->config,"url","-",error,sizeof(error));
+            (void)cfg_set(&a->config,"stream","env1",error,sizeof(error));
+            (void)cfg_set(&a->config,"session","auto",error,sizeof(error));
+            if(!cfg_save(a->config_path,&a->config,SEND_WINDOWS,error,sizeof(error)))
+                fprintf(stderr,"Could not save default settings: %s\n",error);
+            fprintf(stderr,"No saved configuration: automatic MAVLink discovery and dry output. Configure server URL before production use.\n");
+        }
+        option_start=1;
+    } else if (argc >= 3 && !strcmp(argv[1], "--config")) {
         a->config_path = argv[2];
         if (!cfg_load(a->config_path, &a->config, SEND_WINDOWS, error, sizeof(error))) {
             fprintf(stderr, "Configuration: %s\n", error); return 1;
@@ -620,6 +861,7 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "Configuration: %s\n", error); return 1;
             }
         }
+        (void)strcpy(a->config.input_mode,"csv");
         option_start = 7;
     } else {
         fprintf(stderr, "Usage: mavlink_telemetry_data_router_headless URL|- STREAM SESSION LAT LON ALT [--summary] [--interactive]\n"
@@ -636,6 +878,14 @@ int main(int argc, char **argv) {
     if (!cfg_validate(&a->config, SEND_WINDOWS, error, sizeof(error))) {
         fprintf(stderr, "Configuration: %s\n", error); return 1;
     }
+    a->live=!strcmp(a->config.input_mode,"mavlink");
+    if(a->live && !run_nonce(&a->run_nonce)) { fprintf(stderr,"Could not generate unique router run ID\n"); return 1; }
+    if(a->live) input_signals();
+#ifndef _WIN32
+    /* Initialize before the input and sender use libcurl concurrently. */
+    if(curl_global_init(CURL_GLOBAL_DEFAULT)!=CURLE_OK) return 1;
+#endif
+    a->last_seal_ms=now_ms();
     a->url = a->config.url; a->stream = a->config.stream;
     a->session = a->config.session; a->summary = a->config.summary;
     memcpy(a->origin, a->config.origin, sizeof(a->origin));
@@ -665,7 +915,9 @@ int main(int argc, char **argv) {
         pause_ms(10);
     }
     if (setup_failed) goto finish;
-    while (fgets(line, sizeof(line), stdin)) {
+    if(a->live) {
+        (void)ri_run(&a->config,mavlink_event,input_status,input_stop,a);
+    } else while (fgets(line, sizeof(line), stdin)) {
         tb_sample sample;
         char *p = line;
         int bad = 0;
@@ -712,6 +964,9 @@ finish:
     DeleteCriticalSection(&a->mutex);
 #else
     (void)pthread_mutex_destroy(&a->mutex);
+#endif
+#ifndef _WIN32
+    curl_global_cleanup();
 #endif
     fprintf(stderr, "rejected=%" PRIu64 " sequence_gaps=%" PRIu64 " raw_dropped=%" PRIu64
             " queue_windows_dropped=%" PRIu64 " queue_samples_dropped=%" PRIu64 " pending=%u\n",

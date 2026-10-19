@@ -53,7 +53,7 @@ def write_config(path: Path, url: str, **overrides: object) -> None:
         "token_env": TOKEN_ENV, "origin_lat": 37, "origin_lon": 127, "origin_alt": 100,
         "send_interval_ms": 1000, "connect_timeout_ms": 500, "io_timeout_ms": 5000,
         "max_windows": 4, "refresh_ms": 250, "idle_warn_ms": 3000,
-        "ack_warn_ms": 500, "summary": 0,
+        "ack_warn_ms": 500, "summary": 0, "input_mode": "csv",
     }
     settings.update(overrides)
     path.write_text("".join(f"{key}={value}\n" for key, value in settings.items()),

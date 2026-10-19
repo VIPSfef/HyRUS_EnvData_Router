@@ -269,10 +269,105 @@ static int check_files(void)
     return 1;
 }
 
+
+static int check_mavlink_settings(void)
+{
+    tb_config c, loaded;
+    char error[160], safe[2048], unit[16], path[128];
+    static const unsigned baud[] = {9600,19200,38400,57600,115200,230400,460800,921600};
+    size_t i;
+    cfg_defaults(&c);
+    CHECK(!strcmp(c.input_mode,"mavlink") && !strcmp(c.serial_port,"auto"));
+    CHECK(c.serial_baud==115200 && c.auto_scan==1 && !c.websocket_url[0]);
+    CHECK(c.probe_ms==2000 && c.link_timeout_ms==5000 && c.reconnect_ms==1000);
+    CHECK(c.target_system==0 && c.target_component==0 && c.system_time_uncert_us==4294967295u);
+    CHECK(c.accel_bound_mps2==10 && c.duration_ms==0 && !c.unit_map[0]);
+    CHECK(c.origin_auto==1);
+    CHECK(valid_config(&c));
+    CHECK(cfg_set(&c,"input_mode","csv",error,sizeof(error)));
+    CHECK(cfg_set(&c,"input_mode","mavlink",error,sizeof(error)));
+    CHECK(invalid_set(&c,"input_mode","CSV"));
+    CHECK(invalid_set(&c,"serial_port",""));
+    CHECK(invalid_set(&c,"serial_port","/dev/ttyUSB0\nINJECT"));
+    CHECK(cfg_set(&c,"serial_port","/dev/serial/by-id/controller",error,sizeof(error)));
+    for(i=0;i<sizeof(baud)/sizeof(baud[0]);++i) {
+        char value[32];
+        (void)snprintf(value,sizeof(value),"%u",baud[i]);
+        CHECK(cfg_set(&c,"serial_baud",value,error,sizeof(error)));
+        CHECK(c.serial_baud==baud[i]);
+    }
+    CHECK(invalid_set(&c,"serial_baud","0"));
+    CHECK(invalid_set(&c,"serial_baud","100000"));
+    CHECK(invalid_set(&c,"websocket_url","https://example.com/socket"));
+    CHECK(invalid_set(&c,"websocket_url","ws://PRIVATE_USER:PRIVATE_PASS@example.com/socket"));
+    CHECK(invalid_set(&c,"websocket_url","wss://example.com/socket#PRIVATE_FRAGMENT"));
+    CHECK(cfg_set(&c,"websocket_url","wss://[::1]:443/mavlink?token=PRIVATE_MAV_QUERY",error,sizeof(error)));
+    cfg_safe_url(c.websocket_url,safe,sizeof(safe));
+    CHECK(!strcmp(safe,"wss://[::1]:443/mavlink") && !strstr(safe,"PRIVATE_MAV_QUERY"));
+    CHECK(cfg_set(&c,"auto_scan","0",error,sizeof(error)) && c.auto_scan==0);
+    CHECK(cfg_set(&c,"auto_scan","1",error,sizeof(error)) && c.auto_scan==1);
+    CHECK(invalid_set(&c,"auto_scan","2"));
+    CHECK(invalid_set(&c,"auto_scan","true"));
+    CHECK(invalid_set(&c,"origin_auto","2"));
+    CHECK(invalid_set(&c,"origin_auto","true"));
+    CHECK(cfg_set(&c,"origin_auto","1",error,sizeof(error)) && c.origin_auto==1);
+    CHECK(cfg_set(&c,"origin_auto","0",error,sizeof(error)) && c.origin_auto==0);
+    CHECK(invalid_set(&c,"probe_ms","99"));
+    CHECK(cfg_set(&c,"probe_ms","100",error,sizeof(error)));
+    CHECK(cfg_set(&c,"probe_ms","60000",error,sizeof(error)));
+    CHECK(invalid_set(&c,"probe_ms","60001"));
+    CHECK(invalid_set(&c,"link_timeout_ms","99"));
+    CHECK(cfg_set(&c,"link_timeout_ms","3600000",error,sizeof(error)));
+    CHECK(invalid_set(&c,"link_timeout_ms","3600001"));
+    CHECK(invalid_set(&c,"reconnect_ms","99"));
+    CHECK(cfg_set(&c,"reconnect_ms","60000",error,sizeof(error)));
+    CHECK(invalid_set(&c,"reconnect_ms","60001"));
+    CHECK(cfg_set(&c,"target_system","255",error,sizeof(error)));
+    CHECK(cfg_set(&c,"target_component","191",error,sizeof(error)));
+    CHECK(invalid_set(&c,"target_system","256"));
+    CHECK(invalid_set(&c,"target_component","-1"));
+    CHECK(cfg_set(&c,"system_time_uncert_us","4294967295",error,sizeof(error)));
+    CHECK(invalid_set(&c,"system_time_uncert_us","4294967296"));
+    CHECK(cfg_set(&c,"system_time_uncert_us","2500",error,sizeof(error)));
+    CHECK(cfg_set(&c,"duration_ms","4294967295",error,sizeof(error)));
+    CHECK(invalid_set(&c,"duration_ms","4294967296"));
+    CHECK(cfg_set(&c,"accel_bound_mps2","0",error,sizeof(error)));
+    CHECK(cfg_set(&c,"accel_bound_mps2","1000000",error,sizeof(error)));
+    CHECK(invalid_set(&c,"accel_bound_mps2","1000000.1"));
+    CHECK(invalid_set(&c,"accel_bound_mps2","nan"));
+    CHECK(invalid_set(&c,"unit_map","temp:C;temp:K"));
+    CHECK(invalid_set(&c,"unit_map","1bad:C"));
+    CHECK(invalid_set(&c,"unit_map","temp:"));
+    CHECK(invalid_set(&c,"unit_map","temp:C;humidity:%;bad:unit:extra"));
+    CHECK(cfg_set(&c,"unit_map","temp:C;humidity:%;pm25:ug/m3;arbitrary:m/s",error,sizeof(error)));
+    strcpy(unit,"sentinel");
+    CHECK(cfg_unit_for_key(&c,"pm25",unit,sizeof(unit)) && !strcmp(unit,"ug/m3"));
+    strcpy(unit,"sentinel");
+    CHECK(!cfg_unit_for_key(&c,"absent",unit,sizeof(unit)) && !strcmp(unit,"sentinel"));
+    CHECK(!cfg_unit_for_key(&c,"pm25",unit,3) && !strcmp(unit,"sentinel"));
+    (void)snprintf(path,sizeof(path),"tb-mav-config-%u.ini",process_id());
+    CHECK(cfg_save(path,&c,4,error,sizeof(error)));
+    CHECK(cfg_load(path,&loaded,4,error,sizeof(error)));
+    CHECK(!strcmp(loaded.input_mode,c.input_mode) && !strcmp(loaded.serial_port,c.serial_port));
+    CHECK(!strcmp(loaded.websocket_url,c.websocket_url) && !strcmp(loaded.unit_map,c.unit_map));
+    CHECK(loaded.serial_baud==c.serial_baud && loaded.auto_scan==c.auto_scan);
+    CHECK(loaded.probe_ms==c.probe_ms && loaded.link_timeout_ms==c.link_timeout_ms && loaded.reconnect_ms==c.reconnect_ms);
+    CHECK(loaded.target_system==c.target_system && loaded.target_component==c.target_component);
+    CHECK(loaded.system_time_uncert_us==c.system_time_uncert_us && loaded.duration_ms==c.duration_ms);
+    CHECK(loaded.accel_bound_mps2==c.accel_bound_mps2);
+    CHECK(loaded.origin_auto==c.origin_auto);
+    {
+        const char duplicate[]="url=-\nstream=s\nsession=x\nunit_map=a:u\nunit_map=b:u\n";
+        CHECK(invalid_file(path,duplicate,sizeof(duplicate)-1,&c));
+    }
+    CHECK(remove_utf8(path));
+    return 1;
+}
+
 int main(void)
 {
     (void)setlocale(LC_NUMERIC, "C");
-    if (!check_settings() || !check_redaction() || !check_files()) return 1;
+    if (!check_settings() || !check_redaction() || !check_files() || !check_mavlink_settings()) return 1;
     printf("PASS %u configuration checks\n", checks);
     return 0;
 }

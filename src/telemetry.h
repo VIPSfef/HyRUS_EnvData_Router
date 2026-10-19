@@ -37,6 +37,7 @@
  * utc_uncert_us estimates absolute UTC error (UINT32_MAX means unknown);
  * time_uncert_us describes relative sensor/navigation timestamp alignment.
  * p: local ENU meters; v: ENU m/s; value may be NAN for a missing value.
+ * pos_error_m may be NAN when position uncertainty is unknown (JSON null).
  * key: [A-Za-z_][A-Za-z0-9_.-]*; unit: [A-Za-z0-9_./%*^+-]+.
  * Both strings must be NUL terminated in their fixed arrays.
  * quality is opaque; seq must increase per key, with a new session on wrap. */
@@ -54,7 +55,7 @@ typedef struct {
 
 typedef struct {
     char key[TB_KEY_BYTES], unit[TB_UNIT_BYTES];
-    uint32_t n;
+    uint32_t n, position_n;
     double mean, m2, min, max;
     double mean_time_uncert_us, max_time_uncert_us;
     double mean_position_error_m, max_position_error_m;
@@ -98,7 +99,9 @@ void tb_batch_prepare(tb_batch *batch);
  * t_us/window_us/known utc_us are decimal strings; unknown UTC is null.
  * utc_uncert_us is null when utc_us is zero; otherwise it is an integer.
  * NaN value is null; stat.n=0 has null mean/variance/min/max; n<2 has null
- * sample variance. Uncertainty statistics use the same finite-value samples;
+ * sample variance. Position-error statistics count only finite position errors
+ * among finite-value samples (position_error_n); absent errors serialize null.
+ * Time uncertainty statistics use the same finite-value samples;
  * estimated position error = pos_error_m + |v|*time_uncert_us/1e6 is a
  * current-speed estimate, not an absolute bound. Statistics are sorted by key.
  * API-created batches only. */
@@ -109,7 +112,8 @@ int tb_batch_json_mode(const tb_batch *batch, char *buf, size_t cap,
 /* Interpolate bracketing navigation in the SAME clock/session, no extrapolation;
  * span <= TB_MAX_NAV_AGE_US. Exact equal timestamps select a. accel_bound must
  * be finite in [0,1e6] m/s^2. Error is interpolated endpoint error + a*dt^2/8,
- * rounded upwards to float. No velocity-error guarantee is made.
+ * rounded upwards to float; an unknown endpoint error propagates NAN.
+ * No velocity-error guarantee is made.
  * Success changes only out.t_us,p,v,nav_age_us,pos_error_m; failure changes
  * nothing. Timestamp uncertainty and key/value/UTC metadata are preserved. */
 int tb_align(const tb_nav *a, const tb_nav *b, uint64_t t_us,
