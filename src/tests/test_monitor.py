@@ -1,7 +1,7 @@
 """Monitor/config integration tests with generated input and loopback HTTP only.
 
 No external service, GUI focus, or additional packages. POSIX uses a test-owned PTY.
-Run: python test_monitor.py [telemetry_send.exe]
+Run: python src/tests/test_monitor.py [build/windows-x64/telemetry_send.exe]
          [--monitor-executable telemetry_monitor.exe]
 Interactive console drawing/editor keys require a separate console check.
 """
@@ -12,13 +12,16 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import socket
 import subprocess
 import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
+BUILD = ROOT / "build" / ("windows-x64" if os.name == "nt" else "linux-x64")
 UTC = 1_800_000_000_000_000
 CLOCK = f"@clock,0,{UTC},1000,200\n"
 TOKEN = "PRIVATE_BEARER_MONITOR_TEST_849213"
@@ -327,6 +330,81 @@ def default_monitor(executable: Path) -> None:
 
 
 
+def standalone_offline_monitor(executable: Path, folder: Path) -> None:
+    """Run only a copied monitor executable; no companion program or server."""
+    standalone = folder / "monitor-alone"
+    standalone.mkdir()
+    copied = standalone / executable.name
+    shutil.copy2(executable, copied)
+    assert not any(path.name.startswith("telemetry_send") for path in standalone.iterdir())
+
+    # Keep an unlistened loopback port reserved: no server can acquire it during
+    # this test, and connect must fail rather than accidentally obtaining a 204.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserved:
+        reserved.bind(("127.0.0.1", 0))
+        config = standalone / "offline.ini"
+        write_config(config, f"http://127.0.0.1:{reserved.getsockname()[1]}/offline"
+                     f"?secret={QUERY_SECRET}", connect_timeout_ms=200, io_timeout_ms=200)
+        child = subprocess.Popen(
+            [str(copied), "--config", str(config)], cwd=standalone,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=environment())
+        capture = Capture(child.stderr)
+
+        def await_progress(accepted: int, failures: int, queued: int) -> None:
+            deadline = time.monotonic() + 12
+            while True:
+                assert child.poll() is None, "Standalone monitor exited with live input"
+                text = "".join(line for _, line in capture.snapshot())
+                for frame in parse_frames(text):
+                    if all(key in frame for key in ("input", "queue", "network")):
+                        if (number(frame, "input", "accepted") == accepted
+                                and number(frame, "network", "failures") >= failures
+                                and number(frame, "queue", "windows") >= queued):
+                            assert number(frame, "network", "acks") == 0, text
+                            return
+                assert time.monotonic() < deadline, text
+                time.sleep(.025)
+
+        try:
+            child.stdin.write(CLOCK + "".join(row(i) for i in range(300)))
+            child.stdin.flush()
+            await_progress(300, 1, 1)
+            # Receipt must continue after the first failed request, while the
+            # first window remains unconfirmed and input is still open.
+            child.stdin.write("".join(row(i) for i in range(300, 600)))
+            child.stdin.flush()
+            await_progress(600, 2, 2)
+            child.stdin.close()
+            child.stdin = None
+            child.wait(timeout=12)
+            text = capture.finish()
+            assert child.returncode == 2, text
+            assert not child.stdout.read(), "Offline HTTP monitor polluted stdout"
+            assert_private(text)
+            frames = parse_frames(text)
+            assert len(frames) >= 3, text
+            final = frames[-1]
+            assert number(final, "input", "accepted") == 600, text
+            assert number(final, "input", "rejected") == 0, text
+            assert number(final, "loss", "gaps") == 0, text
+            assert number(final, "loss", "raw") == 0, text
+            assert number(final, "loss", "queue_windows") == 0, text
+            assert number(final, "queue", "windows") == 3, text
+            assert number(final, "network", "attempts") >= 3, text
+            assert number(final, "network", "acks") == 0, text
+            assert number(final, "network", "dry_releases") == 0, text
+            assert "pending=3" in text, text
+        finally:
+            if child.stdin is not None:
+                child.stdin.close()
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=3)
+            if capture.thread.is_alive():
+                capture.thread.join(timeout=3)
+    print("PASS standalone monitor/offline server: receipt and refresh continue; all 3 windows remain pending")
+
 def posix_tui_cleanup(executable: Path) -> None:
     """Test-owned controlling PTY: private editor save and Ctrl+C restoration.
 
@@ -513,7 +591,7 @@ def posix_tui_cleanup(executable: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("executable", nargs="?", type=Path,
-                        default=ROOT / ("telemetry_send.exe" if os.name == "nt" else "telemetry_send"))
+                        default=BUILD / ("telemetry_send.exe" if os.name == "nt" else "telemetry_send"))
     parser.add_argument("--monitor-executable", type=Path)
     args = parser.parse_args()
     executable = args.executable.resolve()
@@ -525,12 +603,15 @@ def main() -> None:
         invalid_config_before_network(executable, folder)
     monitor = args.monitor_executable
     if monitor is None:
-        candidate = ROOT / ("telemetry_monitor.exe" if os.name == "nt" else "telemetry_monitor")
+        candidate = executable.with_name("telemetry_monitor.exe" if os.name == "nt" else "telemetry_monitor")
         if candidate.is_file():
             monitor = candidate
     if monitor is not None:
+        monitor = monitor.resolve()
         assert monitor.is_file(), monitor
         default_monitor(monitor.resolve())
+        with tempfile.TemporaryDirectory(prefix="telemetry-monitor-alone-") as temp:
+            standalone_offline_monitor(monitor.resolve(), Path(temp))
     else:
         print("SKIP default-monitor binary check: pass --monitor-executable to enable")
     posix_tui_cleanup(monitor.resolve() if monitor is not None else executable)

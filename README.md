@@ -1,4 +1,4 @@
-# Telemetry Batch 0.3.1
+# Telemetry Batch 0.4.0
 
 고속 이동 센서의 관측을 보존하고, 1초 구간별 원본·통계를 묶어 HTTP/HTTPS로 보내는 C99 프로그램이다.
 기본은 **원본 + 통계**이며 `--summary`는 원본을 생략한다. 수신 빈도와 HTTP 요청 빈도를 분리한다.
@@ -7,14 +7,16 @@
 
 `MAVLink 해독기/시각·좌표 정렬 → 정규화 CSV 또는 C API → 고정 큐 → 송신 스레드 → 서버`.
 실제 MAVLink wire 해독기, UART/UDP 입출력, 최종 저장 서버는 포함하지 않는다.
-기존 해독기는 아래 CSV를 출력하거나 `tb_sample`을 채워 `telemetry.c/.h`에 연결한다.
+기존 해독기는 아래 CSV를 출력하거나 `tb_sample`을 채워 `src/telemetry.c/.h`에 연결한다.
 임의 숫자 `key/unit/value`를 처리하므로 해독된 새 key 추가에 코어 소스 변경이 필요 없다.
 새 MAVLink wire 메시지 자체에는 송수신 측 dialect 정의와 해독 라이브러리 업데이트가 필요하다.
 문자열·배열 값, 센서 교정, 좌표 변환, 순서 재정렬은 상위 어댑터의 책임이다.
 
 ## 상태 모니터와 서버 설정
 
-`telemetry_monitor`는 수집·송신에 TUI를 기본으로 켠 실행 파일이다. `telemetry_send --monitor`도 같은 기능을 제공한다.
+`telemetry_send`는 헤드리스 수집·중계기이고, `telemetry_monitor`는 같은 수집·중계 기능에 TUI를 기본으로 켠 실행 파일이다. `telemetry_send --monitor`도 같은 기능을 제공한다.
+모니터 자체가 수집·중계 프로그램이므로 별도 `telemetry_send` 프로세스를 실행하지 않는다. 둘 중 하나만 실행한다.
+최종 수신 서버가 꺼져 있어도 모니터와 입력 수신은 계속 동작하고 재시도한다. 미확인 자료는 고정 RAM 큐에 남으며 큐가 가득 차면 새 구간을 버리고 손실을 표시한다.
 관측 입력은 계속 표준입력으로 받고 화면과 진단은 표준오류로 출력한다. 입력은 MAVLink 해독기에서 정규화한 CSV다.
 화면은 기본1Hz이며, 입력/송신/화면이 각각 다른 스레드에서 동작한다. 관측은 메모리에만 유지하고 설정만 파일로 저장한다.
 
@@ -39,8 +41,8 @@ UTC/위치오차는 추정 지표이며 시계 모델이 실제 센서 지연·G
 Windows PowerShell에서 첫 예제를 실행한다. `-`는 외부 전송 없이 JSON을 내보내는 시험 모드다.
 
 ```powershell
-Copy-Item .\telemetry.ini.example .\telemetry.ini
-Get-Content .\example.csv | .\telemetry_monitor.exe --config .\telemetry.ini 1>$null
+Copy-Item .\config\telemetry.ini.example .\telemetry.ini
+Get-Content .\examples\example.csv | .\build\windows-x64\telemetry_monitor.exe --config .\telemetry.ini 1>$null
 ```
 
 실제 운용은 MAVLink 해독기의 CSV 출력을 파이프로 연결한다. 짧은 예제 파일은 EOF 직후 종료하므로, 계속 갱신되는 화면/설정 편집은 실행 중인 입력 소스에서 사용한다.
@@ -78,104 +80,180 @@ Windows I/O timeout은 단계별 제한이다. Linux 총 요청 timeout은 `conn
 토큰은 OS 환경에서 제공한다. 화면에는 환경변수 이름과 set/missing만 보이고 URL query는 숨긴다. 설정 파일에는 query 문자열이 그대로 저장되므로 인증정보는 query 대신 토큰 환경변수로 관리한다.
 기존 위치 인자 실행법과 `--summary`, `--sizes`는 유지하며 `--no-monitor`로 화면을 끌 수 있다.
 
-## 빌드·설치·게시
+## CMake 소스·빌드·패키지 트리
 
-대상은 **Windows x64와 Linux x64 두 빌드**다. Intel x64와 AMD64는 같은 x86-64 명령어 집합이므로 CPU 제조사별 빌드를 나누지 않는다.
-Windows는 WinHTTP, Linux는 libcurl와 pthread를 사용한다.
+모든 프로그램·테스트 소스는 `src/`에, 생성 파일과 네 실행 파일은 `build/`에 둔다.
+기본 빌드는 **Windows x64 수집기/모니터와 Linux x64 수집기/모니터**다. Intel/AMD x64에 같은 실행 파일을 사용한다.
+Debug는 별도 선택 사항이며 기본 네 실행 파일을 덮어쓰지 않는다.
 
-| 대상 | 패키지명 | 실제 검증 상태 |
+```text
+mavlink-server-transfer/
+├── CMakeLists.txt
+├── CMakePresets.json           # 공유 빌드·테스트·패키지 설정
+├── cmake/                     # 아키텍처 검증·툴체인 설정
+├── src/
+│   ├── CMakeLists.txt
+│   ├── sender.c
+│   ├── telemetry.c / telemetry.h
+│   ├── time_sync.c / time_sync.h
+│   ├── config.c / config.h
+│   ├── monitor.c / monitor.h
+│   └── tests/                 # C·Python 검증 소스
+├── config/telemetry.ini.example
+├── examples/example.csv
+├── docs/REVIEW.md
+└── build/
+    ├── windows-x64/
+    │   ├── telemetry_send.exe
+    │   └── telemetry_monitor.exe
+    ├── linux-x64/
+    │   ├── telemetry_send
+    │   └── telemetry_monitor
+    ├── packages/              # CPack ZIP/TGZ, 소스 패키지
+    └── stage/                 # 설치 트리
+```
+
+`build/`와 개인별 `CMakeUserPresets.json`은 Git에서 제외한다. 공유 설정은 `CMakePresets.json`으로 관리한다.
+빌드·테스트 결과와 플랫폼별 실제 실행 범위는 [검증 기록](docs/REVIEW.md)을 확인한다.
+Windows 검증을 Linux 검증으로 간주하지 않는다. 한 OS의 native preset만 실행하면 해당 OS의 두 파일이 생성된다.
+나머지 OS에서도 같은 소스를 빌드하거나, 대상 라이브러리를 갖춘 명시적 교차 툴체인을 사용해야 한다.
+
+### 공유 preset
+
+CMake 3.21 이상과 Ninja를 사용한다. 기본 최적화는 실행 파일 크기를 줄이는 `MinSizeRel`이다.
+
+| 목적 | Windows x64 | Linux x64 |
 |---|---|---|
-| Windows x64 | `telemetry-batch-0.3.1-Windows-x64.zip` | 실제 빌드·자동 테스트 통과 |
-| Linux x64 | `telemetry-batch-0.3.1-Linux-x64.tar.gz` | 빌드/CI 정의 준비; 실행 환경 부재로 미검증 |
+| 구성 | `cmake --preset windows-x64` | `cmake --preset linux-x64` |
+| 빌드 | `cmake --build --preset windows-x64` | `cmake --build --preset linux-x64` |
+| C 테스트 | `ctest --preset windows-x64` | `ctest --preset linux-x64` |
+| 설치 트리 | `cmake --install build/windows-x64` | `cmake --install build/linux-x64` |
+| 패키지 | `cmake --build --preset package-windows-x64` | `cmake --build --preset package-linux-x64` |
+| Debug 구성·빌드·테스트 | `windows-x64-debug` | `linux-x64-debug` |
 
-Linux는 현재 기기에 실행 가능한 런타임이 없어 로컬 빌드·실행과 원격 CI 실행을 검증하지 못했다.
-Windows 검증을 Linux 검증으로 간주하지 않는다. 상세 실행 결과와 범위는 [REVIEW.md](REVIEW.md)에 기록한다.
-
-CMake의 `TB_TARGET_ARCH=x64`는 **선택한 컴파일러의 64비트 x86-64 출력 검증 조건**이다. 컴파일러의 타깃을 바꾸는 옵션이 아니다.
-포인터 크기와 컴파일러의 대상 매크로를 확인하며 다른 대상이면 설정 단계에서 실패한다.
-컴파일러/생성기를 바꿀 때는 새 빌드 디렉터리를 사용한다. 권장 경로는 `build-windows-x64`와 `build-linux-x64`다.
+Debug는 위 명령의 preset 이름을 바꾸며 결과는 `build/windows-x64-debug/`, `build/linux-x64-debug/`에 생성한다.
+CPack 패키지는 `build/packages/`에 모으며 관측 자료는 패키지나 디스크에 저장하지 않는다.
+설치 기본 위치는 `build/stage/<platform>/`이다. 실제 시스템 설치는 `cmake --install build/linux-x64 --prefix "$HOME/.local"`처럼 명시한다.
 
 ### Windows x64
 
-LLVM-MinGW bin과 Ninja를 PATH에 둔 환경에서 다음과 같이 빌드한다.
+LLVM-MinGW의 x64 `clang`과 Ninja를 PATH에 둔 환경에서 실행한다.
+MSVC 대상 Clang을 쓰면 x64 Visual Studio 개발 환경과 해당 Windows SDK가 필요하다.
+같은 빌드 디렉터리에서 서로 다른 컴파일러의 캐시를 섞지 않는다.
 
 ```powershell
-cmake -S . -B build-windows-x64 -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_C_COMPILER=x86_64-w64-mingw32-clang.exe -DTB_TARGET_ARCH=x64
-cmake --build build-windows-x64 --parallel 2
-ctest --test-dir build-windows-x64 --output-on-failure
+cmake --preset windows-x64
+cmake --build --preset windows-x64
+ctest --preset windows-x64
+cmake --build --preset package-windows-x64
+Copy-Item .\config\telemetry.ini.example .\telemetry.ini
+Get-Content .\examples\example.csv | .\build\windows-x64\telemetry_monitor.exe --config .\telemetry.ini 1>$null
 ```
 
-Visual Studio C++ 빌드 도구를 사용한다면 x64 플랫폼을 지정한다. 아래 VS 2022 생성기에는 CMake 3.21 이상이 필요하다.
-생성기 캐시를 섞지 않도록 별도 디렉터리를 사용한다.
+컴파일러 경로가 PATH에 없다면 첫 구성 때 `-DCMAKE_C_COMPILER=C:/YOUR_TOOLCHAIN/bin/clang.exe`로 지정한다.
+머신별 설정을 보존할 때는 저장소 루트에 다음 `CMakeUserPresets.json`을 만들고 로컬 경로를 입력한다.
+공유 preset에는 개인 절대 경로를 넣지 않는다. 로컬 preset도 기본 `build/windows-x64`를 사용한다.
 
-```powershell
-cmake -S . -B build-windows-x64-vs -G "Visual Studio 17 2022" -A x64 -DTB_TARGET_ARCH=x64
-cmake --build build-windows-x64-vs --config MinSizeRel --parallel 2
-ctest --test-dir build-windows-x64-vs -C MinSizeRel --output-on-failure
+```json
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "windows-local",
+      "inherits": "windows-x64",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "C:/YOUR_TOOLCHAIN/bin/clang.exe",
+        "CMAKE_MAKE_PROGRAM": "C:/YOUR_NINJA/ninja.exe"
+      }
+    }
+  ]
+}
 ```
 
-LLVM/Ninja 실행 파일은 `build-windows-x64/`, VS 실행 파일은 `build-windows-x64-vs/MinSizeRel/`에 생긴다.
+최초 구성은 `cmake --preset windows-local`, 이후 빌드·테스트는 공유 `windows-x64` preset을 사용한다.
+`TB_TARGET_ARCH=x64`는 컴파일러의 **실제 출력 대상 검사 조건**이며 컴파일러 타깃을 바꾸는 옵션이 아니다.
+32비트·다른 아키텍처이면 구성 단계에서 실패하고, `src/tests/test_arch.py`가 실제 PE/ELF 실행 파일도 검사한다.
 
-### Linux x64 설치·직접 빌드
+### Linux x64 설치·빌드
 
-Ubuntu/Debian x64 개발 환경의 예시다. 실제 프로젝트 화면에서 복사한 clone URL로 자리표시자를 바꾼다.
+Ubuntu/Debian x64의 개발 도구·libcurl가 필요하다. Windows는 WinHTTP, Linux는 libcurl와 pthread를 사용한다.
+실제 프로젝트 화면에서 복사한 clone URL로 자리표시자를 바꾼다.
 
 ```sh
 sudo apt-get update
-sudo apt-get install git cmake build-essential libcurl4-openssl-dev python3
+sudo apt-get install git cmake ninja-build build-essential libcurl4-openssl-dev python3
 git clone YOUR_REPOSITORY_CLONE_URL telemetry-batch
 cd telemetry-batch
+cmake --preset linux-x64
+cmake --build --preset linux-x64
+ctest --preset linux-x64
+cmake --build --preset package-linux-x64
 sh install.sh
 ```
 
-기본 설치는 `$HOME/.local/bin/telemetry_send`와 `telemetry_monitor`다. PATH 또는 절대 경로를 사용한다.
-다른 설치 경로는 `PREFIX=/원하는/경로 sh install.sh`로 지정한다.
-실행 환경에도 x64 동적 로더·libcurl/TLS 라이브러리가 필요하며 정적 단일 바이너리 배포를 보장하지 않는다.
-설치 없이 테스트/패키징하려면 native x64 GCC와 libcurl 개발 파일로 직접 빌드한다.
+`install.sh`는 기본 `build/linux-x64/`를 사용하고 `$HOME/.local/bin/telemetry_send`와 `telemetry_monitor`에 설치한다.
+`PREFIX=/원하는/경로 sh install.sh`로 설치 위치를 바꾸고 `BUILD_DIR=/원하는/빌드경로`로 빌드 위치를 바꾼다.
+실행 환경에도 x64 동적 로더와 libcurl/TLS 라이브러리가 필요하며 정적 단일 바이너리 배포를 보장하지 않는다.
+Ubuntu/PX4/Gazebo 의존성이 없는 중계기이며 특정 Ubuntu 버전의 실행 검증은 검증 기록과 구분한다.
 
-```sh
-cmake -S . -B build-linux-x64 -DCMAKE_BUILD_TYPE=MinSizeRel -DTB_TARGET_ARCH=x64
-cmake --build build-linux-x64 --parallel 2
+### Windows에서 Linux x64도 교차 빌드
+
+이 작업 폴더에는 Windows x64 두 파일과 Linux x64 두 파일을 실제로 생성했다. Windows 실행 시험은 통과했으며 Linux는 교차 빌드·ELF·의존성 검사까지 수행했다. Linux 런타임 실행은 검증하지 않았다.
+
+Windows의 LLVM-MinGW Clang22/LLD, Ninja, Python3.9 이상을 PATH에 둔 뒤 아래를 실행한다. 일반 Linux native 빌드에는 이 절차가 필요 없다.
+
+```powershell
+python -m pip install --target build/toolchains/python-deps zstandard
+$env:PYTHONPATH = "$PWD/build/toolchains/python-deps"
+python cmake/toolchains/prepare-linux-x64.py
+$python = (Get-Command python).Source
+cmake -S . -B build/linux-x64 -G Ninja `
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/linux-x64-cross.cmake `
+  -DCMAKE_BUILD_TYPE=MinSizeRel -DBUILD_TESTING=ON `
+  "-DTB_LINUX_PYTHON=$python" `
+  "-DCMAKE_INSTALL_PREFIX=$PWD/build/stage/linux-x64"
+cmake --build build/linux-x64 --parallel 2
+cmake --build build/linux-x64 --target package
 ```
 
-### 테스트·설치·패키징
+준비 스크립트는 공식 Ubuntu22.04 패키지를 HTTPS로 받고 SHA256를 확인한 뒤 `build/toolchains/`에만 추출한다. 패키지를 OS에 설치하거나 패키지 설치 스크립트를 실행하지 않는다. sysroot와 Python 추가 모듈은 배포물에 포함하지 않는다.
+생성 ELF는 glibc2.34 이상과 OpenSSL 계열 `libcurl.so.4`를 필요로 한다. 교차 패키징은 TGZ 안의 두 실행 파일 권한도 `0755`로 보정한다.
+교차 빌드 디렉터리를 Linux로 복사해 native CMake 캐시로 재사용하지 않는다. Linux에서 새로 빌드할 때는 소스만 가져와 native preset으로 구성한다.
+### 통합 검증·패키지
 
-아래는 Linux x64 예시다. 핵심 검증은 **이미 해당 타깃으로 빌드한 실행 파일**에 수행한다.
+핵심 검증은 이미 해당 플랫폼으로 빌드한 실행 파일에 수행한다. Linux 예시이며 Windows는 실행 파일에 `.exe`를 붙인다.
 
 ```sh
-ctest --test-dir build-linux-x64 --output-on-failure
-python3 test_core.py --skip-build --executable ./build-linux-x64/test_telemetry --bench
-python3 test_sender.py ./build-linux-x64/telemetry_send
-python3 test_confirmation.py ./build-linux-x64/telemetry_send
-python3 test_monitor.py ./build-linux-x64/telemetry_send --monitor-executable ./build-linux-x64/telemetry_monitor
-cmake --install build-linux-x64 --prefix ./stage-linux-x64
-cmake --build build-linux-x64 --target package
+python3 src/tests/test_arch.py build/linux-x64/telemetry_send --arch x64
+python3 src/tests/test_arch.py build/linux-x64/telemetry_monitor --arch x64
+python3 src/tests/test_core.py --skip-build --executable ./build/linux-x64/test_telemetry --bench
+python3 src/tests/test_sender.py ./build/linux-x64/telemetry_send
+python3 src/tests/test_confirmation.py ./build/linux-x64/telemetry_send
+python3 src/tests/test_monitor.py ./build/linux-x64/telemetry_send --monitor-executable ./build/linux-x64/telemetry_monitor
+python3 src/tests/test_sender_limits.py ./build/linux-x64/telemetry_send
+cmake --build --preset package-linux-x64
+cmake --build build/linux-x64 --target package_source
 ```
 
-Windows LLVM/Ninja는 같은 Python 테스트에 `build-windows-x64/*.exe`를 사용한다.
-설치/패키징은 `cmake --install build-windows-x64 --prefix ./stage-windows-x64`,
-`cmake --build build-windows-x64 --target package`다.
-VS는 `build-windows-x64-vs/MinSizeRel/*.exe`를 사용하고 설치/패키징에도 `--config MinSizeRel`을 추가한다.
-`.github/workflows/`와 `.gitlab-ci.yml`에는 Windows x64·Linux x64 정의를 두며 준비 상태와 실제 CI 실행 결과를 구분한다.
+GitHub/GitLab CI도 같은 preset·폴더를 사용하며 대상별 실행 파일 두 개와 패키지를 산출물로 보존한다.
+CI 정의를 작성한 것과 CI를 실제 실행해 통과한 것은 구분한다. 자동 원격 게시나 서버 연결은 수행하지 않는다.
+CMake preset 형식은 [CMake 3.21 공식 설명](https://cmake.org/cmake/help/v3.21/manual/cmake-presets.7.html)을 따른다.
 
 ### 원격 저장소 게시
 
-이 폴더의 내용을 저장소 루트로 사용한다. 로컬 main 커밋은 있으나 실제 remote URL은 아직 없다.
-회사 GitLab·`prj.uaslaboratory.synology.me`에 접속/게시하지 않았다. 웹 호스트만으로 clone URL을 추측하지 않는다.
-GitLab 프로젝트 화면에서 복사한 clone URL로 아래 자리표시자를 바꾼 뒤 사용자가 게시할 수 있다.
+이 폴더가 저장소 루트다. 회사 GitLab·`prj.uaslaboratory.synology.me`는 실제 clone URL을 설정해 게시한다.
+웹 호스트만으로 clone URL을 추측하지 않는다. 저장소 화면에서 복사한 주소로 자리표시자를 바꾼다.
 
 ```sh
 git remote add origin YOUR_GITLAB_CLONE_URL
 git push -u origin main
 ```
 
-[CMake 공식 문서](https://cmake.org/cmake/help/latest/generator/Visual%20Studio%2017%202022.html)는 VS의 `-A x64` 대상 선택을 설명한다.
-
 ## 실행과 관측 입력
 
 `telemetry_send URL|- STREAM SESSION ORIGIN_LAT ORIGIN_LON ELLIPSOID_ALT [--summary]`
-Windows 예: `Get-Content .\example.csv | .\telemetry_send.exe - env1 trial-unique-001 37 127 100`.
-Linux 예: `telemetry_send https://SERVER/ingest env1 trial-unique-002 37 127 100 < example.csv`.
+Windows 예: `Get-Content .\examples\example.csv | .\build\windows-x64\telemetry_send.exe - env1 trial-unique-001 37 127 100`.
+Linux 예: `telemetry_send https://SERVER/ingest env1 trial-unique-002 37 127 100 < examples/example.csv`.
 URL `-`는 JSON을 표준출력에 출력한다. `TB_TOKEN`이 있으면 Bearer 인증 헤더에 사용한다.
 STREAM/SESSION은 ASCII 영숫자·`_ - .`의 1~64자다. 매 부팅·실행에 고유 SESSION을 사용한다.
 원점은 실행 동안 고정된 WGS84 위도/경도(deg)·**타원체고(m)**이며 위치/속도는 ENU m/m·s⁻¹다.
@@ -220,7 +298,7 @@ UTC 절대오차는 상대 time_uncert_us와 별개다. 상대 정렬에 공통�
 watermark는 앞으로 `t<W` 관측이 오지 않는다는 상위 소스의 선언이다. 이후 `t<W`는 거부하고 `t==W`는 허용한다.
 W는 비감소이며 마지막 관측의 t 이상이어야 한다. 현재 구간이 없어도 기억한다. 이미 마감한 구간은 다시 열지 않는다.
 PC에서 입력이 잠시 없다는 이유로 자동 마감하지 않는다. 따라서 고정1초 지연이나 벽시계 정시 업로드를 보장하지 않는다.
-`example.csv`는 boot0 UTC anchor, 100m/s 이동 중 두 key의 10Hz 관측 세 번, W=2초, 다음 구간의 새 key를 보여 준다.
+`examples/example.csv`는 boot0 UTC anchor, 100m/s 이동 중 두 key의 10Hz 관측 세 번, W=2초, 다음 구간의 새 key를 보여 준다.
 
 ## 통계·보간·출력 스키마
 
@@ -260,7 +338,7 @@ EOF 후 연속 전송3회 실패하면 종료2와 pending을 남긴다. 종료0=
 네트워크·정렬·JSON은 송신 스레드에서 수행한다. 초 경계 복사/초기화의 짧은 잠금 비용도 실시간 예산에 포함해야 한다.
 CPU 예산은 `f_observation*C_add + f_window*C_seal + f_request*C_encode`로 나눠 산정한다. 요청 묶음은 원본 정보량을 줄이지 않는다.
 검증 PC에서 sample136B/batch71,840B. 백만 정상 추가의 5회 중앙값은 약76ns/건(초기화 포함, 정렬·JSON·네트워크 제외)이었다.
-이는 MCU 예측값이 아니다. 실제 실행파일/전체 고정 RAM/검증 범위는 [REVIEW.md](REVIEW.md), 해당 빌드는 `telemetry_send --sizes`로 확인한다.
+이는 MCU 예측값이 아니다. 실제 실행파일/전체 고정 RAM/검증 범위는 [검증 기록](docs/REVIEW.md), 해당 빌드는 `telemetry_send --sizes`로 확인한다.
 
 ## 설계 근거
 

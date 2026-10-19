@@ -1,0 +1,35 @@
+# Cross-compile from a Windows-hosted LLVM installation to Ubuntu-compatible
+# Linux x86-64. Run prepare-linux-x64.py first. Native Linux builds do not need
+# this file: use the linux-x64 configure preset instead.
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR x86_64)
+set(TB_TARGET_ARCH x64 CACHE STRING "Target architecture")
+set(TB_LINUX_SYSROOT "${CMAKE_CURRENT_LIST_DIR}/../../build/toolchains/ubuntu-jammy/sysroot" CACHE PATH "Extracted Ubuntu 22.04 sysroot")
+find_program(TB_LINUX_CLANG NAMES clang.exe clang REQUIRED)
+find_program(TB_LINUX_LLD NAMES ld.lld.exe ld.lld REQUIRED)
+find_program(TB_LINUX_AR NAMES llvm-ar.exe llvm-ar REQUIRED)
+find_program(TB_LINUX_RANLIB NAMES llvm-ranlib.exe llvm-ranlib REQUIRED)
+find_program(TB_LINUX_STRIP NAMES llvm-strip.exe llvm-strip REQUIRED)
+set(CMAKE_C_COMPILER "${TB_LINUX_CLANG}")
+set(CMAKE_C_COMPILER_TARGET x86_64-linux-gnu)
+set(CMAKE_SYSROOT "${TB_LINUX_SYSROOT}")
+set(CMAKE_AR "${TB_LINUX_AR}")
+set(CMAKE_RANLIB "${TB_LINUX_RANLIB}")
+set(CMAKE_STRIP "${TB_LINUX_STRIP}")
+set(CMAKE_C_FLAGS_INIT "--no-default-config --gcc-install-dir=\"${TB_LINUX_SYSROOT}/usr/lib/gcc/x86_64-linux-gnu/11\"")
+set(CMAKE_EXE_LINKER_FLAGS_INIT "-fuse-ld=lld -Wl,-rpath-link,\"${TB_LINUX_SYSROOT}/usr/lib/x86_64-linux-gnu\" -Wl,-rpath-link,\"${TB_LINUX_SYSROOT}/lib/x86_64-linux-gnu\"")
+set(CMAKE_FIND_ROOT_PATH "${TB_LINUX_SYSROOT}")
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+set(CURL_INCLUDE_DIR "${TB_LINUX_SYSROOT}/usr/include/x86_64-linux-gnu" CACHE PATH "Target curl headers")
+set(CURL_LIBRARY_RELEASE "${TB_LINUX_SYSROOT}/usr/lib/x86_64-linux-gnu/libcurl.so" CACHE FILEPATH "Target curl shared library")
+# Never embed a Windows sysroot path in Linux executables.
+set(CMAKE_SKIP_RPATH TRUE)
+
+# A Windows-hosted TGZ needs explicit POSIX executable modes after packaging.
+find_program(TB_LINUX_PYTHON NAMES python3.exe python.exe python3 python REQUIRED)
+set(CPACK_LINUX_ARCHIVE_PYTHON "${TB_LINUX_PYTHON}")
+set(CPACK_LINUX_ARCHIVE_NORMALIZER "${CMAKE_CURRENT_LIST_DIR}/normalize-linux-archive.py")
+set(CPACK_POST_BUILD_SCRIPTS "${CMAKE_CURRENT_LIST_DIR}/normalize-linux-archive.cmake")

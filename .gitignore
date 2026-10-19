@@ -20,3 +20,4 @@ __pycache__/
 *.tar.gz
 telemetry.ini
 *.ini.tmp.*
+/CMakeUserPresets.json

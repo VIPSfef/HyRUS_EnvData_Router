@@ -1,7 +1,7 @@
 """Compile/run the portable C tests and check its JSON against Python math.
 
 No network or third-party Python packages are used. Run from any directory:
-    python test_core.py [--cc /path/to/clang] [--bench]
+    python src/tests/test_core.py [--cc /path/to/clang] [--bench]
 """
 from __future__ import annotations
 
@@ -15,7 +15,8 @@ import statistics
 import subprocess
 import sys
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
+BUILD = ROOT / "build" / ("windows-x64" if os.name == "nt" else "linux-x64")
 EPOCH = 1_800_000_000_000_000
 CAPACITY = 512
 
@@ -100,7 +101,7 @@ def main() -> int:
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--bench", action="store_true", help="time 1,000,000 accepted additions")
     args = parser.parse_args()
-    executable = args.executable or ROOT / ".build" / ("test_telemetry.exe" if os.name == "nt" else "test_telemetry")
+    executable = args.executable or BUILD / ("test_telemetry.exe" if os.name == "nt" else "test_telemetry")
     executable = executable.resolve()
     if not args.skip_build:
         compiler = args.cc or os.environ.get("CC") or shutil.which("clang") or shutil.which("gcc")
@@ -111,7 +112,8 @@ def main() -> int:
             parser.error("A C99 compiler is required; specify --cc")
         executable.parent.mkdir(parents=True, exist_ok=True)
         run([compiler, "-std=c99", "-O2", "-Wall", "-Wextra", "-Wpedantic", "-Werror",
-             str(ROOT / "telemetry.c"), str(ROOT / "test_telemetry.c"), "-o", str(executable), "-lm"])
+             "-I", str(ROOT / "src"), str(ROOT / "src" / "telemetry.c"),
+             str(ROOT / "src" / "tests" / "test_telemetry.c"), "-o", str(executable), "-lm"])
     print(run([str(executable)]), end="")
     lengths = {mode: check_fixture(executable, mode)
                for mode in ("empty", "single", "normal", "missing", "overflow", "summary", "large_time")}

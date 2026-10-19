@@ -1,9 +1,9 @@
 """Check the target executable's PE/ELF architecture using only its file header.
 
 Examples:
-    python test_arch.py build/telemetry_send.exe --arch x86
-    python test_arch.py build/telemetry_monitor --arch x64
-    python test_arch.py build/telemetry_send --bits
+    python src/tests/test_arch.py build/windows-x64/telemetry_send.exe --arch x64
+    python src/tests/test_arch.py build/linux-x64/telemetry_monitor --arch x64
+    python src/tests/test_arch.py build/linux-x64/telemetry_send --bits
 No executable is run and the Python host's pointer width is never consulted.
 """
 from __future__ import annotations

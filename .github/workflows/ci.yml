@@ -1,6 +1,6 @@
 name: Build, test, and package
 
-# Intel/AMD x86-64 targets only. CI artifacts; no release publishing.
+# Two native x64 builds produce four application executables in build/.
 on:
   push:
   pull_request:
@@ -20,15 +20,13 @@ jobs:
         include:
           - name: Linux x64
             os: ubuntu-24.04
-            arch: x64
+            preset: linux-x64
             suffix: ''
-            package: TGZ
             artifact: telemetry-linux-x64
           - name: Windows x64
             os: windows-2025
-            arch: x64
+            preset: windows-x64
             suffix: .exe
-            package: ZIP
             artifact: telemetry-windows-x64
     defaults:
       run:
@@ -63,49 +61,49 @@ jobs:
               "$($Matches[1])=$($Matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
             }
           }
-      - name: Configure Linux x64 with matching curl
+      - name: Configure Linux x64
         if: runner.os == 'Linux'
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel \
-            -DTB_TARGET_ARCH=${{ matrix.arch }} -DCMAKE_C_COMPILER=gcc \
+          cmake --preset linux-x64 -DCMAKE_C_COMPILER=gcc \
             -DCMAKE_C_FLAGS=-m64 -DCMAKE_EXE_LINKER_FLAGS=-m64 \
             -DCURL_NO_CURL_CMAKE=TRUE \
             -DCURL_INCLUDE_DIR=/usr/include/x86_64-linux-gnu \
             -DCURL_LIBRARY=/usr/lib/x86_64-linux-gnu/libcurl.so
-      - name: Configure Windows x64 with explicit compiler target
+      - name: Configure Windows x64
         if: runner.os == 'Windows'
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel \
-            -DTB_TARGET_ARCH=${{ matrix.arch }} -DCMAKE_C_COMPILER=clang-cl \
+          cmake --preset windows-x64 -DCMAKE_C_COMPILER=clang-cl \
             -DCMAKE_C_FLAGS=--target=x86_64-pc-windows-msvc
       - name: Build
-        run: cmake --build build --parallel 2
-      - name: Verify actual executable architectures
+        run: cmake --build --preset ${{ matrix.preset }}
+      - name: Verify executable architectures
         run: |
-          python test_arch.py build/telemetry_send${{ matrix.suffix }} --arch ${{ matrix.arch }}
-          python test_arch.py build/telemetry_monitor${{ matrix.suffix }} --arch ${{ matrix.arch }}
-      - name: C tests on the target executables
-        run: ctest --test-dir build --output-on-failure
+          python src/tests/test_arch.py build/${{ matrix.preset }}/telemetry_send${{ matrix.suffix }} --arch x64
+          python src/tests/test_arch.py build/${{ matrix.preset }}/telemetry_monitor${{ matrix.suffix }} --arch x64
+      - name: C tests on target executables
+        run: ctest --preset ${{ matrix.preset }}
       - name: Independently parse JSON fixtures
-        run: python test_core.py --skip-build --executable build/test_telemetry${{ matrix.suffix }}
+        run: python src/tests/test_core.py --skip-build --executable build/${{ matrix.preset }}/test_telemetry${{ matrix.suffix }}
       - name: Loopback HTTP integration tests
-        run: python test_sender.py build/telemetry_send${{ matrix.suffix }}
+        run: python src/tests/test_sender.py build/${{ matrix.preset }}/telemetry_send${{ matrix.suffix }}
       - name: Confirmed batch release
-        run: python test_confirmation.py build/telemetry_send${{ matrix.suffix }}
+        run: python src/tests/test_confirmation.py build/${{ matrix.preset }}/telemetry_send${{ matrix.suffix }}
       - name: Monitor settings and POSIX PTY tests
-        run: python test_monitor.py build/telemetry_send${{ matrix.suffix }} --monitor-executable build/telemetry_monitor${{ matrix.suffix }}
+        run: python src/tests/test_monitor.py build/${{ matrix.preset }}/telemetry_send${{ matrix.suffix }} --monitor-executable build/${{ matrix.preset }}/telemetry_monitor${{ matrix.suffix }}
       - name: Maximum JSON capacity
-        run: python test_sender_limits.py build/telemetry_send${{ matrix.suffix }}
-      - name: Install and package the tested target
+        run: python src/tests/test_sender_limits.py build/${{ matrix.preset }}/telemetry_send${{ matrix.suffix }}
+      - name: Install and package tested target
         run: |
-          cmake --install build --prefix stage
-          cpack --config build/CPackConfig.cmake -G ${{ matrix.package }} -B dist/${{ matrix.arch }}
+          cmake --install build/${{ matrix.preset }}
+          cmake --build --preset package-${{ matrix.preset }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact }}
           path: |
-            dist/${{ matrix.arch }}/*.zip
-            dist/${{ matrix.arch }}/*.tar.gz
+            build/${{ matrix.preset }}/telemetry_send${{ matrix.suffix }}
+            build/${{ matrix.preset }}/telemetry_monitor${{ matrix.suffix }}
+            build/packages/*.zip
+            build/packages/*.tar.gz
           if-no-files-found: error
           compression-level: 0
           retention-days: 14

@@ -1,4 +1,4 @@
-# 검토 기록 — v0.3.1
+# 검토 기록 — v0.4.0
 
 검토일: 2026-10-19. 대상: 범용 수치형 관측 KV 수집 코어, GPS/elapsed 시계 추정, HTTP 중계기. 회사 서버/실제 비행 장치 연결은 수행하지 않았다.
 
@@ -111,3 +111,24 @@ TUI 종료 정리: Windows console control handler와 POSIX SIGINT/SIGTERM handl
 Windows x64에서 C 코어2388·시계110·설정408 검사, JSON7fixture, 수신/HTTP/204확인/모니터/최대용량 시험을 통과했다. 실제 PE32+ machine0x8664도 확인했다. 실행 경로의 C 코드는 변경하지 않았으며 빌드 검증과 패키지 이름·CI·설치 안내를 수정했다. Linux x64는 libcurl 및 pthread로 빌드/시험하도록 CI에 정의했으나 이 PC에는 사용 가능한 Linux 런타임이 없어 실제 Linux 실행 및 원격 CI는 미수행이다.
 
 GitHub/GitLab CI는 각 OS의 x64 실행 파일 아키텍처를 확인한 뒤 기존 자동 시험과 패키징을 수행한다. Linux 설치 스크립트는 기본 build-linux-x64를 사용한다. 결과물은0.3.1-Windows-x64.zip 및 Linux CI에서 생성할0.3.1-Linux-x64.tar.gz로 구분한다.
+
+## 2026-10-19: src/build 분리와 독립 실행 모니터
+
+프로그램 C/헤더9개와 C/Python 검사9개를 모두 src/ 아래로 이동했다. 루트 CMake는 src/를 포함하고, 공유 CMakePresets.json은 Windows/Linux x64 구성·빌드·검사·설치·패키지를 제공한다. 기본 MinSizeRel 결과는 build/windows-x64 및 build/linux-x64에 둔다. Debug는 별도 디렉터리를 사용한다. 패키지와 설치 트리도 build/packages, build/stage 아래로 모았다. 이전 패키지는 build/packages/archive로 이동했다.
+
+| 대상 | 이 PC에서 수행한 검증 |
+|---|---|
+| Windows x64 헤드리스·모니터 | 실제 빌드, PE32+ machine0x8664 확인, CTest3개, 독립 JSON7fixture, 수신/HTTP/204확인/모니터/최대용량 전체 검사 통과 |
+| Linux x64 헤드리스·모니터 | 실제 교차 빌드, ELF64 machine0x003e 확인, Linux C 검사 실행 파일3개 컴파일 완료. Linux 런타임 실행은 미수행 |
+| 모니터 단독·서버 없음 | 모니터 실행 파일 하나만 빈 임시 폴더에 복사. 서버 없는 loopback 포트에서600개 수신, 화면 갱신·재시도 지속, ACK0·미확인3구간·손실0 확인 |
+| 소스·패키지 경로 | src/에 C/헤더/Python 검사, build/에 네 프로그램. 소스 패키지에서 build·Git·개인 설정·실행 파일 제외 확인 |
+
+이번 구조 변경은 프로그램 C/헤더9개를 이전 커밋과 바이트 대조해 내용 동일함을 확인했다. 수신·계산 경로에 새 연산을 추가하지 않았으므로 기존 계산량과 고정 메모리1,762,504B는 같다. 새로운 모니터 검사는 개발 시에만 실행한다.
+
+telemetry_monitor 자체가 입력·송신·화면 스레드를 가진 완전한 중계기다. 별도 telemetry_send 프로세스나 로컬 서버를 요구하지 않는다. 전송 서버가 중단되어도 살아 있는 입력의 수신과 화면 갱신은 지속한다. 미확인 큐는 고정8구간이며 장기 장애로 가득 차면 새 구간을 버리고 손실을 표시한다. EOF 뒤 확인 재시도에도 실패하면 pending을 표시하고 비정상 종료하므로 그 시점에 남은 RAM 자료는 프로세스와 함께 소실된다.
+
+Linux 교차 빌드는 공식 Ubuntu22.04 패키지를 SHA256 확인 후 build/toolchains에 추출해 사용했다. 패키지 설치 스크립트는 실행하지 않았고 sysroot는 배포물에 넣지 않는다. 두 ELF는 /lib64/ld-linux-x86-64.so.2, libc.so.6, libm.so.6, libcurl.so.4를 사용하며 요구 심볼은 GLIBC_2.34 이상과 CURL_OPENSSL_4다. 이 요구사항 확인은 Ubuntu26.04 또는 모든 Linux 배포판에서 실행을 검증한 결과가 아니다. 원격 CI·실제 센서·회사 서버 연결도 미수행이다.
+
+이번 MinSizeRel 빌드의 Windows 파일은 각각135,680B이고 Linux ELF는 각각54,560B다. CPack strip 배포물은 Windows 각각53,760B, Linux 각각48,208B다. Windows 호스트에서 만든 Linux TGZ의 실행 파일 모드를0755로 보정하는 post-build hook과 재검사를 추가했다.
+
+독립 재검토에서 교차 빌드의 실행 권한 훅이 소스 TGZ에도 적용되는 문제를 찾아 소스 패키지를 건너뛰도록 수정했다. 교차 빌드 트리에서도 package_source의 ZIP/TGZ 생성을 실제 확인했다. 설치 prefix도 build/stage/linux-x64로 맞췄다.

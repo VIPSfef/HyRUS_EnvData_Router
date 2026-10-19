@@ -9,7 +9,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
+BUILD = ROOT / "build" / ("windows-x64" if os.name == "nt" else "linux-x64")
 CLOCK = "@clock,0,1800000000000000,1000,200\n"
 
 
@@ -203,7 +204,7 @@ def confirmed_queue_reuse(executable):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("executable", nargs="?", type=Path,
-                        default=ROOT / ("telemetry_send.exe" if os.name == "nt" else "telemetry_send"))
+                        default=BUILD / ("telemetry_send.exe" if os.name == "nt" else "telemetry_send"))
     executable = parser.parse_args().executable.resolve()
     assert executable.is_file(), f"Sender executable not found: {executable}"
     status_confirmation(executable)

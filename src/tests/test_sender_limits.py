@@ -1,10 +1,14 @@
 """Exercise full four-window JSON with maximum keys and wide numeric strings."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 
-exe = (Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).with_name("telemetry_send.exe")).resolve()
+ROOT = Path(__file__).resolve().parents[2]
+BUILD = ROOT / "build" / ("windows-x64" if os.name == "nt" else "linux-x64")
+exe = (Path(sys.argv[1]) if len(sys.argv) > 1 else BUILD / (
+    "telemetry_send.exe" if os.name == "nt" else "telemetry_send")).resolve()
 base = ((2**64-1)//1_000_000-4)*1_000_000
 lines = [f"@clock,{base},{base-1_000_000},1000,200\n"]
 for window in range(4):
