@@ -1,3 +1,4 @@
+/* HTTP ACK contract: 204 means every request batch was committed by the server. */
 /* C99 receiver example: normalized CSV -> bounded queue -> 1 Hz HTTP batches. */
 #ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
@@ -279,7 +280,7 @@ static int http_post(http *h, const char *body, size_t n) {
          WinHttpReceiveResponse(r, NULL) &&
          WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                              WINHTTP_HEADER_NAME_BY_INDEX, &status, &len, WINHTTP_NO_HEADER_INDEX) &&
-         status >= 200 && status < 300;
+         status == 204;
 done:
     WinHttpCloseHandle(r);
     return ok;
@@ -326,7 +327,7 @@ static int http_post(http *h, const char *body, size_t n) {
     curl_easy_setopt(h->easy, CURLOPT_POSTFIELDS, body);
     curl_easy_setopt(h->easy, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)n);
     if (curl_easy_perform(h->easy) != CURLE_OK) return 0;
-    return curl_easy_getinfo(h->easy, CURLINFO_RESPONSE_CODE, &status) == CURLE_OK && status >= 200 && status < 300;
+    return curl_easy_getinfo(h->easy, CURLINFO_RESPONSE_CODE, &status) == CURLE_OK && status == 204;
 }
 static void http_close(http *h) {
     if (h->easy) curl_easy_cleanup(h->easy);

@@ -1,4 +1,4 @@
-# Telemetry Batch 0.2.0
+# Telemetry Batch 0.2.1
 
 고속 이동 센서의 관측을 보존하고, 1초 구간별 원본·통계를 묶어 HTTP/HTTPS로 보내는 C99 프로그램이다.
 기본은 **원본 + 통계**이며 `--summary`는 원본을 생략한다. 수신 빈도와 HTTP 요청 빈도를 분리한다.
@@ -124,7 +124,7 @@ t_us/window_us/known utc_us와 누적 loss는 64비트 정밀도를 위해 십�
 
 ## 서버·손실·계산량
 
-배치 식별키는 **(stream,session,window_us)**다. 서버는 요청 내 모든 배치를 영속 저장/영속 큐 수락한 뒤에만 2xx로 ACK한다.
+배치 식별키는 **(stream,session,window_us)**다. 서버는 요청 내 모든 배치를 영속 저장/영속 큐 수락한 뒤에만 204로 ACK한다.
 서버는 식별키로 중복을 제거해야 한다. ACK 유실 재시도가 가능하며 HTTP exactly-once 전달을 보장하지 않는다.
 송신 시작은 초당 최대1회, HTTP 요청 하나에 최대4구간, 완성 대기 큐8개다. 느린 요청 뒤에도 몰아서 시작하지 않는다.
 기본 원시512관측/초는 100Hz × 4key = 400행/초를 수용한다. raw 초과는 raw_dropped와 통계에 반영한다.
@@ -145,3 +145,9 @@ CPU 예산은 `f_observation*C_add + f_window*C_seal + f_request*C_encode`로 �
 [OGC SensorML](https://docs.ogc.org/is/23-000/23-000.html)은 시간·공간 기준틀과 시각이 붙은 위치를 명시한다.
 [MAVLink TIMESYNC](https://mavlink.io/en/services/timesync.html)는 반복 교환/RTT 기반 시계차 추정과 필터링을 설명한다.
 [WMO 관측망 품질 지침](https://etrp.wmo.int/pluginfile.php/90334/mod_folder/content/0/INFCOM-3-RWCS-TECHNICAL-GUIDELINES-approved_updates.pdf)은 관측시각과 데이터베이스 수신시각을 구분해 지연을 평가한다.
+
+## 2026-10-19: 서버 확정 수락과 메모리 반환
+
+서버는 요청의 모든 배치를 영속 저장 또는 영속 큐에 확정 수락한 다음에만 HTTP 204를 반환한다. 이 프로그램은 204에만 해당 배치를 큐에서 제거하고 고정 버퍼를 재사용한다. 200/201/202 등 다른 상태나 전송 오류에는 자료와 배치 ID를 유지하여 재시도한다. HTTP 상태 코드 자체가 저장을 강제하지는 않으므로 이 규칙은 서버와 중계기의 애플리케이션 계약이다. TCP ACK는 바이트 전달 확인이며 이 확정 수락 응답을 대체하지 않는다. 서버는 (stream,session,window_us)로 중복을 제거하고 이미 확정 수락한 중복 요청에도 204로 답해야 한다. 큐에서 제거해도 버퍼 바이트를 즉시 0으로 지우지는 않는다. 다음 자료를 받을 때 같은 공간을 재사용하므로 메모리는 누적되지 않는다.
+
+소스와 실행 파일의 작업 위치: C:\Users\pjs20\OneDrive\문서\New project 3\mavlink-server-transfer. 원격 Git 서버는 설정하지 않았다.
