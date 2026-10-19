@@ -18,3 +18,5 @@ __pycache__/
 *.ilk
 *.zip
 *.tar.gz
+telemetry.ini
+*.ini.tmp.*

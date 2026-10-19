@@ -7,4 +7,4 @@ prefix=${PREFIX:-"$HOME/.local"}
 cmake -S "$project_dir" -B "$build_dir" -DCMAKE_BUILD_TYPE=MinSizeRel -DBUILD_TESTING=OFF
 cmake --build "$build_dir" --parallel 2
 cmake --install "$build_dir" --prefix "$prefix"
-printf 'Installed: %s/bin/telemetry_send\n' "$prefix"
+printf 'Installed: %s/bin/telemetry_send and telemetry_monitor\n' "$prefix"

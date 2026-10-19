@@ -7,3 +7,7 @@
 *.md text eol=lf
 *.exe binary
 *.zip binary
+CMakeLists.txt text eol=lf
+*.ini.example text eol=lf
+.gitattributes text eol=lf
+.gitignore text eol=lf

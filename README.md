@@ -1,4 +1,4 @@
-# Telemetry Batch 0.2.1
+# Telemetry Batch 0.3.0
 
 고속 이동 센서의 관측을 보존하고, 1초 구간별 원본·통계를 묶어 HTTP/HTTPS로 보내는 C99 프로그램이다.
 기본은 **원본 + 통계**이며 `--summary`는 원본을 생략한다. 수신 빈도와 HTTP 요청 빈도를 분리한다.
@@ -12,6 +12,72 @@
 새 MAVLink wire 메시지 자체에는 송수신 측 dialect 정의와 해독 라이브러리 업데이트가 필요하다.
 문자열·배열 값, 센서 교정, 좌표 변환, 순서 재정렬은 상위 어댑터의 책임이다.
 
+## 상태 모니터와 서버 설정
+
+`telemetry_monitor`는 수집·송신에 TUI를 기본으로 켠 실행 파일이다. `telemetry_send --monitor`도 같은 기능을 제공한다.
+관측 입력은 계속 표준입력으로 받고 화면과 진단은 표준오류로 출력한다. 입력은 MAVLink 해독기에서 정규화한 CSV다.
+화면은 기본1Hz이며, 입력/송신/화면이 각각 다른 스레드에서 동작한다. 관측은 메모리에만 유지하고 설정만 파일로 저장한다.
+
+| 진단 항목 | 판단에 쓰는 의미 |
+|---|---|
+| 전체·키별 observations/s, 최신 값·순번 | 센서/해독기 입력 중단, 특정 key 갱신 중단 |
+| accepted/rejected, 순번 gaps, raw/queue 손실 | 입력 규칙 위반과 메모리 용량 초과를 구분 |
+| 큐 사용량·최장 대기시간·전송 중 구간 수 | 서버 장애·지연으로 미확인 자료가 쌓이는지 |
+| HTTP 상태·오류 코드, 204 ACK 수·재시도·응답시간 | TCP 전달과 서버의 확정 수락을 구분 |
+| 인코딩 시간·요청 시도 바이트 | 직렬화 비용과 재전송 부하 확인(실제 선로 바이트가 아님) |
+| boot 시각·watermark·열린 구간 | 입력은 조용하지만 구간 마감 선언을 기다리는 상태 확인 |
+| ENU 위치·속도, 상대 시각 불확실도·항법 age·위치오차 추정 | 이동 관측의 시공간 품질 확인 |
+| UTC ESTIMATED/UNKNOWN/STALE, anchor 수·age·드리프트·잔차 | 시계 모델의 가용성과 오래됨 확인 |
+| ACTIVE 설정·token 환경변수 set/missing | 현재 적용된 서버·전송 조건과 인증 준비 확인 |
+
+`SENDING / RETRY / IDLE / WAIT_WATERMARK` 등 상태를 표시한다. 마지막 상태/오류 코드는 마지막 완료 요청의 결과이며 전송 중에는 과거 결과다.
+ACK 수는 확인된 **요청 수**다(한 요청에 여러 구간 가능). `DRY`의 `dry_releases`는 화면 출력 성공이며 서버 ACK가 아니다.
+입력 bytes/lines/idle에는 주석·제어 행도 포함한다. 관측률과 key별 n에는 받아들인 관측만 포함하고 NaN도 한 관측으로 센다.
+GPS fix·원본 MAVLink CRC·wire 패킷 손실률은 현재 입력 경계에서 알 수 없어 `n/a`다. 관측 순번 gap을 MAVLink 헤더 손실률로 해석하지 않는다.
+UTC/위치오차는 추정 지표이며 시계 모델이 실제 센서 지연·GPS 품질을 자동 검증하지 않는다. STALE 경고는 화면 진단이고 저장된 과거 관측의 UTC를 바꾸지 않는다.
+
+Windows PowerShell에서 첫 예제를 실행한다. `-`는 외부 전송 없이 JSON을 내보내는 시험 모드다.
+
+```powershell
+Copy-Item .\telemetry.ini.example .\telemetry.ini
+Get-Content .\example.csv | .\telemetry_monitor.exe --config .\telemetry.ini 1>$null
+```
+
+실제 운용은 MAVLink 해독기의 CSV 출력을 파이프로 연결한다. 짧은 예제 파일은 EOF 직후 종료하므로, 계속 갱신되는 화면/설정 편집은 실행 중인 입력 소스에서 사용한다.
+Linux 예: `your_decoder | telemetry_monitor --config ./telemetry.ini`.
+실제 서버 URL로 운용할 때 JSON 표준출력은 비어 있다. 시험 모드에서 JSON도 터미널에 출력하면 TUI와 섞이므로 `/dev/null` 또는 PowerShell `$null`로 보낸다.
+관측 저장을 원하지 않으면 JSON 출력을 파일로 리디렉션하지 않는다.
+
+- `e`: 설정 화면. 위/아래 또는 번호+Enter로 필드를 선택하고 편집한다.
+- `Ctrl+U`: 필드 지우기, Backspace: 한 글자 지우기, Enter: 검증, Esc: 편집 취소.
+- `s`: 검증된 설정을 임시 파일에 완성한 뒤 원자적으로 교체한다. 실패 시 기존 설정을 보존한다.
+- Esc 또는 `q`: 설정 화면에서 돌아온다. 저장하지 않은 변경은 버린다. `q`는 수집기를 종료하지 않는다.
+
+**저장된 변경은 재시작 후 적용**한다. 실행 중 ACTIVE 서버/stream/session/좌표 원점은 고정하므로 미확인 배치가 다른 서버/식별자로 이동하지 않는다.
+재시작은 입력 소스를 정상 종료해 큐를 확인받은 후 수행한다. 실패 종료의 pending 자료는 RAM에만 있으므로 프로세스 종료와 함께 사라진다.
+세션은 Pixhawk boot/관측 원점을 식별하도록 설정하고, boot/원점이 바뀌면 새 session을 지정한다.
+키보드는 Windows `CONIN$` 또는 Linux `/dev/tty`에서 읽는다. CSV stdin 자체가 터미널이면 편집을 비활성화해 같은 입력을 가로채지 않는다.
+표준오류가 리디렉션되면 ANSI 제어문자 없이 1Hz 상태를 출력하고 편집은 비활성화된다. 터미널에서는 위/아래로 key 목록을 스크롤한다.
+
+설정은 UTF-8 `key=value`다. Windows 한글 경로를 지원하며 알 수 없는 키·중복·범위 밖 값·잘린 행은 시작 전에 거부한다.
+
+| 설정 | 기본값 / 범위 |
+|---|---|
+| url | 필수. `https://HOST/path`, `http://HOST/path`, 시험용 `-`; URL userinfo 금지 |
+| stream, session | 필수. ASCII 영숫자/`_-.`, 1–64자 |
+| token_env | `TB_TOKEN`. 토큰 **값** 대신 환경변수 이름 |
+| origin_lat/lon/alt | 기본0. WGS84 deg/deg/타원체고 m; 실제 관측 원점으로 설정 |
+| send_interval_ms | 1000, 1000–60000; 재시도 포함 요청 시작 간격 |
+| connect_timeout_ms / io_timeout_ms | 각각1000, 100–60000 |
+| max_windows | 4, 1–컴파일 한도4; 요청당 최대 구간 수 |
+| refresh_ms | 1000, 250–10000; 터미널 화면 갱신 |
+| idle_warn_ms / ack_warn_ms | 2000 / 5000, 250–3600000; 화면 경고 기준 |
+| summary | 0. 1이면 전송 원본을 생략하고 통계만 전송 |
+
+Windows I/O timeout은 단계별 제한이다. Linux 총 요청 timeout은 `connect_timeout_ms + 2*io_timeout_ms`다. 동일한 전체 요청 최악시간을 보장하는 설정이 아니다.
+토큰은 OS 환경에서 제공한다. 화면에는 환경변수 이름과 set/missing만 보이고 URL query는 숨긴다. 설정 파일에는 query 문자열이 그대로 저장되므로 인증정보는 query 대신 토큰 환경변수로 관리한다.
+기존 위치 인자 실행법과 `--summary`, `--sizes`는 유지하며 `--no-monitor`로 화면을 끌 수 있다.
+
 ## 빌드·설치·게시
 
 Windows AMD64는 WinHTTP, Linux는 libcurl와 pthread를 사용한다. AMD/Intel x86-64에서 같은 아키텍처다.
@@ -24,7 +90,7 @@ cd telemetry-batch
 sh install.sh
 ```
 
-기본 설치는 `$HOME/.local/bin/telemetry_send`, 변경은 `PREFIX=/원하는/경로 sh install.sh`다.
+기본 설치는 `$HOME/.local/bin/telemetry_send`와 `telemetry_monitor`, 변경은 `PREFIX=/원하는/경로 sh install.sh`다.
 실행 시 PATH 또는 절대 경로를 사용한다. Linux는 OS의 libcurl/TLS 라이브러리를 동적 사용한다.
 이 폴더의 내용을 저장소 루트로 사용한다. 로컬 `main` 초기 커밋이 있으며 실제 remote URL은 아직 없다.
 회사 GitLab·`prj.uaslaboratory.synology.me`에 접속/게시하지 않았다. 웹 호스트만으로 clone URL을 추측하지 않는다.
@@ -44,6 +110,8 @@ cmake --build build --parallel 2
 ctest --test-dir build --output-on-failure
 python test_core.py --cc clang --bench
 python test_sender.py ./build/telemetry_send
+python test_confirmation.py ./build/telemetry_send
+python test_monitor.py ./build/telemetry_send --monitor-executable ./build/telemetry_monitor
 cmake --install build --prefix ./stage
 cmake --build build --target package
 ```

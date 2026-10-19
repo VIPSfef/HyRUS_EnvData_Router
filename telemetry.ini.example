@@ -1,0 +1,22 @@
+# Flat UTF-8 key=value configuration. Restart the sender to apply edits.
+# Give every Pixhawk boot/run a new session before sending new data.
+# This example is safe dry output; replace "-" with your own HTTPS endpoint.
+# Authenticate through the named environment variable; never paste a token here.
+url=-
+stream=env1
+session=replace-for-each-boot
+token_env=TB_TOKEN
+origin_lat=37
+origin_lon=127
+origin_alt=100
+send_interval_ms=1000
+connect_timeout_ms=1000
+io_timeout_ms=1000
+max_windows=4
+refresh_ms=1000
+idle_warn_ms=2000
+ack_warn_ms=5000
+summary=0
+# Windows applies connect/I/O timeouts per stage. Linux total HTTP timeout is
+# connect_timeout_ms + 2 * io_timeout_ms. Warning thresholds only affect the monitor.
+# Saving edits does not retarget pending batches; restart with the saved file.

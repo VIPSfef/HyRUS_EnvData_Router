@@ -269,12 +269,12 @@ print("PASS idle stays open/explicit watermark flush/t<W rejected/t==W accepted"
 child = subprocess.Popen(args("ftp://127.0.0.1/invalid"), stdin=subprocess.PIPE,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 try:
-    assert child.wait(timeout=3) == 2
+    assert child.wait(timeout=3) == 1
     child.stdin.close()
-    assert "HTTP setup failed" in child.stderr.read()
+    assert "Invalid configuration field: url" in child.stderr.read()
 finally:
     if child.poll() is None:
         child.kill()
         child.communicate()
-print("PASS HTTP setup failure does not block on idle stdin")
+print("PASS invalid URL fails configuration before waiting on idle stdin")
 print("ALL SENDER CHECKS PASSED")
