@@ -40,6 +40,10 @@ int it_read(it_handle *h, void *output, size_t capacity);
 /* Small outbound frames (e.g. TIMESYNC). Partial serial writes are reported.
    UDP is receive-only: it_write returns 0 without sending any data. */
 int it_write(it_handle *h, const void *data, size_t length);
+/* Discovery only: release an unvalidated UDP peer and partial datagram without
+   unbinding the socket. The owning receiver must reset its parser as well.
+   Never call on a selected stream or concurrently with it_read. */
+void it_udp_probe_reset(it_handle *h);
 void it_close(it_handle *h);
 const char *it_error(const it_handle *h);
 #endif

@@ -21,7 +21,7 @@ typedef struct {
 } tm_key;
 typedef struct {
     uint64_t now_ms, started_ms;
-    int stop, eof, failed, dry_run;
+    int stop, eof, failed, dry_run, test_mode;
     uint64_t input_bytes, input_lines, accepted, rejected, sequence_gaps;
     uint64_t raw_dropped, queue_windows_dropped, queue_samples_dropped;
     unsigned queue_count, queue_capacity, current_raw, raw_capacity;
@@ -58,7 +58,9 @@ typedef struct {
  * UDP bind/port/enabled are editable source settings with the same save rules.
  * Keyboard is CONIN$ or /dev/tty. With CSV console stdin, editing is disabled;
  * MAVLink input does not consume stdin, so console editing remains available.
- * stderr receives the dashboard, or plain 1 Hz snapshots when redirected. */
+ * stderr receives the dashboard, or plain 1 Hz snapshots when redirected.
+ * Only a live LOCKED MAVLink source is green; waiting/probing/disconnected
+ * sources are yellow. Redirected diagnostics never emit colour escapes. */
 void tm_run(void *context, void (*snapshot)(void *, tm_snapshot *),
             const tb_config *active, const char *config_path);
 /* One plain snapshot; no terminal input or writes. URL queries and credentials

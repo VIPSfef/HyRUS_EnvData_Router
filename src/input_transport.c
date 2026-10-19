@@ -693,6 +693,13 @@ static int udp_read(it_handle *h, void *out, size_t capacity) {
     return 0;
 }
 
+void it_udp_probe_reset(it_handle *h) {
+    if(!h || h->kind!=IT_UDP || !h->opened) return;
+    h->udp_peer_set=0;
+    h->udp_peer_address=0; h->udp_peer_port=0;
+    h->udp_buffered=h->udp_offset=0;
+}
+
 int it_open(it_handle *h, it_kind kind, const char *endpoint, unsigned baud,
             unsigned connect_timeout_ms, unsigned io_timeout_ms) {
     int result;

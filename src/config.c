@@ -294,7 +294,7 @@ void cfg_defaults(tb_config *c)
     c->system_time_uncert_us = UINT32_MAX;
     c->accel_bound_mps2 = 10;
     strcpy(c->udp_bind, "127.0.0.1");
-    c->udp_port = 14551;
+    c->udp_port = 14540;
     c->udp_enabled = 1;
 }
 

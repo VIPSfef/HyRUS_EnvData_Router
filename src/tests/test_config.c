@@ -373,7 +373,7 @@ static int check_udp_settings(void)
         "256.0.0.1", "1.2.3.999", "-1.2.3.4", "01.2.3.4", "1..3.4", "1.2.3.", "1.2.3.4:14551"};
     size_t i;
     cfg_defaults(&c);
-    CHECK(!strcmp(c.udp_bind,"127.0.0.1") && c.udp_port==14551 && c.udp_enabled==1);
+    CHECK(!strcmp(c.udp_bind,"127.0.0.1") && c.udp_port==14540 && c.udp_enabled==1);
     CHECK(valid_config(&c));
     for(i=0;i<sizeof(valid)/sizeof(valid[0]);++i) {
         CHECK(cfg_set(&c,"udp_bind",valid[i],error,sizeof(error)));

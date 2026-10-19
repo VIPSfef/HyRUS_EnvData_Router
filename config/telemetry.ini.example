@@ -17,7 +17,9 @@ idle_warn_ms=2000
 ack_warn_ms=5000
 summary=0
 
-# Native binary MAVLink discovery. For normalized CSV, use input_mode=csv.
+# Native binary MAVLink: listen to UDP while rotating serial/WS candidates.
+# Keep the first CRC-valid source; retry discovery after link_timeout_ms.
+# For normalized CSV replay, use input_mode=csv.
 input_mode=mavlink
 serial_port=auto
 serial_baud=115200
@@ -41,12 +43,14 @@ unit_map=
 # 0 uses the fixed origin fields above; CSV always uses its explicit origin.
 origin_auto=1
 
-# Receive-only MAVLink UDP input. QGC normally receives on 14550, so this
-# router uses its own 14551. Configure PX4/QGC forwarding to this destination.
-# 127.0.0.1 accepts local forwarding; 0.0.0.0 accepts all local IPv4 interfaces.
-# UDP sends no heartbeat; keep port ownership separate from QGC.
+# Receive-only UDP input: PX4 SITL API/Offboard normally targets port14540.
+# QGC keeps its separate GCS output on14550; no extra14551 output is required.
+# Existing saved port values are preserved; edits apply after restart.
+# WSL loopback14540 is reachable inside WSL, not automatically from Windows.
+# 127.0.0.1 accepts local input; 0.0.0.0 accepts all local IPv4 interfaces.
+# UDP sends no heartbeat. UART-to-QGC raw forwarding is not implemented.
 udp_bind=127.0.0.1
-udp_port=14551
+udp_port=14540
 udp_enabled=1
 
 # WebSocket uses ws:// or wss:// and carries binary MAVLink frames.

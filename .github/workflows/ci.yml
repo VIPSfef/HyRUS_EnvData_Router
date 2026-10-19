@@ -64,7 +64,7 @@ jobs:
       - name: Configure Linux x64
         if: runner.os == 'Linux'
         run: |
-          cmake --preset linux-x64-tests -DCMAKE_C_COMPILER=gcc \
+          cmake --preset linux-x64-tests -DCMAKE_C_COMPILER=gcc -DBUILD_TEST_SERVER=ON \
             -DCMAKE_C_FLAGS=-m64 -DCMAKE_EXE_LINKER_FLAGS=-m64 \
             -DCURL_NO_CURL_CMAKE=TRUE \
             -DCURL_INCLUDE_DIR=/usr/include/x86_64-linux-gnu \
@@ -72,7 +72,7 @@ jobs:
       - name: Configure Windows x64
         if: runner.os == 'Windows'
         run: |
-          cmake --preset windows-x64-tests -DCMAKE_C_COMPILER=clang-cl \
+          cmake --preset windows-x64-tests -DCMAKE_C_COMPILER=clang-cl -DBUILD_TEST_SERVER=ON \
             -DCMAKE_C_FLAGS=--target=x86_64-pc-windows-msvc
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}-tests
@@ -102,6 +102,7 @@ jobs:
           path: |
             build/${{ matrix.preset }}/mavlink_telemetry_data_router_headless${{ matrix.suffix }}
             build/${{ matrix.preset }}/mavlink_telemetry_data_router_interactive${{ matrix.suffix }}
+            build/${{ matrix.preset }}/tools/mavlink_telemetry_data_router_test_server${{ matrix.suffix }}
             build/packages/*.zip
             build/packages/*.tar.gz
           if-no-files-found: error

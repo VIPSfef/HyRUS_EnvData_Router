@@ -15,9 +15,10 @@ def normalize(path):
             for member in source:
                 parts = Path(member.name).parts
                 is_program = len(parts) >= 2 and parts[-2] == 'bin' and parts[-1] in executables
+                is_tool = len(parts) >= 2 and parts[-2] == 'tools' and parts[-1] == 'mavlink_telemetry_data_router_test_server'
                 member.uid = member.gid = 0
                 member.uname = member.gname = 'root'
-                member.mode = 0o755 if member.isdir() or is_program else 0o644
+                member.mode = 0o755 if member.isdir() or is_program or is_tool else 0o644
                 if is_program:
                     found.add(parts[-1])
                 target.addfile(member, source.extractfile(member) if member.isfile() else None)

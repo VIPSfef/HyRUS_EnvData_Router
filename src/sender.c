@@ -9,6 +9,7 @@
 #include "monitor.h"
 #include "router_input.h"
 #include <signal.h>
+#include <stdarg.h>
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -71,6 +72,14 @@ typedef struct {
     uint32_t last_seq;
 } metric_state;
 typedef struct {
+    uint64_t seq, generation, captured_ms;
+    char session[65], source[256];
+    mi_device heartbeat;
+    double lat, lon, altitude_msl_m;
+    uint64_t navigation_received_ms, navigation_boot_us;
+    int have_navigation;
+} test_record;
+typedef struct {
     mutex_t mutex;
     tb_batch current, queue[QUEUE_CAP];
     unsigned head, count;
@@ -86,13 +95,14 @@ typedef struct {
     tm_snapshot diag;
     uint64_t queued_at[QUEUE_CAP];
     const char *config_path;
-    int monitor_enabled, live;
+    int monitor_enabled, live, test_mode;
+    test_record test_queue[QUEUE_CAP];
+    uint64_t test_next_seq, test_last_heartbeat, test_last_enqueue_ms, test_epoch_start_ms;
     char active_session[65], queue_session[QUEUE_CAP][65];
     uint8_t source_system, source_component, queue_system[QUEUE_CAP], queue_component[QUEUE_CAP];
     uint32_t route_generation, queue_generation[QUEUE_CAP];
     uint64_t run_nonce, next_batch_id, queue_batch_id[QUEUE_CAP], last_seal_ms;
     double queue_origin[QUEUE_CAP][3];
-    uint64_t source_last_bytes, source_last_frames;
     tc_report queue_clock[QUEUE_CAP];
     int queue_have_clock[QUEUE_CAP];
     uint64_t raw_clock_boot,raw_clock_utc,queue_raw_boot[QUEUE_CAP],queue_raw_utc[QUEUE_CAP];
@@ -319,6 +329,17 @@ static void ingest(app *a, const tb_sample *input) {
 }
 static void mavlink_event(void *context,const mi_event *event) {
     app *a=context;
+    if(a->test_mode) {
+        if(event->kind==MI_RESET) {
+            lock(&a->mutex);
+            ++a->route_generation;
+            a->test_epoch_start_ms=now_ms();
+            (void)snprintf(a->active_session,sizeof(a->active_session),"%.28s.%016" PRIx64 ".%u",
+                           a->session,a->run_nonce,a->route_generation);
+            unlock(&a->mutex);
+        }
+        return; /* Test mode never uploads weather observations or statistics. */
+    }
     if(event->kind==MI_SAMPLE) {
         tb_sample sample=event->sample; unsigned k;
         (void)cfg_unit_for_key(&a->config,sample.key,sample.unit,sizeof(sample.unit));
@@ -354,15 +375,52 @@ static void mavlink_event(void *context,const mi_event *event) {
     }
     unlock(&a->mutex);
 }
+/* Called under app mutex. Sample only a new, identified heartbeat, at most
+ * once per configured send interval. A coordinate is the last real navigation
+ * sample with its own source boot time and age, not a reconstructed HB fix. */
+static void capture_test_record(app *a,const ri_report *r) {
+    unsigned i,slot;
+    uint64_t now=now_ms();
+    const mi_device *device=NULL;
+    test_record *record;
+    if(strcmp(r->status,"LOCKED")) return;
+    for(i=0;i<r->mav.devices;++i) {
+        const mi_device *candidate=&r->mav.device[i];
+        if(candidate->have_heartbeat && candidate->sysid==r->mav.selected_system &&
+           candidate->compid==r->mav.selected_component) { device=candidate; break; }
+    }
+    if(!device || device->last_heartbeat_ms<=a->test_epoch_start_ms ||
+       device->last_heartbeat_ms==a->test_last_heartbeat ||
+       now-device->last_heartbeat_ms>=a->config.link_timeout_ms ||
+       (a->test_last_enqueue_ms && now-a->test_last_enqueue_ms<a->config.send_interval_ms)) return;
+    a->test_last_heartbeat=device->last_heartbeat_ms;
+    a->test_last_enqueue_ms=now;
+    if(a->count==QUEUE_CAP) { ++a->loss.queue_windows; ++a->loss.queue_samples; return; }
+    slot=(a->head+a->count)%QUEUE_CAP;
+    record=&a->test_queue[slot]; memset(record,0,sizeof(*record));
+    record->seq=++a->test_next_seq; record->generation=a->route_generation;
+    record->captured_ms=now; record->heartbeat=*device;
+    (void)snprintf(record->session,sizeof(record->session),"%s",a->active_session);
+    (void)snprintf(record->source,sizeof(record->source),"%s",r->source);
+    record->have_navigation=r->mav.have_navigation && now>=r->mav.navigation_received_ms &&
+        now-r->mav.navigation_received_ms<a->config.link_timeout_ms;
+    record->lat=r->mav.lat; record->lon=r->mav.lon; record->altitude_msl_m=r->mav.altitude_msl_m;
+    record->navigation_received_ms=r->mav.navigation_received_ms;
+    record->navigation_boot_us=r->mav.navigation_boot_us;
+    a->queued_at[slot]=now; ++a->count; ++a->diag.accepted;
+    a->diag.last_receipt_ms=now;
+}
 static void input_status(void *context,const ri_report *report) {
     app *a=context; unsigned i;
     lock(&a->mutex);
     (void)snprintf(a->diag.active_source,sizeof(a->diag.active_source),"%s",report->source);
     (void)snprintf(a->diag.source_status,sizeof(a->diag.source_status),"%s",report->status);
     (void)snprintf(a->diag.source_error,sizeof(a->diag.source_error),"%s",report->error);
-    a->diag.input_bytes+=report->mav.bytes>=a->source_last_bytes ? report->mav.bytes-a->source_last_bytes : report->mav.bytes;
-    a->diag.input_lines+=report->mav.frames>=a->source_last_frames ? report->mav.frames-a->source_last_frames : report->mav.frames;
-    a->source_last_bytes=report->mav.bytes; a->source_last_frames=report->mav.frames;
+    /* Discovery can display either lane. Monotonic receiver totals count each
+     * read/frame once, without treating a change of the displayed lane as data. */
+    a->diag.input_bytes=report->total_bytes;
+    a->diag.input_lines=report->total_frames;
+    if(a->test_mode) capture_test_record(a,report);
     a->diag.parsed_frames=report->mav.frames; a->diag.bad_crc=report->mav.bad_crc;
     a->diag.unknown_message=report->mav.unknown_message;
     a->diag.no_navigation=report->mav.no_navigation;
@@ -441,7 +499,7 @@ static int http_open(http *h, const tb_config *config) {
         h->route[n + c.dwExtraInfoLength] = 0;
     }
     h->flags = c.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
-    h->session = WinHttpOpen(L"mavlink_telemetry_data_router/0.6.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    h->session = WinHttpOpen(L"mavlink_telemetry_data_router/0.6.1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                             WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!h->session) return 0;
     if (!WinHttpSetTimeouts(h->session, (int)config->connect_timeout_ms,
@@ -553,6 +611,46 @@ static int clock_json(const tc_report *report,char *out,size_t cap) {
         (unsigned)report->roundtrip_max_us);
 }
 
+static int test_append(size_t *used,const char *format,...) {
+    va_list args; int n;
+    va_start(args,format);
+    n=vsnprintf(wire+*used,sizeof(wire)-*used,format,args);
+    va_end(args);
+    if(n<0 || (size_t)n>=sizeof(wire)-*used) return 0;
+    *used+=(size_t)n; return 1;
+}
+static int test_quote(size_t *used,const char *value) {
+    const unsigned char *p=(const unsigned char *)value;
+    if(!test_append(used,"\"")) return 0;
+    for(;*p;++p) {
+        if(*p<32 || *p=='\"' || *p=='\\') {
+            if(!test_append(used,"\\u%04x",(unsigned)*p)) return 0;
+        } else if(!test_append(used,"%c",*p)) return 0;
+    }
+    return test_append(used,"\"");
+}
+static int encode_test(app *a,unsigned head,unsigned n) {
+    size_t used=0; unsigned i;
+    if(!test_append(&used,"{\"schema\":\"mavlink_router_test_v1\",\"stream\":") ||
+       !test_quote(&used,a->stream) || !test_append(&used,",\"records\":[")) return 0;
+    for(i=0;i<n;++i) {
+        const test_record *r=&a->test_queue[(head+i)%QUEUE_CAP];
+        const mi_device *d=&r->heartbeat;
+        if(!test_append(&used,"%s{\"seq\":%" PRIu64 ",\"source_generation\":%" PRIu64 ",\"session\":",i ? "," : "",r->seq,r->generation) ||
+           !test_quote(&used,r->session) || !test_append(&used,",\"source\":") || !test_quote(&used,r->source) ||
+           !test_append(&used,",\"heartbeat\":{\"sysid\":%u,\"compid\":%u,\"type\":%u,\"autopilot\":%u,"
+             "\"base_mode\":%u,\"custom_mode\":%u,\"system_status\":%u,\"received_monotonic_ms\":%" PRIu64 "},\"position\":",
+             (unsigned)d->sysid,(unsigned)d->compid,(unsigned)d->type,(unsigned)d->autopilot,
+             (unsigned)d->base_mode,(unsigned)d->custom_mode,(unsigned)d->system_status,d->last_heartbeat_ms)) return 0;
+        if(r->have_navigation) {
+            if(!test_append(&used,"{\"lat_deg\":%.17g,\"lon_deg\":%.17g,\"alt_msl_m\":%.17g,"
+                "\"boot_ms\":%" PRIu64 ",\"received_monotonic_ms\":%" PRIu64 "},\"coordinate_age_ms\":%" PRIu64 "}",
+                r->lat,r->lon,r->altitude_msl_m,r->navigation_boot_us/1000,r->navigation_received_ms,
+                r->captured_ms>=r->navigation_received_ms ? r->captured_ms-r->navigation_received_ms : 0)) return 0;
+        } else if(!test_append(&used,"null,\"coordinate_age_ms\":null}")) return 0;
+    }
+    return test_append(&used,"]}\n") ? (int)used : 0;
+}
 static int encode(app *a, unsigned head, unsigned n, losses l, const tc_report *report) {
     unsigned i;
     int k;
@@ -712,10 +810,10 @@ static void *sender(void *arg)
         tc_report report;
         if (now < next) { pause_ms((unsigned)(next - now > 100 ? 100 : next - now)); continue; }
         lock(&a->mutex);
-        if (a->current.n && (a->eof || (a->live && now>=a->last_seal_ms && now-a->last_seal_ms>=interval))) seal(a);
+        if (!a->test_mode && a->current.n && (a->eof || (a->live && now>=a->last_seal_ms && now-a->last_seal_ms>=interval))) seal(a);
         head = a->head;
         n = a->count < a->config.max_windows ? a->count : a->config.max_windows;
-        if(a->live) {
+        if(a->live && !a->test_mode) {
             unsigned same=1;
             while(same<n && !strcmp(a->queue_session[(head+same)%QUEUE_CAP],a->queue_session[head])) ++same;
             if(n) n=same;
@@ -728,7 +826,7 @@ static void *sender(void *arg)
         unlock(&a->mutex);
         if (!n && eof) break;
         encode_start = precise_ms();
-        bytes = n ? encode(a, head, n, loss, have_clock ? &report : NULL) : 0;
+        bytes = n ? (a->test_mode ? encode_test(a,head,n) : encode(a, head, n, loss, have_clock ? &report : NULL)) : 0;
         encode_ms = precise_ms() - encode_start;
         if (n && !bytes) {
             fprintf(stderr, "JSON capacity exceeded\n");
@@ -813,7 +911,7 @@ int main(int argc, char **argv) {
     app *a = &state;
     char line[1024], error[160];
     unsigned i;
-    int setup_failed = 0, monitor_started = 0, option_start;
+    int setup_failed = 0, monitor_started = 0, option_start, server_override = 0;
 #ifdef _WIN32
     char argument_storage[32768];
     char *argument_pointers[32];
@@ -834,7 +932,7 @@ int main(int argc, char **argv) {
                sizeof(tb_sample), sizeof(tb_batch), sizeof(state), sizeof(wire), ri_storage_bytes(), sizeof(default_config_path)+sizeof(stop_requested), sizeof(state) + sizeof(wire) + ri_storage_bytes()+sizeof(default_config_path)+sizeof(stop_requested));
         return 0;
     }
-    if(argc==1 || !strcmp(argv[1],"--interactive") || !strcmp(argv[1],"--headless")) {
+    if(argc==1 || !strcmp(argv[1],"--interactive") || !strcmp(argv[1],"--headless") || !strcmp(argv[1],"--test-heartbeat")) {
         if(config_exists(a->config_path)) {
             if(!cfg_load(a->config_path,&a->config,SEND_WINDOWS,error,sizeof(error))) {
                 fprintf(stderr,"Configuration: %s\n",error); return 1;
@@ -866,14 +964,27 @@ int main(int argc, char **argv) {
     } else {
         fprintf(stderr, "Usage: mavlink_telemetry_data_router_headless URL|- STREAM SESSION LAT LON ALT [--summary] [--interactive]\n"
                         "   or: mavlink_telemetry_data_router_interactive --config telemetry.ini [--headless]\n"
+                        "   test: --test-heartbeat [--server-url http://127.0.0.1:21000/ingest]\n"
                         "TUI: e edit, Enter validate, s save for restart; telemetry stays in memory.\n");
         return 1;
     }
     for (i = (unsigned)option_start; i < (unsigned)argc; ++i) {
-        if (!strcmp(argv[i], "--summary")) a->config.summary = 1;
+        if (!strcmp(argv[i],"--test-heartbeat")) a->test_mode=1;
+        else if(!strcmp(argv[i],"--server-url") && i+1<(unsigned)argc) {
+            if(!cfg_set(&a->config,"url",argv[++i],error,sizeof(error))) { fprintf(stderr,"Configuration: %s\n",error); return 1; }
+            server_override=1;
+        }
+        else if (!strcmp(argv[i], "--summary")) a->config.summary = 1;
         else if (!strcmp(argv[i], "--interactive") || !strcmp(argv[i], "--monitor")) a->monitor_enabled = 1;
         else if (!strcmp(argv[i], "--headless") || !strcmp(argv[i], "--no-monitor")) a->monitor_enabled = 0;
         else { fprintf(stderr, "Unknown option\n"); return 1; }
+    }
+    if(a->test_mode && !server_override)
+        (void)cfg_set(&a->config,"url","http://127.0.0.1:21000/ingest",error,sizeof(error));
+    if(a->test_mode && strcmp(a->config.input_mode,"mavlink")) { fprintf(stderr,"Heartbeat test requires MAVLink input\n"); return 1; }
+    if(a->test_mode) {
+        char safe_url[2048]; cfg_safe_url(a->config.url,safe_url,sizeof(safe_url));
+        fprintf(stderr,"TEST MODE: heartbeat and coordinates only; HTTP/TCP server %s\n",safe_url);
     }
     if (!cfg_validate(&a->config, SEND_WINDOWS, error, sizeof(error))) {
         fprintf(stderr, "Configuration: %s\n", error); return 1;
@@ -890,6 +1001,7 @@ int main(int argc, char **argv) {
     a->session = a->config.session; a->summary = a->config.summary;
     memcpy(a->origin, a->config.origin, sizeof(a->origin));
     a->diag.started_ms = now_ms(); a->diag.dry_run = !strcmp(a->url, "-");
+    a->diag.test_mode=a->test_mode;
 #ifdef _WIN32
     InitializeCriticalSection(&a->mutex);
     thread = CreateThread(NULL, 0, sender, a, 0, NULL);

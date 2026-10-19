@@ -88,6 +88,7 @@ static void restore_console(const terminal *t)
 {
     DWORD written;
     if(t->input_mode) (void)SetConsoleMode(t->input,t->old_input);
+    if(t->ansi) (void)WriteFile(t->output,"\033[0m",4,&written,NULL);
     if(t->cursor_saved) (void)SetConsoleCursorInfo(t->output,&t->cursor);
     else if(t->ansi) (void)WriteFile(t->output,"\033[?25h",6,&written,NULL);
     if(t->output_mode) (void)SetConsoleMode(t->output,t->old_output);
@@ -125,7 +126,7 @@ static void restore_signal(int signal_number)
     if(restore_terminal.saved_mode)
         (void)tcsetattr(restore_terminal.fd,TCSANOW,&restore_terminal.saved);
     if(restore_terminal.ansi)
-        (void)write(STDERR_FILENO,"\033[?25h",6);
+        (void)write(STDERR_FILENO,"\033[0m\033[?25h",10);
     if(signal_number==SIGINT) (void)sigaction(SIGINT,&restore_int,NULL);
     else (void)sigaction(SIGTERM,&restore_term,NULL);
     (void)raise(signal_number);
@@ -173,7 +174,7 @@ unavailable:
     restore_uninstall(t);
     t->cleanup_mask=0;
     if(t->saved_mode) (void)tcsetattr(t->fd,TCSANOW,&t->saved);
-    if(t->ansi) (void)write(STDERR_FILENO,"\033[?25h",6);
+    if(t->ansi) (void)write(STDERR_FILENO,"\033[0m\033[?25h",10);
     t->ansi=0; t->input_ready=0;
 }
 #endif
@@ -377,7 +378,7 @@ static const char *device_autopilot(unsigned autopilot)
     }
 }
 static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
-                            const rates *r,unsigned first,unsigned max_keys,unsigned columns,int show_devices)
+                            const rates *r,unsigned first,unsigned max_keys,unsigned columns,int show_devices,int ansi)
 {
     writer w={out,columns,0,0};
     char endpoint[2048], source_name[256];
@@ -399,8 +400,8 @@ static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
     if(strstr(s->active_source,"://") && strncmp(s->active_source,"udp://",6)) cfg_safe_url(s->active_source,source_name,sizeof(source_name));
     else (void)snprintf(source_name,sizeof(source_name),"%.*s",255,s->active_source);
     write_text(&w,"[monitor] state=%s mode=%s uptime=%.1fs boundary=%s\n",
-            status(s),s->dry_run ? "DRY" : "HTTP",(double)elapsed(s->now_ms,s->started_ms)/1000,
-            mav ? "MAVLink" : "normalized-CSV");
+            status(s),s->test_mode ? "TEST-HTTP" : s->dry_run ? "DRY" : "HTTP",(double)elapsed(s->now_ms,s->started_ms)/1000,
+            mav ? (s->test_mode ? "MAVLink-test-HB+position" : "MAVLink") : "normalized-CSV");
     write_text(&w,"ACTIVE endpoint=%s\n",endpoint);
     if(mav && c->origin_auto)
         write_text(&w,"ACTIVE stream=%.64s session=%.64s origin=auto(GLOBAL_POSITION_INT/MSL)\n",c->stream,c->session);
@@ -411,8 +412,15 @@ static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
     if(mav) {
         write_text(&w,"ACTIVE UDP enabled=%u bind=%.63s:%u (receive-only)\n",
                 c->udp_enabled,c->udp_bind,c->udp_port);
-        write_text(&w,"source status=%.31s active=%s\n",
-                s->source_status[0] ? s->source_status : "WAITING",source_name[0] ? source_name : "none");
+        /* Colour is terminal-only and does not consume the bounded text width.
+         * LOCKED is published only after valid MAVLink and device identity;
+         * merely opening a port or seeing unidentified traffic stays yellow. */
+        write_text(&w,"source status=");
+        if(ansi) fputs(s->failed ? "\033[31m" :
+                !s->stop && !s->eof && !strcmp(s->source_status,"LOCKED") ? "\033[32m" : "\033[33m",out);
+        write_text(&w,"%.31s",s->source_status[0] ? s->source_status : "WAITING");
+        if(ansi) fputs("\033[0m",out);
+        write_text(&w," active=%s\n",source_name[0] ? source_name : "none");
         if(s->source_error[0]) write_text(&w,"source error=%.159s\n",s->source_error);
     }
     if(compact) write_text(&w,"input bytes=%" PRIu64 " accepted=%" PRIu64 " rejected=%" PRIu64 " rate=%.1f/s\n",
@@ -524,7 +532,7 @@ void tm_render(FILE *out,const tm_snapshot *s,const tb_config *c)
     rates r;
     if(!out || !s || !c) return;
     compute_rates(&r,s,s,0);
-    render_snapshot(out,s,c,&r,0,TB_MAX_KEYS,0,0);
+    render_snapshot(out,s,c,&r,0,TB_MAX_KEYS,0,0,0);
     (void)fflush(out);
 }
 static void field_value(const tb_config *c,unsigned field,char *buf,size_t cap,int reveal_url)
@@ -648,7 +656,7 @@ static void draw(terminal *t,const tm_snapshot *s,const tb_config *c,const rates
     if(e->open) render_editor(stderr,e,rows,columns);
     else {
         render_snapshot(stderr,s,c,r,(unsigned)(e->show_devices ? e->device_scroll : e->scroll),
-                        t->ansi ? visible : TB_MAX_KEYS,columns,e->show_devices);
+                        t->ansi ? visible : TB_MAX_KEYS,columns,e->show_devices,t->ansi);
         if(t->ansi) {
             writer w={stderr,columns,0,0};
             write_text(&w,"%s\n",t->input_ready ? "e: settings | d: devices | k: values | Up/Down scroll | q does not stop" :
@@ -718,6 +726,6 @@ void tm_run(void *context,void (*snapshot)(void *,tm_snapshot *),const tb_config
         }
         wait_tick();
     }
-    if(term.ansi) { fputs("\033[?25h\n",stderr); (void)fflush(stderr); }
+    if(term.ansi) { fputs("\033[0m\033[?25h\n",stderr); (void)fflush(stderr); }
     terminal_close(&term);
 }

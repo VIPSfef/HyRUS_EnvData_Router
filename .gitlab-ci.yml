@@ -13,7 +13,7 @@ linux-x64:
     - DEBIAN_FRONTEND=noninteractive apt-get install -y cmake ninja-build gcc libcurl4-openssl-dev:amd64 python3
   script:
     - |
-      cmake --preset linux-x64-tests -DCMAKE_C_COMPILER=gcc \
+      cmake --preset linux-x64-tests -DCMAKE_C_COMPILER=gcc -DBUILD_TEST_SERVER=ON \
         -DCMAKE_C_FLAGS=-m64 -DCMAKE_EXE_LINKER_FLAGS=-m64 \
         -DCURL_NO_CURL_CMAKE=TRUE \
         -DCURL_INCLUDE_DIR=/usr/include/x86_64-linux-gnu \
@@ -34,6 +34,7 @@ linux-x64:
     paths:
       - build/linux-x64/mavlink_telemetry_data_router_headless
       - build/linux-x64/mavlink_telemetry_data_router_interactive
+      - build/linux-x64/tools/mavlink_telemetry_data_router_test_server
       - build/packages/*.tar.gz
     expire_in: 14 days
 
@@ -43,7 +44,7 @@ windows-x64:
   rules:
     - if: '$RUN_WINDOWS_BUILD == "1"'
   script:
-    - cmake --preset windows-x64-tests -DCMAKE_C_COMPILER=clang-cl -DCMAKE_C_FLAGS=--target=x86_64-pc-windows-msvc
+    - cmake --preset windows-x64-tests -DCMAKE_C_COMPILER=clang-cl -DCMAKE_C_FLAGS=--target=x86_64-pc-windows-msvc -DBUILD_TEST_SERVER=ON
     - cmake --build --preset windows-x64-tests
     - python src/tests/test_arch.py build/windows-x64/mavlink_telemetry_data_router_headless.exe --arch x64
     - python src/tests/test_arch.py build/windows-x64/mavlink_telemetry_data_router_interactive.exe --arch x64
@@ -60,5 +61,6 @@ windows-x64:
     paths:
       - build/windows-x64/mavlink_telemetry_data_router_headless.exe
       - build/windows-x64/mavlink_telemetry_data_router_interactive.exe
+      - build/windows-x64/tools/mavlink_telemetry_data_router_test_server.exe
       - build/packages/*.zip
     expire_in: 14 days

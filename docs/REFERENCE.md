@@ -1,20 +1,22 @@
-# 기술 참조 — mavlink_telemetry_data_router 0.6.0
+# 기술 참조 — mavlink_telemetry_data_router 0.6.1
 
 처음 실행할 때는 [README](../README.md)를 읽는다. 이 문서의 명령은 저장소 루트 기준이다. 기본 입력은 바이너리 MAVLink이고, CSV는 명시적인 개발용 재생 모드다.
 
 ## 자동 입력과 채널 선택
 
-기본 `input_mode=mavlink`에서는 stdin을 읽지 않는다. 우선 포트가 있으면 그 포트, 지정 WebSocket, 활성화된 UDP, 자동 검색한 다른 직렬 포트를 순서대로 확인한다. `serial_port=auto`이면 WebSocket, UDP, 검색 포트 순서로 활성화된 후보를 확인한다. 한 번에 한 입력 채널을 유지한다.
+기본 `input_mode=mavlink`에서는 stdin을 읽지 않는다. 고정된 두 탐색 경로를 사용한다. 한쪽은 활성 UDP를 수신하고, 다른 쪽은 우선 직렬 포트·지정 WebSocket·자동 검색한 다른 COM/tty를 순서대로 확인한다. 먼저 CRC가 맞는 프레임을 확인한 경로를 선택하고 나머지는 닫는다. 수신 시각이 같은 두 입력의 물리적 도착 순서를 보장하지 않으며, 같은 반복에서 준비된 경우 UDP를 먼저 확인한다. 한 번 선택하면 해당 소스 하나만 처리하고 중복 수집하지 않는다.
 
-UDP는 기본127.0.0.1:14551의 독점 IPv4 수신 소켓이다. Windows에서는 bind 전에 SO_EXCLUSIVEADDRUSE를 설정하고 Linux에서도 SO_REUSEADDR/PORT를 켜지 않는다. 기존 QGC가 사용하는 동일 주소/포트에는 bind 실패를 표시한다. 0길이 데이터그램은 무시하고 첫 비어 있지 않은 송신 IP/포트를 선택하며, 연결 동안 다른 peer는 버린다. 최대65,507B 데이터그램 전체를 고정 버퍼에 받아 작은 읽기로 나눠 전달하므로4096B 입력 버퍼 때문에 뒷부분을 자르지 않는다. UDP에는 발신이 없으며 it_write도0을 반환한다.
+각 경로는 MAVLink 파서·boot 시계·항법 이력을 독립적으로 가진다. 선택 전 자료를 다른 경로와 합치지 않고, 선택 이벤트 앞에 소스 세션 reset을 보낸다. 기존 링크가 끊기면 이전 보류 관측을 먼저 마감한 뒤 탐색 상태를 초기화하므로 새 입력의 위치·시각으로 이전 관측을 다시 해석하지 않는다.
 
-UDP read는100ms 이내의 설정 대기와 호출당최대256회 receive 시도를 사용한다. OS 스케줄링을 포함한 하드 상한은 아니다. UDP 손실/역전/커널 큐 포화는 생길 수 있고 이후 HTTP 확인은 수집기 이전 손실을 복구하지 않는다. IPv4 유니캐스트 및 수신 인터페이스에 도달하는 브로드캐스트를 다루지만 멀티캐스트 그룹 가입·IPv6·동시 다중 peer는 제공하지 않는다.
+UDP는 기본 `127.0.0.1:14540`의 독점 IPv4 수신 소켓이다. Windows에서는 bind 전에 SO_EXCLUSIVEADDRUSE를 설정하고 Linux에서도 SO_REUSEADDR/PORT를 켜지 않는다. 기존 QGC 등이 사용하는 동일 주소/포트에는 bind 실패를 표시한다. 0길이 데이터그램은 무시하고 첫 비어 있지 않은 송신 IP/포트를 임시 선택한다. `probe_ms` 안에 유효 MAVLink가 없으면 소켓은 계속 연 채 임시 peer·부분 데이터그램·파서를 초기화해 다른 송신자를 받을 수 있게 한다. CRC가 맞는 프레임으로 입력이 선택된 뒤에는 연결 동안 같은 peer만 받는다. 단순 UDP 패킷만으로 초록색 연결을 표시하지 않는다. 최대65,507B 데이터그램 전체를 고정 버퍼에 받아 작은 읽기로 나눠 전달하므로4096B 입력 버퍼 때문에 뒷부분을 자르지 않는다. UDP에는 발신이 없으며 it_write도0을 반환한다.
+
+자동 탐색의 read 대기는 경로당 최대20ms, UDP receive 시도는 호출당최대256회다. 파싱·포트 열기·OS 스케줄링을 포함한 하드 상한은 아니다. 특히 선택한 WebSocket의 연결은 아직 동기식이므로 `connect_timeout_ms` 동안 UDP 처리도 지연될 수 있다. 기본값처럼 WebSocket을 지정하지 않으면 이 연결 대기는 없다. UDP 손실/역전/커널 큐 포화는 생길 수 있고 이후 HTTP 확인은 수집기 이전 손실을 복구하지 않는다. IPv4 유니캐스트 및 수신 인터페이스에 도달하는 브로드캐스트를 다루지만 멀티캐스트 그룹 가입·IPv6·동시 다중 peer는 제공하지 않는다.
 
 Windows는 QueryDosDevice로 COM 후보를 찾고, Linux는 `/dev/serial/by-id/*`, `/dev/ttyACM*`, `/dev/ttyUSB*`를 탐색해 장치 중복을 제거한다. 검색 시 포트를 열지 않으며 실제 확인 순서에 도달한 포트만 연다. 통신 속도는 지정한 `serial_baud`를 사용한다.
 
 WebSocket은 클라이언트로 접속하며 바이너리 데이터만 MAVLink 바이트 스트림으로 처리한다. ws/wss, 분할 프레임, ping/pong, 부분 TCP 읽기와 TLS 인증서 검증을 지원한다. 텍스트/JSON WebSocket은 별도 변환 없이는 입력하지 않는다.
 
-MAVLink CRC가 맞는 프레임을 받으면 해당 채널을 유지한다. `probe_ms` 안에 없으면 다음 후보로, 연결 후 `link_timeout_ms` 동안 유효 프레임이 없으면 다시 탐색한다. 등록한 채널 밖의 임의 네트워크 주소를 검색하지 않는다.
+MAVLink CRC가 맞는 프레임을 받으면 해당 채널을 유지한다. 직렬/WebSocket 후보에서 `probe_ms` 안에 없으면 다음 후보로, 선택한 입력에서 `link_timeout_ms` 동안 유효 프레임이 없으면 다시 양쪽을 탐색한다. 등록한 채널 밖의 임의 네트워크 주소를 검색하지 않는다.
 
 기기는 HEARTBEAT의 system/component ID, MAV_TYPE, MAV_AUTOPILOT로 식별한다. component ID 숫자만으로 종류를 추측하지 않는다. 종류를 모르는 기기는 미상으로 표시한다. `target_system=0`, `target_component=0`은 첫 비행제어기를 선택한다. 다른 기기들은 목록에 남지만 시계가 다른 관측을 자동 합치지는 않는다.
 
@@ -36,7 +38,7 @@ UDP를 제외한 설정 포트와 WebSocket에는 연결 후, 자동 검색 포�
 | serial_baud | 115200. 지원: 9600/19200/38400/57600/115200/230400/460800/921600 |
 | udp_enabled | 1, UDP 입력 사용0/1 |
 | udp_bind | 127.0.0.1, 로컬 IPv4 literal. 0.0.0.0은 모든 IPv4 인터페이스 |
-| udp_port | 14551, 1–65535. QGC14550과 분리 |
+| udp_port | 14540, 1–65535. PX4 SITL API/Offboard 기본 목적지; QGC14550과 분리 |
 | websocket_url | 빈 값 또는 ws/wss 주소, 최대2047자 |
 | auto_scan | 1, 자동 직렬 포트 검색 |
 | probe_ms | 2000, 100–60000 |
@@ -92,7 +94,52 @@ seq는 키별 중계 관측 순번이며 MAVLink 공용8bit헤더 순번이 아�
 
 큐는 미확인8묶음, 요청당최대4묶음, 원본최대512행/묶음이다. 원본초과분도 통계에는 포함하고 누락 수를 기록한다. 큐가 가득 차면 새 묶음을 버리고 전송 중 자료를 덮어쓰지 않는다. --summary는 원본을 생략해 위치별 원본 복원에 불충분하다.
 
-수신·관측처리, HTTP 인코딩/송신, TUI는 분리되어 있다. Windows WebSocket은 고정 수신 버퍼 작업자를 추가로 쓴다. 포트 검색은 프레임마다 수행하지 않는다. 파서 O(bytes×log(known messages)), device최대32·pending512·nav32로 모든 큐를 제한한다. pending 정렬·보간은 고정 상한이 있으나 하드 WCET를 주장하지 않는다. `--sizes`는 관리하는 고정 수집/송신/입력/경로 저장공간 합이며 스택·OS·TLS·libcurl 내부 메모리는 제외한다.
+수신·관측처리, HTTP 인코딩/송신, TUI는 분리되어 있다. Windows WebSocket은 고정 수신 버퍼 작업자를 추가로 쓴다. 포트 검색은 프레임마다 수행하지 않는다. 탐색 경로는2개로 고정하며 각 파서와 transport 저장공간을 시작 전에 확보한다. 새 관측마다 할당하거나 스레드/작업 풀을 만들지 않는다. 탐색 중 입력 확인 비용은 경로 수2에 비례하고 선택 뒤에는 한 경로만 읽는다. 파서 O(bytes×log(known messages)), device최대32·pending512·nav32로 모든 큐를 제한한다. pending 정렬·보간은 고정 상한이 있으나 하드 WCET를 주장하지 않는다. `--sizes`는 관리하는 고정 수집/송신/입력/경로 저장공간 합이며 스택·OS·TLS·libcurl 내부 메모리는 제외한다.
+
+## 하트비트·좌표 시험 모드와 TCP 서버
+
+운용 실행 파일에 `--test-heartbeat`를 지정하면 `schema:3` 관측 전송 대신 진단용 `mavlink_router_test_v1` JSON을 HTTP POST로 보낸다. 기본 주소는 `http://127.0.0.1:21000/ingest`이며 `--server-url URL`이 있으면 그 주소를 사용한다. 기존 설정의 입력 포트·시간 제한·전송 주기는 읽되, 시험용 CLI 주소를 설정 파일에 자동 저장하지 않는다. 정상 수집으로 돌아가려면 `--test-heartbeat` 없이 실행한다.
+
+```json
+{
+  "schema": "mavlink_router_test_v1",
+  "stream": "env1",
+  "records": [{
+    "seq": 1,
+    "source_generation": 1,
+    "session": "auto.run_id.1",
+    "source": "udp://127.0.0.1:14540",
+    "heartbeat": {
+      "sysid": 1, "compid": 1, "type": 2, "autopilot": 12,
+      "base_mode": 128, "custom_mode": 0, "system_status": 4,
+      "received_monotonic_ms": 12345
+    },
+    "position": {
+      "lat_deg": 37, "lon_deg": 127, "alt_msl_m": 100,
+      "boot_ms": 5000, "received_monotonic_ms": 12300
+    },
+    "coordinate_age_ms": 45
+  }]
+}
+```
+
+`seq`는 실행 내 전역 증가 정수다. 재연결·기체 재부팅은 `source_generation`과 `session`으로 구분한다. `heartbeat.received_monotonic_ms`와 위치의 같은 이름 필드는 **수집기 호스트의 단조 시계**이며 GPS UTC가 아니다. `position.boot_ms`는 해당 GLOBAL_POSITION_INT의 원천 부팅 경과시각이다. 위·경도는 deg, 고도는 MSL m다. GPS_RAW_INT의 다른 좌표로 GLOBAL_POSITION_INT 위치를 바꾸면서 이전 boot/수신시각을 붙이지 않는다.
+
+좌표는 해당 입력·부팅 구간의 최신 실제 항법이다. `coordinate_age_ms`는 이 레코드의 수집 시각과 항법 수신시각의 차이다. 하트비트의 측정 위치라고 보간하거나 센서 동시 측정이라고 주장하지 않는다. 항법이 없거나 그 수신 후 `link_timeout_ms` 이상 지났다면 `position`과 `coordinate_age_ms`는 모두 null이다. 소스 시계가 초기화된 뒤에는 새 하트비트를 받아야 새 구간의 시험 레코드를 만든다.
+
+선택한 기기가 식별되고 새 하트비트가 있을 때만, `send_interval_ms`당 최대 한 레코드를 넣는다. 이미 보낸 하트비트를 새 레코드로 반복하지 않는다. 원본 관측·커스텀 키·통계는 시험 JSON에 넣지 않는다. RAM 큐 8개·요청당 최대 4개를 사용하고 HTTP 204 전에는 레코드와 순번·좌표 나이를 보존해 재시도한다. 서버는 `(session,seq)`로 재전송을 구분할 수 있다.
+
+선택 빌드 `BUILD_TEST_SERVER=ON`은 `tools/mavlink_telemetry_data_router_test_server[.exe]`를 만든다. 배포물에서도 루트 `tools/`에 두며 운용 두 프로그램의 `bin/`과 구분한다. 기본 bind는 `127.0.0.1:21000`이다.
+
+| 서버 옵션 | 의미 |
+|---|---|
+| `--bind IPv4` | 기본 127.0.0.1. 원격 수신에는 해당 인터페이스 또는 0.0.0.0 |
+| `--port N` | 기본 TCP 21000, 1–65535 |
+| `--plain` | TUI 대신 완전한 레코드 JSON 한 줄씩 stdout에 표시 |
+| `--duration-ms N` | 기본 0 무기한, 양수는 실행 제한 |
+| `--max-requests N` | 기본 0 무제한, 양수는 TCP 연결 처리 횟수 제한 |
+
+서버는 POST `/ingest`와 Content-Length를 처리한다. 헤더 최대 8KiB·본문 최대 128KiB·레코드 최대 64개·연결별 최대 5초로 제한하며 JSON 스키마와 필수 하트비트/좌표 필드를 검사한다. 잘못된 JSON·중복 Content-Length·Transfer-Encoding·범위 밖 크기는 204로 수락하지 않는다. 정상 레코드가 화면 또는 stdout에 출력된 뒤 204를 보낸다. 메모리 링 로그만 유지하고 관측 파일이나 영속 큐는 만들지 않으므로 **이 시험 서버의 204는 영속 저장 확인이 아니다.**
 
 ## 빌드와 개발 검사
 
@@ -137,7 +184,11 @@ python src/tests/test_monitor.py
 python src/tests/test_sender_limits.py
 python src/tests/test_mavlink_router.py
 python src/tests/test_udp_router.py
+python src/tests/test_auto_input.py
+python src/tests/test_test_stream.py build/windows-x64/mavlink_telemetry_data_router_headless.exe build/windows-x64/tools/mavlink_telemetry_data_router_test_server.exe
 ```
+
+`test_auto_input.py`는 UDP와 다른 입력의 우선 선택·끊김 후 전환·소스 분리를 실제 실행 파일로 확인한다. POSIX에서는 가상 tty도 사용한다. `python3 src/tests/test_monitor_connection.py build/linux-x64/mavlink_telemetry_data_router_interactive`는 Linux 가상 터미널에서 노란색 탐색→초록색 식별 연결→시간 초과 후 노란색 전환과 종료 복원을 검사한다. 이 두 검사는 독립된 운용 프로그램을 추가하지 않는다. `test_test_stream.py`는 시험 모드의 하트비트/좌표/재부팅 경계·204 재시도와 선택 TCP 시험 서버의 실제 요청 파서를 검사한다. 두 번째 서버 실행 파일 인자는 선택 사항이며, 생략하면 수집기 시험 모드만 검사한다.
 
 GitHub/GitLab CI도 native검사 프리셋과 같은 경로를 사용한다. CI파일 작성과 원격 실행은 다르며 원격 CI는 여기서 실행하지 않았다. Git배포는 실제 저장소 화면에서 복사한 clone URL로 origin을 설정하고 push한다. 호스트 이름만으로 URL을 추측하지 않는다.
 
@@ -159,9 +210,15 @@ t_us,seq,quality,key,unit,value,east_m,north_m,up_m,ve_mps,vn_mps,vu_mps,time_un
 
 ## QGC와 병행하는 UDP 경로
 
-QGC와 수집기가 같은 PC의 같은 유니캐스트 주소/포트를 공유하면 양쪽 전체 복사 수신을 보장할 수 없다. 수집기 포트만 바꾸면 송신 목적지가 자동 변경되지 않는다. QGC forwarding→별도14551 또는 송신원/분배기에서 별도 출력 경로를 설정한다. QGC forwarding은 단방향이고 QGC가 처리한 메시지만 전달하므로 임의 dialect의 원시 byte mirror로 가정하지 않는다.
+PX4 SITL 기본값은 GCS용 local18570→remote14550, API/Offboard용 local14580→remote14540이다(단일 기체 instance0). 수집기는14540, QGC는14550을 받으면 된다. SITL에 별도14551 출력이나 수집기→QGC 재전송이 필요하지 않다. 두 스트림은 모드별 메시지 구성이 다르며 커스텀 센서 메시지가 양쪽에 자동 복제된다고 가정하지 않는다. 다중 기체의 API/Offboard 목적지는14540부터14549까지 달라지므로 해당 입력 포트를 지정한다. [PX4 기본 포트](https://docs.px4.io/main/en/simulation/#default-px4-mavlink-udp-ports), [PX4 시작 설정](https://github.com/PX4/PX4-Autopilot/blob/main/ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink)
 
-현재 실측했던 경로는 WSL PX4172.30.183.133:18570→Windows172.30.176.1:14550의 유니캐스트였다. 이 IP는 해당 실행 환경의 일시 값이며 프로그램에 고정하지 않는다. 검증 시에만 AF_PACKET로 원본에 손대지 않고 메모리 복사해 별도 UDP 포트로 넣었다. 이 임시 검증 경로가 실행 파일의 자동 패킷 캡처 기능을 뜻하지 않는다. 원래 링크/포트/QGC 설정은 변경하지 않았고 관측 파일도 만들지 않았다.
+현재 확인한 WSL PX4의 API 경로는 WSL127.0.0.1:14580→WSL127.0.0.1:14540이다. Linux 수집기를 같은 WSL에서 실행하면 직접 받는다. Windows loopback의14540을 여는 것만으로 WSL loopback을 받을 수 없으며, 자동 WSL 어댑터는 구현하지 않았다. 기존 설정 파일에14551이 있으면 계속 그 값을 사용하므로 TUI에서 수정·저장 후 재시작해야 한다.
+
+실제 USB 텔레메트리를 수집기가 단독으로 여는 야외 경로에서는 QGC에도 원시 MAVLink를 전달해야 하지만, 현재 버전은 이 UART→QGC forwarding을 제공하지 않는다. 현재 출력은 관측의 HTTP/HTTPS 전송이다.
+
+다른 환경에서 QGC와 수집기가 같은 PC의 같은 유니캐스트 주소/포트를 공유하면 양쪽 전체 복사 수신을 보장할 수 없다. 수집기 포트만 바꾸면 송신 목적지가 자동 변경되지 않는다. 필요한 경우 QGC forwarding→별도 포트 또는 송신원/분배기의 별도 출력을 사용한다. QGC forwarding은 단방향이고 QGC가 처리한 메시지만 전달하므로 임의 dialect의 원시 byte mirror로 가정하지 않는다.
+
+0.6.0 검증의 QGC 경로는 WSL PX4172.30.183.133:18570→Windows172.30.176.1:14550의 유니캐스트였다. 이 IP는 해당 실행 환경의 일시 값이며 프로그램에 고정하지 않는다. 당시 검증 시에만 AF_PACKET로 원본에 손대지 않고 메모리 복사해 별도14551로 넣었다. 이 임시 경로가 실행 파일의 자동 캡처 기능을 뜻하지 않는다. 원래 링크/포트/QGC 설정은 변경하지 않았고 관측 파일도 만들지 않았다.
 
 [QGC Telemetry/forwarding](https://docs.qgroundcontrol.com/master/en/qgc-user-guide/settings_view/telemetry.html), [MAVLink Router](https://github.com/mavlink-router/mavlink-router), [Windows 포트 공유](https://learn.microsoft.com/en-us/windows/win32/winsock/using-so-reuseaddr-and-so-exclusiveaddruse), [Linux SO_REUSEPORT](https://man7.org/linux/man-pages/man7/socket.7.html)를 참고한다.
 

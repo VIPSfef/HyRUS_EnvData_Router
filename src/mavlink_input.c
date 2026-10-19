@@ -111,6 +111,8 @@ static void reset_clock(mi_input *m)
     m->last_boot_ms = m->next_seq = m->emitted_seq = 0; m->have_boot = m->have_emitted = 0;
     m->gps_error_m = NAN; m->gps_accuracy_ms = 0;
     m->report.gps_fix = 0;
+    m->report.have_navigation = 0;
+    m->report.navigation_received_ms = m->report.navigation_boot_us = 0;
     m->report.watermark_us = m->report.boot_us = 0;
     ++m->epoch; ++m->report.reboots;
     event(m, MI_RESET, 0);
@@ -351,7 +353,12 @@ static void global_navigation(mi_input *m, const uint8_t *p, uint64_t now)
         double projection_error = distance * distance / 6000000.0;
         nav.pos_error_m = (float)((double)m->gps_error_m + projection_error);
     }
-    m->report.lat = lat; m->report.lon = lon; m->report.altitude_msl_m = altitude;
+    if(!m->report.have_navigation || nav.t_us>=m->report.navigation_boot_us) {
+        m->report.lat = lat; m->report.lon = lon; m->report.altitude_msl_m = altitude;
+        m->report.have_navigation = 1;
+        m->report.navigation_received_ms = now;
+        m->report.navigation_boot_us = nav.t_us;
+    }
     add_nav(m, &nav);
 }
 static void packet(mi_input *m, uint32_t id, const uint8_t *p, uint8_t sysid,
@@ -404,9 +411,8 @@ static void packet(mi_input *m, uint32_t id, const uint8_t *p, uint8_t sysid,
     } else if (id == 24) {
         uint32_t hacc = u32(p + 34), vacc = u32(p + 38);
         m->report.gps_fix = p[28];
-        m->report.lat = (double)i32(p + 8) * 1e-7;
-        m->report.lon = (double)i32(p + 12) * 1e-7;
-        m->report.altitude_msl_m = (double)i32(p + 16) * .001;
+        /* Report coordinates and their boot/receipt times belong to the same
+         * GLOBAL_POSITION_INT sample. Raw GPS here supplies fix/accuracy only. */
         if (p[28] >= 3 && hacc && vacc && hacc != UINT32_MAX && vacc != UINT32_MAX) {
             m->gps_error_m = (float)(hypot((double)hacc, (double)vacc) * .001);
             m->gps_accuracy_ms = now;

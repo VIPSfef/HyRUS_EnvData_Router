@@ -47,7 +47,7 @@ serial_port=auto
 serial_baud=115200
 udp_enabled=1
 udp_bind=127.0.0.1
-udp_port=14551
+udp_port=14540
 websocket_url=
 auto_scan=1
 url=https://YOUR_SERVER/ingest
@@ -63,9 +63,9 @@ unit_map=temp:C;humidity:%;pm25:ug/m3
 | `serial_port` | Windows `COM5`, Linux `/dev/ttyACM0`처럼 우선 확인할 포트. `auto`는 자동 탐색, `none`은 우선 포트 없음 |
 | `serial_baud` | 장치와 일치하는 통신 속도. 기본 115200 |
 | `udp_enabled` | `1`이면 UDP 입력 사용, `0`이면 제외 |
-| `udp_bind`, `udp_port` | 수신할 **로컬** IPv4 주소와 포트. 기본 `127.0.0.1:14551` |
+| `udp_bind`, `udp_port` | 수신할 **로컬** IPv4 주소와 포트. 기본 `127.0.0.1:14540` |
 | `websocket_url` | 선택 사항. `ws://HOST/path` 또는 `wss://HOST/path`의 **바이너리 MAVLink** 스트림 |
-| `auto_scan` | `1`이면 다른 COM/tty도 검색. `0`이면 지정한 포트·WebSocket만 사용 |
+| `auto_scan` | `1`이면 다른 COM/tty도 검색. `0`이면 다른 COM/tty 자동 검색 제외. 지정 포트·WebSocket·활성 UDP는 유지 |
 | `url` | 관측을 전송할 HTTP/HTTPS 서버 주소 |
 | `stream`, `session` | 장치 흐름과 관측 실행을 구분하는 이름. 실제 송신 세션에는 실행·소스 변경 식별자가 붙음 |
 | `origin_auto` | 기본 `1`: 첫 유효 전역 항법 위치를 지역 좌표 원점으로 사용. `0`: 지정한 원점 사용 |
@@ -75,23 +75,67 @@ unit_map=temp:C;humidity:%;pm25:ug/m3
 
 interactive에서 `e`로 설정을 열고 항목 편집 후 Enter로 확인, `s`로 저장합니다. **저장은 재시작 후 적용**됩니다. 미확인 관측이 남았다면 먼저 전송을 마친 뒤 재시작하세요.
 
-## QGC와 UDP를 함께 사용하기
+## 서버 전송 연결만 먼저 시험하기 — TCP 21000
 
-기본 수집 포트는 **14551**로 QGC 기본 포트14550과 분리했습니다. 같은 포트가 사용 중이면 명시적으로 연결 실패를 표시하며, 포트 재사용으로 기존 프로그램의 데이터를 가져오지 않습니다. UDP는 **수신 전용**이며 하트비트·명령·전송 주기 변경 요청을 보내지 않습니다.
+별도 시험 서버를 실행하면 하트비트·좌표가 서버까지 도착하는지 화면에서 볼 수 있습니다. **입력은 기존 COM/tty·UDP 14540이고, 서버 전송은 HTTP/TCP 21000**입니다.
 
-QGC만 기체의 유니캐스트를 받고 있다면, 수집기가 다른 포트를 여는 것만으로 그 패킷을 받을 수는 없습니다. 다음 중 하나로 수집기에도 보내야 합니다.
+Windows 첫 번째 터미널에서 서버를 실행합니다.
 
-- QGC의 **Enable MAVLink forwarding**에서 수집기 주소 `127.0.0.1:14551`로 전달합니다. 버전에 따라 Telemetry/MAVLink 설정에 있습니다. 이 방법은 단방향이며 QGC가 종료되면 수집도 끊깁니다.
-- QGC와 독립적으로 수집하려면 송신 측의 별도 MAVLink 출력 또는 mavlink-router 같은 분배기에서 QGC14550과 수집기14551로 각각 전달합니다.
+```powershell
+.\build\windows-x64\tools\mavlink_telemetry_data_router_test_server.exe
+```
 
-수집기만 UDP를 사용하게 하려면 `serial_port=none`, `auto_scan=0`, `websocket_url=`로 두면 됩니다. `udp_bind`는 송신기 주소가 아니라 수집기 자신의 수신 주소입니다. 다른 컴퓨터/WSL에서 직접 보낼 때는 수신 가능한 인터페이스 주소 또는 `0.0.0.0`을 사용하고 네트워크 경로·방화벽도 맞춰야 합니다. 멀티캐스트 그룹 가입은 제공하지 않습니다.
+두 번째 터미널에서 수집기를 시험 모드로 실행합니다.
 
-TUI에서 `e` → **32번 udp_port** → 새 포트 입력 후 Enter → `s`로 저장합니다. 31번은 주소,33번은 UDP 사용 여부입니다. **재시작 후 적용**되며 화면의 ACTIVE UDP가 실제 사용 중인 값입니다.
+```powershell
+.\build\windows-x64\mavlink_telemetry_data_router_interactive.exe --test-heartbeat
+```
+
+Linux에서도 두 터미널을 사용합니다.
+
+```sh
+./build/linux-x64/tools/mavlink_telemetry_data_router_test_server
+```
+
+```sh
+./build/linux-x64/mavlink_telemetry_data_router_interactive --test-heartbeat
+```
+
+기본 서버 주소는 `http://127.0.0.1:21000/ingest`입니다. 다른 컴퓨터의 서버라면 서버에 `--bind 0.0.0.0`을 지정하고 수집기에 `--server-url http://SERVER_IP:21000/ingest`를 추가합니다. 필요하면 기존 설정을 `--config telemetry.ini --test-heartbeat`로 지정합니다. CLI 주소는 해당 실행에 적용하며 설정 파일을 자동으로 덮어쓰지 않습니다.
+
+시험 모드는 새 하트비트와 최신 실제 좌표만 기본 1초 간격으로 보냅니다. 온습도·미세먼지·관측 통계는 보내지 않습니다. 위치가 없거나 오래되면 `position: null`로 표시하고 좌표를 만들어 내지 않습니다. 새 하트비트가 없으면 빈 요청을 보내지 않습니다.
+
+시험 서버는 화면과 메모리 로그만 유지하며 파일에 저장하지 않습니다. `--plain`은 색상 없이 JSON 한 줄씩 표시합니다. 여기서 HTTP 204는 시험 서버가 내용을 검사하고 표시했다는 뜻입니다. 회사 서버의 영속 저장을 시험한 결과는 아닙니다. Ctrl+C로 각각 종료합니다.
+
+시험 서버는 선택 도구로 `tools/`에 둡니다. 파일이 없다면 아래처럼 한 번 선택 빌드합니다. 기본 빌드의 운용 프로그램은 OS별 headless·interactive 두 개 그대로입니다.
+
+```powershell
+cmake --preset windows-x64 -DBUILD_TEST_SERVER=ON
+cmake --build --preset windows-x64
+```
+
+Linux에서는 프리셋 이름을 `linux-x64`로 바꿉니다. 현재 WSL SITL을 시험할 때는 Linux 서버와 수집기를 같은 WSL에서 실행해야 내부 UDP 14540을 바로 받을 수 있습니다.
+
+## 시리얼·UDP 자동 선택과 QGC
+
+기본 설정은 **UDP `127.0.0.1:14540`을 수신하면서 COM/tty 후보도 확인**합니다. 먼저 CRC가 맞는 MAVLink를 발견한 입력 하나를 유지하고, 다른 입력은 닫습니다. 선택한 입력이 `link_timeout_ms` 동안 조용하면 다시 양쪽을 탐색합니다. 두 입력의 관측을 섞어 수집하지 않습니다.
+
+PX4 SITL은 기본적으로 **QGC에 14550, API/Offboard에 14540**으로 각각 보냅니다. 따라서 수집기는 14540을 받고 QGC는 기존 14550을 사용하면 됩니다. SILS에 별도 14551 출력을 추가하거나 수집기가 QGC로 다시 보낼 필요가 없습니다. 두 출력은 메시지 구성이 다를 수 있으므로 커스텀 관측도 14540으로 출력되는지 확인하세요. [PX4 기본 포트](https://docs.px4.io/main/en/simulation/#default-px4-mavlink-udp-ports)
+
+**현재 WSL SITL의 14540은 WSL 내부 loopback으로 향합니다.** WSL 안에서 Linux 수집기를 실행하면 받을 수 있습니다. Windows 실행 파일로 받으려면 별도 연결 경로가 필요하며, WSL 자동 중계는 아직 제공하지 않습니다. `udp_bind=0.0.0.0`으로 바꾸는 것만으로 WSL loopback 패킷이 Windows에 전달되지는 않습니다.
+
+야외에서는 USB 텔레메트리의 COM/tty를 자동으로 찾습니다. 현재 프로그램은 관측을 HTTP 서버로 전송하며, **시리얼의 원시 MAVLink를 QGC로 전달하는 기능은 아직 없습니다.**
+
+UDP 입력은 수신 전용이며 하트비트·명령·전송 주기 변경 요청을 보내지 않습니다. 이미 점유된 같은 주소/포트에는 연결 실패를 표시하며, 기존 QGC의 14550 수신을 공유하지 않습니다. 별도 분배 경로가 필요한 환경에서는 송신 측·QGC forwarding·MAVLink Router 등에서 수집기 목적지로 전달해야 합니다.
+
+기존 설정 파일의 포트는 자동으로 덮어쓰지 않습니다. 이전 기본값 14551이 저장되어 있다면 TUI에서 `e` → **32번 udp_port** → `14540` 입력 후 Enter → `s`로 저장하고 재시작하세요. 31번은 수신 주소, 33번은 UDP 사용 여부입니다. 화면의 ACTIVE UDP가 실제 사용 중인 값입니다.
+
+UDP만 사용하려면 `serial_port=none`, `auto_scan=0`, `websocket_url=`로 둡니다. `udp_bind`는 송신기 주소가 아니라 수집기 자신의 수신 주소입니다. 다른 컴퓨터에서 보낼 때는 수신 가능한 인터페이스 주소 또는 `0.0.0.0`과 방화벽을 맞춰야 합니다. 멀티캐스트 그룹 가입은 제공하지 않습니다.
 
 ## 실행 후 자동으로 하는 일
 
-1. 설정한 직렬 포트·WebSocket·UDP를 우선 확인하고, 필요하면 다른 COM/tty를 순서대로 탐색합니다.
-2. CRC가 맞는 MAVLink를 발견하면 해당 채널을 유지합니다. 데이터가 끊기면 다시 탐색합니다.
+1. UDP 수신과 직렬 후보 탐색을 함께 진행합니다. 지정 WebSocket이 있으면 직렬 후보와 같은 탐색 경로에서 확인합니다.
+2. 먼저 CRC가 맞는 MAVLink를 확인한 채널 하나를 유지합니다. 데이터가 끊기면 다시 탐색합니다.
 3. HEARTBEAT에서 시스템·컴포넌트 ID, 기기 종류와 PX4/ArduPilot 등의 정보를 확인해 목록으로 보여 줍니다.
 4. 선택한 비행제어기의 시계에 속한 키–값 관측에 위치·속도·부팅 경과시각을 연결합니다.
 5. 비어 있지 않은 관측만 원본·통계와 함께 묶어 기본 1초 간격으로 서버에 보냅니다.
@@ -103,7 +147,7 @@ TUI에서 `e` → **32번 udp_port** → 새 포트 입력 후 Enter → `s`로 
 
 ## 어떤 데이터를 수집하나요?
 
-기본 키–값 운반 형식은 MAVLink `NAMED_VALUE_FLOAT`와 `NAMED_VALUE_INT`입니다. **온도·습도·미세먼지 같은 항목을 코드에 고정하지 않고 새 키를 자동 등록**합니다. 이름이 추가됐다는 이유로 프로그램을 다시 만들 필요가 없습니다. UDP는 처음 도착한 비어 있지 않은 패킷의 송신 IP/포트를 해당 연결의 소스로 고정해 다른 송신자의 바이트를 섞지 않습니다. 재연결하면 다시 선택합니다. 여러 기체·송신자를 동시에 수집하는 기능은 아닙니다.
+기본 키–값 운반 형식은 MAVLink `NAMED_VALUE_FLOAT`와 `NAMED_VALUE_INT`입니다. **온도·습도·미세먼지 같은 항목을 코드에 고정하지 않고 새 키를 자동 등록**합니다. 이름이 추가됐다는 이유로 프로그램을 다시 만들 필요가 없습니다. UDP는 처음 도착한 비어 있지 않은 패킷의 송신 IP/포트를 임시 선택합니다. 유효 MAVLink를 확인하지 못하면 `probe_ms` 후 다른 송신자를 받을 수 있게 초기화합니다. 유효 입력을 선택한 뒤에는 해당 송신자만 유지하며 재연결하면 다시 선택합니다. 다른 송신자의 바이트를 섞지 않습니다. 여러 기체·송신자를 동시에 수집하는 기능은 아닙니다.
 
 현재 한 소스 세션의 키 한도는 16개이며 초과는 거부 수로 표시합니다.
 
@@ -130,6 +174,8 @@ MAVLink 패킷 CRC·하트비트는 직접 검사합니다. 알 수 없는 메�
 - 위/아래: 목록 이동
 - `e`: 설정 편집, Enter: 검증, `s`: 저장
 - Ctrl+C: 수신 종료 후 대기 자료 전송을 시도하고 종료
+
+터미널의 `source status=LOCKED`는 **초록색**으로 표시합니다. 단순히 포트를 열었거나 하트비트 식별을 기다리는 상태는 노란색입니다. 출력이 파일·파이프로 연결되면 색상 제어 문자를 넣지 않습니다.
 
 서버 오류·CRC 오류·미해독 메시지·위치 없음·시계 불일치·지연 관측·큐 손실을 구분해 확인할 수 있습니다. 서버는 모든 묶음을 확정 수락한 뒤 204를 보내야 합니다. TCP ACK나 HTTP 200/202는 이 확인을 대신하지 않습니다.
 
@@ -167,9 +213,9 @@ sh install.sh
 | `test_time_sync` | UTC 추정·드리프트·극단 시각 |
 | `test_config` | 설정 검증·저장·한글 경로·비밀정보 표시 방지 |
 | `test_mavlink_input` | 실제 바이너리 패킷 CRC·장치 식별·위치 연결·재부팅 |
-| `test_input_transport` | WebSocket·분할 프레임·ping/pong·가상 tty |
+| `test_input_transport` | UDP·WebSocket·분할 프레임·ping/pong·가상 tty |
 
-원인을 구분하기 위해 나눈 검사들입니다. **기본 빌드는 검사 OFF**이며, 선택하면 `tests/` 하위 폴더에 만듭니다. CTest는 위 검사와 실제 MAVLink→HTTP 통합 시험을 실행합니다.
+원인을 구분하기 위해 나눈 검사들입니다. **기본 빌드는 검사 OFF**이며, 선택하면 `tests/` 하위 폴더에 만듭니다. CTest는 위 검사와 실제 MAVLink→HTTP 통합 시험, 입력 자동 선택·전환 시험을 실행합니다. Linux에서는 가상 터미널로 연결 상태 색상도 검사합니다.
 
 ```powershell
 cmake --preset windows-x64-tests
@@ -184,4 +230,4 @@ Linux에서는 `windows`를 `linux`로 바꿉니다. 일반 프리셋으로 다�
 - [기술 참조](docs/REFERENCE.md): 전체 설정·좌표/시각·출력 규약·교차 빌드·CSV 재생
 - [검토·검증 기록](docs/REVIEW.md): 실제 시험과 계산량·메모리·한계
 
-Windows와 Linux x64 실행 파일로 UDP·WebSocket→HTTP 확인 검사를 통과했습니다. 실행 중인 PX4 SITL의 실제 QGC행 UDP를 변경 없이 복사해 Windows 수집기에서 관측과 서버 확인까지 검증했습니다. Linux는 Ubuntu24.04 WSL에서 직접 실행했습니다. 실제 Pixhawk/물리 COM·Ubuntu26.04·회사 서버 연결은 아직 검증하지 않았습니다.
+Windows와 Linux x64 실행 파일로 UDP·WebSocket→HTTP 확인 검사를 통과했습니다. 실행 중인 PX4 SITL의 별도 UDP 14540을 Linux 수집기로 직접 받아 관측 전송과 TCP 21000 시험 모드를 검증했습니다. QGC의 14550 수신은 유지했습니다. Linux 실행 환경은 Ubuntu 24.04 WSL입니다. 실제 Pixhawk/물리 COM·Ubuntu26.04·회사 서버 연결은 아직 검증하지 않았습니다.

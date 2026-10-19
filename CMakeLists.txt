@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(mavlink_telemetry_data_router VERSION 0.6.0 LANGUAGES C)
+project(mavlink_telemetry_data_router VERSION 0.6.1 LANGUAGES C)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
   message(FATAL_ERROR "Use an out-of-source build: cmake --preset windows-x64 or linux-x64")
@@ -16,6 +16,7 @@ include(cmake/Architecture.cmake)
 include(GNUInstallDirs)
 # Developer tests are opt-in; ordinary builds produce only the two programs.
 option(BUILD_TESTING "Build developer verification programs" OFF)
+option(BUILD_TEST_SERVER "Build optional TCP HTTP diagnostic server" OFF)
 include(CTest)
 
 function(tb_strict_warnings target)

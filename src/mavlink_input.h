@@ -39,6 +39,8 @@ typedef struct {
     uint8_t selected_system, selected_component, gps_fix;
     uint64_t boot_us, watermark_us;
     double lat, lon, altitude_msl_m;
+    uint64_t navigation_received_ms, navigation_boot_us;
+    uint8_t have_navigation;
     mi_device device[MI_DEVICE_CAP];
 } mi_report;
 
