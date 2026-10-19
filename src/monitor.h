@@ -55,6 +55,7 @@ typedef struct {
 
 /* Root owns thread synchronization; snapshot returns a bounded consistent copy.
  * Active configuration is immutable. Private draft saves apply on restart.
+ * UDP bind/port/enabled are editable source settings with the same save rules.
  * Keyboard is CONIN$ or /dev/tty. With CSV console stdin, editing is disabled;
  * MAVLink input does not consume stdin, so console editing remains available.
  * stderr receives the dashboard, or plain 1 Hz snapshots when redirected. */

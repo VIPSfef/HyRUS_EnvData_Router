@@ -247,7 +247,7 @@ def run_router(source, server, name):
     settings = {
         "url": f"http://127.0.0.1:{server.port}/observations", "stream": "integration",
         "session": name, "origin_lat": 37, "origin_lon": 127, "origin_alt": 100, "origin_auto": 0,
-        "input_mode": "mavlink", "serial_port": serial, "serial_baud": 115200,
+        "input_mode": "mavlink", "udp_enabled": 0, "serial_port": serial, "serial_baud": 115200,
         "websocket_url": f"ws://127.0.0.1:{source.port}/mavlink", "auto_scan": 0,
         "probe_ms": 500, "link_timeout_ms": 1000, "reconnect_ms": 100,
         "duration_ms": 4500, "send_interval_ms": 1000, "connect_timeout_ms": 500,
@@ -364,7 +364,7 @@ def adjacent_config_without_arguments():
         folder=Path(temp); binary=folder/"실행"; binary.mkdir(); working=folder/"working";working.mkdir()
         copied=binary/interactive.name;shutil.copy2(interactive,copied)
         config=binary/"telemetry.ini"
-        original="url=-\nstream=adjacent\nsession=adjacent\ninput_mode=mavlink\nserial_port=none\nauto_scan=0\nduration_ms=1500\n"
+        original="url=-\nstream=adjacent\nsession=adjacent\ninput_mode=mavlink\nserial_port=none\nauto_scan=0\nudp_enabled=0\nduration_ms=1500\n"
         config.write_text(original,encoding="utf-8")
         started=time.monotonic()
         result=subprocess.run([str(copied)],cwd=working,stdin=subprocess.DEVNULL,capture_output=True,timeout=6)

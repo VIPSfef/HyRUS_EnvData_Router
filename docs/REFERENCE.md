@@ -1,10 +1,14 @@
-# 기술 참조 — mavlink_telemetry_data_router 0.5.0
+# 기술 참조 — mavlink_telemetry_data_router 0.6.0
 
 처음 실행할 때는 [README](../README.md)를 읽는다. 이 문서의 명령은 저장소 루트 기준이다. 기본 입력은 바이너리 MAVLink이고, CSV는 명시적인 개발용 재생 모드다.
 
 ## 자동 입력과 채널 선택
 
-기본 `input_mode=mavlink`에서는 stdin을 읽지 않는다. 우선 포트가 있으면 그 포트, 지정 WebSocket, 자동 검색한 다른 직렬 포트를 순서대로 확인한다. `serial_port=auto`이면 WebSocket이 있으면 먼저 확인한 뒤 검색 포트를 확인한다. 한 번에 한 입력 채널을 유지한다.
+기본 `input_mode=mavlink`에서는 stdin을 읽지 않는다. 우선 포트가 있으면 그 포트, 지정 WebSocket, 활성화된 UDP, 자동 검색한 다른 직렬 포트를 순서대로 확인한다. `serial_port=auto`이면 WebSocket, UDP, 검색 포트 순서로 활성화된 후보를 확인한다. 한 번에 한 입력 채널을 유지한다.
+
+UDP는 기본127.0.0.1:14551의 독점 IPv4 수신 소켓이다. Windows에서는 bind 전에 SO_EXCLUSIVEADDRUSE를 설정하고 Linux에서도 SO_REUSEADDR/PORT를 켜지 않는다. 기존 QGC가 사용하는 동일 주소/포트에는 bind 실패를 표시한다. 0길이 데이터그램은 무시하고 첫 비어 있지 않은 송신 IP/포트를 선택하며, 연결 동안 다른 peer는 버린다. 최대65,507B 데이터그램 전체를 고정 버퍼에 받아 작은 읽기로 나눠 전달하므로4096B 입력 버퍼 때문에 뒷부분을 자르지 않는다. UDP에는 발신이 없으며 it_write도0을 반환한다.
+
+UDP read는100ms 이내의 설정 대기와 호출당최대256회 receive 시도를 사용한다. OS 스케줄링을 포함한 하드 상한은 아니다. UDP 손실/역전/커널 큐 포화는 생길 수 있고 이후 HTTP 확인은 수집기 이전 손실을 복구하지 않는다. IPv4 유니캐스트 및 수신 인터페이스에 도달하는 브로드캐스트를 다루지만 멀티캐스트 그룹 가입·IPv6·동시 다중 peer는 제공하지 않는다.
 
 Windows는 QueryDosDevice로 COM 후보를 찾고, Linux는 `/dev/serial/by-id/*`, `/dev/ttyACM*`, `/dev/ttyUSB*`를 탐색해 장치 중복을 제거한다. 검색 시 포트를 열지 않으며 실제 확인 순서에 도달한 포트만 연다. 통신 속도는 지정한 `serial_baud`를 사용한다.
 
@@ -14,7 +18,7 @@ MAVLink CRC가 맞는 프레임을 받으면 해당 채널을 유지한다. `pro
 
 기기는 HEARTBEAT의 system/component ID, MAV_TYPE, MAV_AUTOPILOT로 식별한다. component ID 숫자만으로 종류를 추측하지 않는다. 종류를 모르는 기기는 미상으로 표시한다. `target_system=0`, `target_component=0`은 첫 비행제어기를 선택한다. 다른 기기들은 목록에 남지만 시계가 다른 관측을 자동 합치지는 않는다.
 
-설정한 포트와 WebSocket에는 연결 후, 자동 검색 포트에는 유효 MAVLink 확인 후 1Hz로 중계기 HEARTBEAT를 알린다. 비행 명령·arming·임무 명령은 보내지 않는다. source system255/component191, type ONBOARD_CONTROLLER/autopilot INVALID를 사용한다.
+UDP를 제외한 설정 포트와 WebSocket에는 연결 후, 자동 검색 포트에는 유효 MAVLink 확인 후 1Hz로 중계기 HEARTBEAT를 알린다. 비행 명령·arming·임무 명령은 보내지 않는다. source system255/component191, type ONBOARD_CONTROLLER/autopilot INVALID를 사용한다.
 
 ## 설정 전체
 
@@ -30,6 +34,9 @@ MAVLink CRC가 맞는 프레임을 받으면 해당 채널을 유지한다. `pro
 | input_mode | mavlink 또는 csv |
 | serial_port | auto, none, COM 이름 또는 tty 경로 |
 | serial_baud | 115200. 지원: 9600/19200/38400/57600/115200/230400/460800/921600 |
+| udp_enabled | 1, UDP 입력 사용0/1 |
+| udp_bind | 127.0.0.1, 로컬 IPv4 literal. 0.0.0.0은 모든 IPv4 인터페이스 |
+| udp_port | 14551, 1–65535. QGC14550과 분리 |
 | websocket_url | 빈 값 또는 ws/wss 주소, 최대2047자 |
 | auto_scan | 1, 자동 직렬 포트 검색 |
 | probe_ms | 2000, 100–60000 |
@@ -89,7 +96,7 @@ seq는 키별 중계 관측 순번이며 MAVLink 공용8bit헤더 순번이 아�
 
 ## 빌드와 개발 검사
 
-CMake3.21+, Ninja, C99 x64 컴파일러가 필요하다. Windows WinHTTP/bcrypt, Linux libcurl/pthread를 사용한다. 기본 MinSizeRel은 검사 OFF이며 Windows/Linux 각각 두 운용 파일을 만든다.
+CMake3.21+, Ninja, C99 x64 컴파일러가 필요하다. Windows WinHTTP/bcrypt/ws2_32, Linux libcurl/pthread를 사용한다. 기본 MinSizeRel은 검사 OFF이며 Windows/Linux 각각 두 운용 파일을 만든다.
 
 | 작업 | Windows | Linux |
 |---|---|---|
@@ -120,7 +127,7 @@ cmake --build build/linux-x64 --target package
 
 공식 Ubuntu22.04 패키지를 HTTPS로 받고SHA256를 확인해 build/toolchains에 추출한다. OS 패키지 설치 스크립트를 실행하지 않고 sysroot를 배포물에 넣지 않는다. 생성 ELF는 glibc2.34+와 OpenSSL 계열 libcurl.so.4를 사용한다. Windows에서 만든 Linux TGZ의 실행 권한도0755로 보정한다. 교차 CMake 캐시를 Linux native 캐시로 재사용하지 않는다.
 
-선택 CTest는 코어·시계·설정·MAVLink 검사를 실행한다. 구성 시 Python3가 있으면 transport·실제 router 통합 검사도 등록하며, 교차 빌드에서는 타깃을 실행하지 않는다. 추가 회귀는 다음과 같다(Linux는 실행 파일 .exe 없이 경로를 바꾼다).
+선택 CTest는 코어·시계·설정·MAVLink 검사를 실행한다. 구성 시 Python3가 있으면 WebSocket/UDP transport·실제 router 통합 검사도 등록하며, 교차 빌드에서는 타깃을 실행하지 않는다. 추가 회귀는 다음과 같다(Linux는 실행 파일 .exe 없이 경로를 바꾼다).
 
 ```powershell
 python src/tests/test_core.py --skip-build
@@ -129,6 +136,7 @@ python src/tests/test_confirmation.py
 python src/tests/test_monitor.py
 python src/tests/test_sender_limits.py
 python src/tests/test_mavlink_router.py
+python src/tests/test_udp_router.py
 ```
 
 GitHub/GitLab CI도 native검사 프리셋과 같은 경로를 사용한다. CI파일 작성과 원격 실행은 다르며 원격 CI는 여기서 실행하지 않았다. Git배포는 실제 저장소 화면에서 복사한 clone URL로 origin을 설정하고 push한다. 호스트 이름만으로 URL을 추측하지 않는다.
@@ -148,6 +156,14 @@ t_us,seq,quality,key,unit,value,east_m,north_m,up_m,ve_mps,vn_mps,vu_mps,time_un
 ```
 
 전체t는비감소, 키별t와seq는증가해야 한다. 제어 행 `@clock,boot_us,utc_unix_us,gnss_uncert_us,rtt_us`와 `@watermark,W`를 사용한다. watermark는 앞으로t<W가없다는선언이며t==W는허용한다. CSV는 호스트의 조용한 입력만으로 구간을 마감하지 않는다. 다음구간/명시watermark/EOF가마감한다. schema2 중복키는(stream,session,window_us)다.
+
+## QGC와 병행하는 UDP 경로
+
+QGC와 수집기가 같은 PC의 같은 유니캐스트 주소/포트를 공유하면 양쪽 전체 복사 수신을 보장할 수 없다. 수집기 포트만 바꾸면 송신 목적지가 자동 변경되지 않는다. QGC forwarding→별도14551 또는 송신원/분배기에서 별도 출력 경로를 설정한다. QGC forwarding은 단방향이고 QGC가 처리한 메시지만 전달하므로 임의 dialect의 원시 byte mirror로 가정하지 않는다.
+
+현재 실측했던 경로는 WSL PX4172.30.183.133:18570→Windows172.30.176.1:14550의 유니캐스트였다. 이 IP는 해당 실행 환경의 일시 값이며 프로그램에 고정하지 않는다. 검증 시에만 AF_PACKET로 원본에 손대지 않고 메모리 복사해 별도 UDP 포트로 넣었다. 이 임시 검증 경로가 실행 파일의 자동 패킷 캡처 기능을 뜻하지 않는다. 원래 링크/포트/QGC 설정은 변경하지 않았고 관측 파일도 만들지 않았다.
+
+[QGC Telemetry/forwarding](https://docs.qgroundcontrol.com/master/en/qgc-user-guide/settings_view/telemetry.html), [MAVLink Router](https://github.com/mavlink-router/mavlink-router), [Windows 포트 공유](https://learn.microsoft.com/en-us/windows/win32/winsock/using-so-reuseaddr-and-so-exclusiveaddruse), [Linux SO_REUSEPORT](https://man7.org/linux/man-pages/man7/socket.7.html)를 참고한다.
 
 ## 근거와 적용 한계
 

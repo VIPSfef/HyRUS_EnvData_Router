@@ -41,6 +41,14 @@ unit_map=
 # 0 uses the fixed origin fields above; CSV always uses its explicit origin.
 origin_auto=1
 
+# Receive-only MAVLink UDP input. QGC normally receives on 14550, so this
+# router uses its own 14551. Configure PX4/QGC forwarding to this destination.
+# 127.0.0.1 accepts local forwarding; 0.0.0.0 accepts all local IPv4 interfaces.
+# UDP sends no heartbeat; keep port ownership separate from QGC.
+udp_bind=127.0.0.1
+udp_port=14551
+udp_enabled=1
+
 # WebSocket uses ws:// or wss:// and carries binary MAVLink frames.
 # Do not put credentials in URLs. UI hides query values; files retain them.
 # Token values stay in the environment named by token_env; only its NAME is saved.

@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
+#include <winsock2.h>
 #include <windows.h>
 #include <winhttp.h>
 #else
@@ -17,6 +18,8 @@
 #include <glob.h>
 #include <poll.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -514,6 +517,182 @@ static int websocket_read(it_handle *h, unsigned char *out, size_t capacity) {
 }
 #endif
 
+/* Receive-only UDP uses a separate pointer-width socket, never the serial fd
+   or the WebSocket handle. One complete IPv4 datagram is retained per handle. */
+static uint64_t udp_now_ms(void) {
+#ifdef _WIN32
+    return GetTickCount64();
+#else
+    return monotonic_ms();
+#endif
+}
+static int udp_address(const char *endpoint, struct sockaddr_in *address) {
+    const char *p = endpoint;
+    uint32_t ip = 0;
+    unsigned i, port = 0, digits = 0;
+    memset(address, 0, sizeof *address);
+    for (i = 0; i < 4; ++i) {
+        unsigned octet = 0, count = 0;
+        while (*p >= '0' && *p <= '9') {
+            if (++count > 3) return 0;
+            octet = octet * 10u + (unsigned)(*p++ - '0');
+            if (octet > 255) return 0;
+        }
+        if (!count || *p++ != (i == 3 ? ':' : '.')) return 0;
+        ip = (ip << 8) | octet;
+    }
+    while (*p >= '0' && *p <= '9') {
+        if (++digits > 5) return 0;
+        port = port * 10u + (unsigned)(*p++ - '0');
+        if (port > 65535) return 0;
+    }
+    if (!digits || !port || *p) return 0;
+    address->sin_family = AF_INET;
+    address->sin_addr.s_addr = htonl(ip);
+    address->sin_port = htons((uint16_t)port);
+    return 1;
+}
+static void udp_close(it_handle *h) {
+#ifdef _WIN32
+    if (h->udp_owned) (void)closesocket((SOCKET)h->udp_socket);
+    if (h->udp_started) (void)WSACleanup();
+#else
+    if (h->udp_owned) (void)close((int)h->udp_socket);
+#endif
+    h->udp_socket = 0;
+    h->udp_owned = h->udp_started = h->udp_peer_set = 0;
+    h->udp_buffered = h->udp_offset = 0;
+    h->opened = 0;
+}
+static int udp_open(it_handle *h, const char *endpoint) {
+    struct sockaddr_in address;
+    if (!udp_address(endpoint, &address))
+        return fail(h, "UDP endpoint must be an IPv4 literal:port (port 1..65535)");
+#ifdef _WIN32
+    {
+        WSADATA data;
+        SOCKET socket_handle;
+        BOOL exclusive = TRUE;
+        u_long nonblocking = 1;
+        int result = WSAStartup(MAKEWORD(2, 2), &data);
+        if (result) return winfail(h, "Cannot initialize UDP sockets", (DWORD)result);
+        h->udp_started = 1;
+        socket_handle = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (socket_handle == INVALID_SOCKET)
+            return winfail(h, "Cannot create UDP socket", (DWORD)WSAGetLastError());
+        h->udp_socket = (uintptr_t)socket_handle; h->udp_owned = 1;
+        /* Set before bind; deliberately never enable SO_REUSEADDR. */
+        if (setsockopt(socket_handle, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+                       (const char *)&exclusive, (int)sizeof exclusive) == SOCKET_ERROR)
+            return winfail(h, "Cannot reserve UDP port exclusively", (DWORD)WSAGetLastError());
+        if (ioctlsocket(socket_handle, FIONBIO, &nonblocking) == SOCKET_ERROR)
+            return winfail(h, "Cannot make UDP receive nonblocking", (DWORD)WSAGetLastError());
+        if (bind(socket_handle, (const struct sockaddr *)&address, (int)sizeof address) == SOCKET_ERROR)
+            return winfail(h, "UDP bind failed: address/port owned or unavailable; QGC must use a different port",
+                           (DWORD)WSAGetLastError());
+    }
+#else
+    {
+        int socket_handle = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        int flags;
+        if (socket_handle < 0) return fail(h, "Cannot create UDP socket");
+        h->udp_socket = (uintptr_t)socket_handle; h->udp_owned = 1;
+        flags = fcntl(socket_handle, F_GETFL, 0);
+        if (flags < 0 || fcntl(socket_handle, F_SETFL, flags | O_NONBLOCK) < 0)
+            return fail(h, "Cannot make UDP receive nonblocking");
+        /* Default exclusive binding: no SO_REUSEADDR or SO_REUSEPORT. */
+        if (bind(socket_handle, (const struct sockaddr *)&address, sizeof address) < 0)
+            return fail(h, "UDP bind failed: address/port owned or unavailable; QGC must use a different port");
+    }
+#endif
+    return 1;
+}
+static int udp_take(it_handle *h, void *out, size_t capacity) {
+    size_t take = h->udp_buffered - h->udp_offset;
+    if (take > capacity) take = capacity;
+    memcpy(out, h->udp_buffer + h->udp_offset, take);
+    h->udp_offset += take;
+    if (h->udp_offset == h->udp_buffered) h->udp_offset = h->udp_buffered = 0;
+    return (int)take;
+}
+static int udp_read(it_handle *h, void *out, size_t capacity) {
+    uint64_t deadline;
+    unsigned operations = 0;
+    if (h->udp_buffered) return udp_take(h, out, capacity);
+    deadline = udp_now_ms() + h->io_timeout_ms;
+    /* Both a deadline and a fixed operation budget bound foreign-peer floods.
+       Nonblocking recvfrom keeps a readiness race from extending that budget. */
+    while (++operations <= 256) {
+        struct sockaddr_in peer;
+        uint64_t now = udp_now_ms();
+        unsigned remaining;
+        int ready, received;
+        if (operations > 1 && now >= deadline) return 0;
+        remaining = deadline > now ? (unsigned)(deadline - now) : 0;
+#ifdef _WIN32
+        {
+            SOCKET socket_handle = (SOCKET)h->udp_socket;
+            fd_set readers;
+            struct timeval timeout;
+            int peer_size = (int)sizeof peer;
+            FD_ZERO(&readers); FD_SET(socket_handle, &readers);
+            timeout.tv_sec = 0; timeout.tv_usec = (long)remaining * 1000;
+            ready = select(0, &readers, NULL, NULL, &timeout);
+            if (ready == SOCKET_ERROR) {
+                int error = WSAGetLastError();
+                if (error == WSAEINTR) continue;
+                return winfail(h, "UDP receive wait failed", (DWORD)error);
+            }
+            if (!ready) return 0;
+            received = recvfrom(socket_handle, (char *)h->udp_buffer,
+                                (int)sizeof h->udp_buffer, 0,
+                                (struct sockaddr *)&peer, &peer_size);
+            if (received == SOCKET_ERROR) {
+                int error = WSAGetLastError();
+                if (error == WSAEWOULDBLOCK || error == WSAEINTR) continue;
+                return winfail(h, "UDP receive failed", (DWORD)error);
+            }
+            if (peer_size != (int)sizeof peer || peer.sin_family != AF_INET) continue;
+        }
+#else
+        {
+            struct pollfd descriptor;
+            socklen_t peer_size = sizeof peer;
+            ssize_t result;
+            descriptor.fd = (int)h->udp_socket;
+            descriptor.events = POLLIN; descriptor.revents = 0;
+            ready = poll(&descriptor, 1, (int)remaining);
+            if (ready < 0) {
+                if (errno == EINTR) continue;
+                return fail(h, "UDP receive wait failed");
+            }
+            if (!ready) return 0;
+            if (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL))
+                return fail(h, "UDP input socket failed");
+            result = recvfrom((int)h->udp_socket, h->udp_buffer, sizeof h->udp_buffer, 0,
+                              (struct sockaddr *)&peer, &peer_size);
+            if (result < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
+                return fail(h, "UDP receive failed");
+            }
+            received = (int)result;
+            if (peer_size != sizeof peer || peer.sin_family != AF_INET) continue;
+        }
+#endif
+        if (!received) continue; /* Empty datagrams neither latch nor disconnect. */
+        if (h->udp_peer_set && (h->udp_peer_address != peer.sin_addr.s_addr ||
+                               h->udp_peer_port != peer.sin_port)) continue;
+        if (!h->udp_peer_set) {
+            h->udp_peer_address = peer.sin_addr.s_addr;
+            h->udp_peer_port = peer.sin_port;
+            h->udp_peer_set = 1;
+        }
+        h->udp_buffered = (size_t)received; h->udp_offset = 0;
+        return udp_take(h, out, capacity);
+    }
+    return 0;
+}
+
 int it_open(it_handle *h, it_kind kind, const char *endpoint, unsigned baud,
             unsigned connect_timeout_ms, unsigned io_timeout_ms) {
     int result;
@@ -521,12 +700,15 @@ int it_open(it_handle *h, it_kind kind, const char *endpoint, unsigned baud,
     h->io_timeout_ms = io_timeout_ms ? io_timeout_ms : 100;
     if (h->io_timeout_ms > 100) h->io_timeout_ms = 100;
     if (!endpoint || !*endpoint || strlen(endpoint) >= (kind == IT_WEBSOCKET ? IT_WEBSOCKET_ENDPOINT_BYTES : IT_ENDPOINT_BYTES) || strpbrk(endpoint, "\r\n"))
-        return fail(h, "Invalid input endpoint");
-    if (kind == IT_WEBSOCKET && strchr(endpoint, '#')) return fail(h, "WebSocket URL fragments are unsupported");
+        { (void)fail(h, "Invalid input endpoint"); return 0; }
+    if (kind == IT_WEBSOCKET && strchr(endpoint, '#')) {
+        (void)fail(h, "WebSocket URL fragments are unsupported"); return 0;
+    }
     if (!connect_timeout_ms) connect_timeout_ms = 1000;
     if (connect_timeout_ms > 60000) connect_timeout_ms = 60000;
     if (kind == IT_SERIAL) result = serial_open(h, endpoint, baud);
     else if (kind == IT_WEBSOCKET) result = websocket_open(h, endpoint, connect_timeout_ms);
+    else if (kind == IT_UDP) result = udp_open(h, endpoint);
     else result = fail(h, "Unsupported input transport");
     if (result < 0) { it_close(h); return 0; }
     h->opened = 1; return 1;
@@ -535,6 +717,7 @@ int it_read(it_handle *h, void *output, size_t capacity) {
     if (!h->opened) return fail(h, "Input is not open");
     if (!capacity) return 0;
     if (capacity > INT_MAX) capacity = INT_MAX;
+    if (h->kind == IT_UDP) return udp_read(h, output, capacity);
 #ifdef _WIN32
     if (h->kind == IT_SERIAL) {
         DWORD n = 0;
@@ -570,6 +753,7 @@ int it_read(it_handle *h, void *output, size_t capacity) {
 }
 int it_write(it_handle *h, const void *data, size_t length) {
     if (!h->opened) return fail(h, "Input is not open");
+    if (h->kind == IT_UDP) return 0; /* Receive-only: never reply to a latched peer. */
     if (!length) return 0;
     if (length > INT_MAX) return fail(h, "Input write too large");
 #ifdef _WIN32
@@ -594,6 +778,7 @@ int it_write(it_handle *h, const void *data, size_t length) {
 #endif
 }
 void it_close(it_handle *h) {
+    if (h->kind == IT_UDP) { udp_close(h); return; }
 #ifdef _WIN32
     if (h->kind == IT_WEBSOCKET) {
         if (h->stop) (void)SetEvent((HANDLE)h->stop);

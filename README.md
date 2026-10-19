@@ -2,7 +2,7 @@
 
 **MAVLink 스트림을 자동으로 찾아 관측값을 수집하고, 메모리에 모았다가 서버로 보내는 상시 중계 프로그램**입니다. Windows x64와 Linux x64를 지원합니다.
 
-Windows의 COM, Linux의 tty 또는 설정한 WebSocket에서 MAVLink v1/v2를 직접 읽습니다. 매 관측을 사람이 입력하거나 다른 CSV 변환기를 실행할 필요가 없습니다.
+Windows의 COM, Linux의 tty, UDP 또는 설정한 WebSocket에서 MAVLink v1/v2를 직접 읽습니다. 매 관측을 사람이 입력하거나 다른 CSV 변환기를 실행할 필요가 없습니다.
 
 ## 어떤 파일을 실행하나요?
 
@@ -45,6 +45,9 @@ cp config/telemetry.ini.example telemetry.ini
 input_mode=mavlink
 serial_port=auto
 serial_baud=115200
+udp_enabled=1
+udp_bind=127.0.0.1
+udp_port=14551
 websocket_url=
 auto_scan=1
 url=https://YOUR_SERVER/ingest
@@ -59,6 +62,8 @@ unit_map=temp:C;humidity:%;pm25:ug/m3
 |---|---|
 | `serial_port` | Windows `COM5`, Linux `/dev/ttyACM0`처럼 우선 확인할 포트. `auto`는 자동 탐색, `none`은 우선 포트 없음 |
 | `serial_baud` | 장치와 일치하는 통신 속도. 기본 115200 |
+| `udp_enabled` | `1`이면 UDP 입력 사용, `0`이면 제외 |
+| `udp_bind`, `udp_port` | 수신할 **로컬** IPv4 주소와 포트. 기본 `127.0.0.1:14551` |
 | `websocket_url` | 선택 사항. `ws://HOST/path` 또는 `wss://HOST/path`의 **바이너리 MAVLink** 스트림 |
 | `auto_scan` | `1`이면 다른 COM/tty도 검색. `0`이면 지정한 포트·WebSocket만 사용 |
 | `url` | 관측을 전송할 HTTP/HTTPS 서버 주소 |
@@ -70,9 +75,22 @@ unit_map=temp:C;humidity:%;pm25:ug/m3
 
 interactive에서 `e`로 설정을 열고 항목 편집 후 Enter로 확인, `s`로 저장합니다. **저장은 재시작 후 적용**됩니다. 미확인 관측이 남았다면 먼저 전송을 마친 뒤 재시작하세요.
 
+## QGC와 UDP를 함께 사용하기
+
+기본 수집 포트는 **14551**로 QGC 기본 포트14550과 분리했습니다. 같은 포트가 사용 중이면 명시적으로 연결 실패를 표시하며, 포트 재사용으로 기존 프로그램의 데이터를 가져오지 않습니다. UDP는 **수신 전용**이며 하트비트·명령·전송 주기 변경 요청을 보내지 않습니다.
+
+QGC만 기체의 유니캐스트를 받고 있다면, 수집기가 다른 포트를 여는 것만으로 그 패킷을 받을 수는 없습니다. 다음 중 하나로 수집기에도 보내야 합니다.
+
+- QGC의 **Enable MAVLink forwarding**에서 수집기 주소 `127.0.0.1:14551`로 전달합니다. 버전에 따라 Telemetry/MAVLink 설정에 있습니다. 이 방법은 단방향이며 QGC가 종료되면 수집도 끊깁니다.
+- QGC와 독립적으로 수집하려면 송신 측의 별도 MAVLink 출력 또는 mavlink-router 같은 분배기에서 QGC14550과 수집기14551로 각각 전달합니다.
+
+수집기만 UDP를 사용하게 하려면 `serial_port=none`, `auto_scan=0`, `websocket_url=`로 두면 됩니다. `udp_bind`는 송신기 주소가 아니라 수집기 자신의 수신 주소입니다. 다른 컴퓨터/WSL에서 직접 보낼 때는 수신 가능한 인터페이스 주소 또는 `0.0.0.0`을 사용하고 네트워크 경로·방화벽도 맞춰야 합니다. 멀티캐스트 그룹 가입은 제공하지 않습니다.
+
+TUI에서 `e` → **32번 udp_port** → 새 포트 입력 후 Enter → `s`로 저장합니다. 31번은 주소,33번은 UDP 사용 여부입니다. **재시작 후 적용**되며 화면의 ACTIVE UDP가 실제 사용 중인 값입니다.
+
 ## 실행 후 자동으로 하는 일
 
-1. 설정한 포트와 WebSocket을 우선 확인하고, 필요하면 다른 COM/tty를 순서대로 탐색합니다.
+1. 설정한 직렬 포트·WebSocket·UDP를 우선 확인하고, 필요하면 다른 COM/tty를 순서대로 탐색합니다.
 2. CRC가 맞는 MAVLink를 발견하면 해당 채널을 유지합니다. 데이터가 끊기면 다시 탐색합니다.
 3. HEARTBEAT에서 시스템·컴포넌트 ID, 기기 종류와 PX4/ArduPilot 등의 정보를 확인해 목록으로 보여 줍니다.
 4. 선택한 비행제어기의 시계에 속한 키–값 관측에 위치·속도·부팅 경과시각을 연결합니다.
@@ -85,7 +103,9 @@ interactive에서 `e`로 설정을 열고 항목 편집 후 Enter로 확인, `s`
 
 ## 어떤 데이터를 수집하나요?
 
-기본 키–값 운반 형식은 MAVLink `NAMED_VALUE_FLOAT`와 `NAMED_VALUE_INT`입니다. **온도·습도·미세먼지 같은 항목을 코드에 고정하지 않고 새 키를 자동 등록**합니다. 이름이 추가됐다는 이유로 프로그램을 다시 만들 필요가 없습니다. 현재 한 소스 세션의 키 한도는 16개이며 초과는 거부 수로 표시합니다.
+기본 키–값 운반 형식은 MAVLink `NAMED_VALUE_FLOAT`와 `NAMED_VALUE_INT`입니다. **온도·습도·미세먼지 같은 항목을 코드에 고정하지 않고 새 키를 자동 등록**합니다. 이름이 추가됐다는 이유로 프로그램을 다시 만들 필요가 없습니다. UDP는 처음 도착한 비어 있지 않은 패킷의 송신 IP/포트를 해당 연결의 소스로 고정해 다른 송신자의 바이트를 섞지 않습니다. 재연결하면 다시 선택합니다. 여러 기체·송신자를 동시에 수집하는 기능은 아닙니다.
+
+현재 한 소스 세션의 키 한도는 16개이며 초과는 거부 수로 표시합니다.
 
 이 메시지에는 단위가 없으므로 `unit_map`에서 지정합니다. 미지정 단위는 `unknown`으로 보존합니다. 기본 압력·온도 메시지와 유효 필드가 표시된 HIGHRES_IMU도 수집합니다.
 
@@ -106,7 +126,7 @@ MAVLink 패킷 CRC·하트비트는 직접 검사합니다. 알 수 없는 메�
 ## 화면과 종료
 
 - `d`: 하트비트로 발견한 장치 목록
-- `k`: 관측값과 전체 진단
+- `k`: 관측값 목록
 - 위/아래: 목록 이동
 - `e`: 설정 편집, Enter: 검증, `s`: 저장
 - Ctrl+C: 수신 종료 후 대기 자료 전송을 시도하고 종료
@@ -164,4 +184,4 @@ Linux에서는 `windows`를 `linux`로 바꿉니다. 일반 프리셋으로 다�
 - [기술 참조](docs/REFERENCE.md): 전체 설정·좌표/시각·출력 규약·교차 빌드·CSV 재생
 - [검토·검증 기록](docs/REVIEW.md): 실제 시험과 계산량·메모리·한계
 
-Windows에서는 실제 바이너리 MAVLink를 WebSocket으로 받아 HTTP 서버에 전송하는 자동 시험을 통과했습니다. Linux x64는 실제 교차 빌드했으며 Linux에서의 직접 실행과 실제 Pixhawk/물리 COM 연결은 아직 검증하지 않았습니다.
+Windows와 Linux x64 실행 파일로 UDP·WebSocket→HTTP 확인 검사를 통과했습니다. 실행 중인 PX4 SITL의 실제 QGC행 UDP를 변경 없이 복사해 Windows 수집기에서 관측과 서버 확인까지 검증했습니다. Linux는 Ubuntu24.04 WSL에서 직접 실행했습니다. 실제 Pixhawk/물리 COM·Ubuntu26.04·회사 서버 연결은 아직 검증하지 않았습니다.

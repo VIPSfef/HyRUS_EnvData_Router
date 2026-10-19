@@ -15,7 +15,7 @@ static void ri_pause(unsigned ms) { Sleep(ms); }
 static uint64_t ri_now(void) { struct timespec t; (void)clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000+(unsigned long)t.tv_nsec/1000000; }
 static void ri_pause(unsigned ms) { struct timespec t={(time_t)(ms/1000),(long)(ms%1000)*1000000}; while(nanosleep(&t,&t) && errno==EINTR) {} }
 #endif
-#define RI_CANDIDATES (IT_MAX_CANDIDATES+2u)
+#define RI_CANDIDATES (IT_MAX_CANDIDATES+3u)
 typedef struct { it_kind kind; char endpoint[2048]; } candidate;
 typedef struct {
     mi_input decoder; it_handle transport; ri_report report;
@@ -37,6 +37,11 @@ static unsigned candidates(receiver *s,const tb_config *c) {
     unsigned n=0; size_t i,count;
     if(strcmp(c->serial_port,"auto") && strcmp(c->serial_port,"none")) add_candidate(s,&n,IT_SERIAL,c->serial_port);
     add_candidate(s,&n,IT_WEBSOCKET,c->websocket_url);
+    if(c->udp_enabled) {
+        char endpoint[96];
+        (void)snprintf(endpoint,sizeof(endpoint),"%s:%u",c->udp_bind,c->udp_port);
+        add_candidate(s,&n,IT_UDP,endpoint);
+    }
     if(c->auto_scan) {
         count=it_enumerate(s->serial,IT_MAX_CANDIDATES);
         for(i=0;i<count;++i) add_candidate(s,&n,IT_SERIAL,s->serial[i]);
@@ -73,6 +78,7 @@ int ri_run(const tb_config *c,mi_emit_fn emit,ri_status_fn status,ri_stop_fn sto
             current=&s->candidate[index++];
             ++s->report.attempts;
             if(current->kind==IT_WEBSOCKET) cfg_safe_url(current->endpoint,s->report.source,sizeof(s->report.source));
+            else if(current->kind==IT_UDP) (void)snprintf(s->report.source,sizeof(s->report.source),"udp://%.240s",current->endpoint);
             else (void)snprintf(s->report.source,sizeof(s->report.source),"%.255s",current->endpoint);
             publish(s,status,context,"CONNECTING");
             if(!it_open(&s->transport,current->kind,current->endpoint,c->serial_baud,c->connect_timeout_ms,c->io_timeout_ms)) {
@@ -102,7 +108,9 @@ int ri_run(const tb_config *c,mi_emit_fn emit,ri_status_fn status,ri_stop_fn sto
                 publish(s,status,context,"DISCONNECTED");
                 retry_at=now+(index>=count ? c->reconnect_ms : 25u); continue;
             }
-            if((locked || trusted) && now>=next_heartbeat && !tx_len) {
+            /* UDP is an observation-only endpoint. It never announces a GCS,
+             * changes stream rates, sends commands, or learns a reply target. */
+            if(s->transport.kind!=IT_UDP && (locked || trusted) && now>=next_heartbeat && !tx_len) {
                 tx_len=mi_heartbeat(s->heartbeat,sizeof(s->heartbeat),255,191,sequence++); tx_offset=0;
                 next_heartbeat=now+1000;
             }

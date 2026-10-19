@@ -364,10 +364,52 @@ static int check_mavlink_settings(void)
     return 1;
 }
 
+static int check_udp_settings(void)
+{
+    tb_config c, loaded, saved;
+    char error[160], path[128];
+    const char *valid[] = {"127.0.0.1", "0.0.0.0", "255.255.255.255", "192.168.10.1", "10.0.0.2"};
+    const char *invalid[] = {"", "localhost", "::1", "udp://127.0.0.1", "127.0.0", "127.0.0.1.2",
+        "256.0.0.1", "1.2.3.999", "-1.2.3.4", "01.2.3.4", "1..3.4", "1.2.3.", "1.2.3.4:14551"};
+    size_t i;
+    cfg_defaults(&c);
+    CHECK(!strcmp(c.udp_bind,"127.0.0.1") && c.udp_port==14551 && c.udp_enabled==1);
+    CHECK(valid_config(&c));
+    for(i=0;i<sizeof(valid)/sizeof(valid[0]);++i) {
+        CHECK(cfg_set(&c,"udp_bind",valid[i],error,sizeof(error)));
+        CHECK(!strcmp(c.udp_bind,valid[i]));
+    }
+    for(i=0;i<sizeof(invalid)/sizeof(invalid[0]);++i) CHECK(invalid_set(&c,"udp_bind",invalid[i]));
+    CHECK(cfg_set(&c,"udp_port","1",error,sizeof(error)) && c.udp_port==1);
+    CHECK(cfg_set(&c,"udp_port","65535",error,sizeof(error)) && c.udp_port==65535);
+    CHECK(invalid_set(&c,"udp_port","0"));
+    CHECK(invalid_set(&c,"udp_port","65536"));
+    CHECK(invalid_set(&c,"udp_port","-1"));
+    CHECK(invalid_set(&c,"udp_port","14551.0"));
+    CHECK(cfg_set(&c,"udp_enabled","0",error,sizeof(error)) && c.udp_enabled==0);
+    CHECK(cfg_set(&c,"udp_enabled","1",error,sizeof(error)) && c.udp_enabled==1);
+    CHECK(invalid_set(&c,"udp_enabled","2"));
+    CHECK(invalid_set(&c,"udp_enabled","true"));
+    saved=c; memset(c.udp_bind,'x',sizeof(c.udp_bind));
+    CHECK(!cfg_validate(&c,4,error,sizeof(error))); c=saved;
+    CHECK(cfg_set(&c,"udp_bind","0.0.0.0",error,sizeof(error)));
+    CHECK(cfg_set(&c,"udp_enabled","0",error,sizeof(error)));
+    (void)snprintf(path,sizeof(path),"tb-udp-config-%u.ini",process_id());
+    CHECK(cfg_save(path,&c,4,error,sizeof(error)));
+    CHECK(cfg_load(path,&loaded,4,error,sizeof(error)));
+    CHECK(!strcmp(loaded.udp_bind,"0.0.0.0") && loaded.udp_port==65535 && loaded.udp_enabled==0);
+    {
+        const char duplicate[]="url=-\nstream=s\nsession=x\nudp_enabled=0\nudp_enabled=1\n";
+        CHECK(invalid_file(path,duplicate,sizeof(duplicate)-1,&c));
+    }
+    CHECK(remove_utf8(path));
+    return 1;
+}
+
 int main(void)
 {
     (void)setlocale(LC_NUMERIC, "C");
-    if (!check_settings() || !check_redaction() || !check_files() || !check_mavlink_settings()) return 1;
+    if (!check_settings() || !check_redaction() || !check_files() || !check_mavlink_settings() || !check_udp_settings()) return 1;
     printf("PASS %u configuration checks\n", checks);
     return 0;
 }

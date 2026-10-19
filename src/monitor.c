@@ -22,14 +22,15 @@
 #endif
 
 enum { KEY_NONE=0, KEY_UP=256, KEY_DOWN, KEY_ENTER, KEY_ESCAPE, KEY_BACK, KEY_CLEAR };
-enum { FIELD_COUNT=30 };
+enum { FIELD_COUNT=33 };
 static const char *const fields[FIELD_COUNT]={
     "url","stream","session","token_env","origin_lat","origin_lon","origin_alt",
     "send_interval_ms","connect_timeout_ms","io_timeout_ms","max_windows",
     "refresh_ms","idle_warn_ms","ack_warn_ms","summary",
     "input_mode","serial_port","serial_baud","websocket_url","auto_scan","probe_ms",
     "link_timeout_ms","reconnect_ms","target_system","target_component",
-    "system_time_uncert_us","accel_bound_mps2","duration_ms","unit_map","origin_auto"
+    "system_time_uncert_us","accel_bound_mps2","duration_ms","unit_map","origin_auto",
+    "udp_bind","udp_port","udp_enabled"
 };
 typedef struct {
     int ansi, input_ready, csv_console;
@@ -381,7 +382,7 @@ static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
     writer w={out,columns,0,0};
     char endpoint[2048], source_name[256];
     int mav=strcmp(c->input_mode,"csv")!=0;
-    int compact=mav && columns && show_devices;
+    int compact=mav && columns;
     unsigned i,last,n=s->key_n<TB_MAX_KEYS ? s->key_n : TB_MAX_KEYS;
     uint64_t idle=elapsed(s->now_ms,s->last_receipt_ms ? s->last_receipt_ms : s->started_ms);
     uint64_t ack_age=elapsed(s->now_ms,s->last_success_ms ? s->last_success_ms : s->started_ms);
@@ -395,17 +396,21 @@ static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
         idle>=c->idle_warn_ms ? "IDLE" : "RECEIVING";
     const char *utc_status=!s->utc_us ? "UNKNOWN" : stale ? "STALE" : "ESTIMATED";
     cfg_safe_url(c->url,endpoint,sizeof(endpoint));
-    if(strstr(s->active_source,"://")) cfg_safe_url(s->active_source,source_name,sizeof(source_name));
+    if(strstr(s->active_source,"://") && strncmp(s->active_source,"udp://",6)) cfg_safe_url(s->active_source,source_name,sizeof(source_name));
     else (void)snprintf(source_name,sizeof(source_name),"%.*s",255,s->active_source);
     write_text(&w,"[monitor] state=%s mode=%s uptime=%.1fs boundary=%s\n",
             status(s),s->dry_run ? "DRY" : "HTTP",(double)elapsed(s->now_ms,s->started_ms)/1000,
             mav ? "MAVLink" : "normalized-CSV");
     write_text(&w,"ACTIVE endpoint=%s\n",endpoint);
-    write_text(&w,"ACTIVE stream=%.64s session=%.64s origin=(%.7g,%.7g,%.7g)\n",
+    if(mav && c->origin_auto)
+        write_text(&w,"ACTIVE stream=%.64s session=%.64s origin=auto(GLOBAL_POSITION_INT/MSL)\n",c->stream,c->session);
+    else write_text(&w,"ACTIVE stream=%.64s session=%.64s origin=(%.7g,%.7g,%.7g)\n",
             c->stream,c->session,c->origin[0],c->origin[1],c->origin[2]);
     write_text(&w,"ACTIVE interval=%ums connect=%ums io=%ums max_windows=%u summary=%d\n",
             c->send_interval_ms,c->connect_timeout_ms,c->io_timeout_ms,c->max_windows,c->summary);
     if(mav) {
+        write_text(&w,"ACTIVE UDP enabled=%u bind=%.63s:%u (receive-only)\n",
+                c->udp_enabled,c->udp_bind,c->udp_port);
         write_text(&w,"source status=%.31s active=%s\n",
                 s->source_status[0] ? s->source_status : "WAITING",source_name[0] ? source_name : "none");
         if(s->source_error[0]) write_text(&w,"source error=%.159s\n",s->source_error);
@@ -437,14 +442,18 @@ static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
                 s->parsed_frames,s->bad_crc,s->unknown_message);
         write_text(&w,"MAVLink signed_rejected=%" PRIu64 " no_nav=%" PRIu64 " pending=%u drop=%" PRIu64 "\n",
                 s->signed_rejected,s->no_navigation,s->pending_observations,s->pending_overflow);
-        write_text(&w,"decode no_clock=%" PRIu64 " wrong_clock_component=%" PRIu64 "\n",
-                s->no_clock,s->wrong_clock_component);
-        write_text(&w,"decode invalid_value=%" PRIu64 " late_observation=%" PRIu64 "\n",
-                s->invalid_value,s->late_observation);
+        if(compact) write_text(&w,"decode clock=%" PRIu64 " other_clock=%" PRIu64 " invalid=%" PRIu64 " late=%" PRIu64 "\n",
+                s->no_clock,s->wrong_clock_component,s->invalid_value,s->late_observation);
+        else {
+            write_text(&w,"decode no_clock=%" PRIu64 " wrong_clock_component=%" PRIu64 "\n",
+                    s->no_clock,s->wrong_clock_component);
+            write_text(&w,"decode invalid_value=%" PRIu64 " late_observation=%" PRIu64 "\n",
+                    s->invalid_value,s->late_observation);
+        }
         write_text(&w,"selected=%u.%u gps_fix=%u devices=%u\n",
                 s->selected_system,s->selected_component,s->gps_fix,s->device_n);
     } else write_text(&w,"decoder=external CRC=n/a fix=n/a boundary=normalized-CSV\n");
-    write_text(&w,"auth token_env=%.64s token=%s (credential value hidden)\n",
+    if(!compact) write_text(&w,"auth token_env=%.64s token=%s (credential value hidden)\n",
             c->token_env[0] ? c->token_env : "(none)",token && token[0] ? "set" : "missing");
     if(s->have_clock) {
         if(compact) {
@@ -466,7 +475,7 @@ static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
         write_text(&w,"alignment relative_uncert=%uus nav_age=%uus pos_error=%.3gm\n",
                 (unsigned)s->time_uncert_us,(unsigned)s->nav_age_us,(double)s->pos_error_m);
     } else write_text(&w,"ENU position=n/a alignment=n/a\n");
-    if(s->have_position || s->utc_us) {
+    if(!compact && (s->have_position || s->utc_us)) {
         write_text(&w,"last_observation_UTC=");
         if(s->utc_us) write_text(&w,"%" PRIu64 "us absolute_uncert=%uus\n",s->utc_us,(unsigned)s->utc_uncert_us);
         else write_text(&w,"unknown absolute_uncert=n/a\n");
@@ -549,17 +558,24 @@ static void field_value(const tb_config *c,unsigned field,char *buf,size_t cap,i
     case 27: (void)snprintf(buf,cap,"%u",c->duration_ms); break;
     case 28: (void)snprintf(buf,cap,"%s",c->unit_map); break;
     case 29: (void)snprintf(buf,cap,"%u",c->origin_auto); break;
+    case 30: (void)snprintf(buf,cap,"%s",c->udp_bind); break;
+    case 31: (void)snprintf(buf,cap,"%u",c->udp_port); break;
+    case 32: (void)snprintf(buf,cap,"%u",c->udp_enabled); break;
     default: if(cap) buf[0]='\0'; break;
     }
 }
 static void render_editor(FILE *out,const editor *e,unsigned rows,unsigned columns)
 {
     writer w={out,columns,0,0};
-    unsigned i,first=e->selected>3 ? (unsigned)e->selected-3 : 0;
-    unsigned visible=rows>10 ? rows-10 : 4;
+    unsigned i,first;
+    unsigned visible=rows>10 ? rows-10 : 1;
     char value[2048];
     const char *display;
     if(visible>FIELD_COUNT) visible=FIELD_COUNT;
+    /* Keep the selected field visible even in short terminals. Up/Down and
+     * two-digit selection reach every appended setting without a fixed page. */
+    first=(unsigned)e->selected>3 ? (unsigned)e->selected-3 : 0;
+    if((unsigned)e->selected>=first+visible) first=(unsigned)e->selected-visible+1;
     if(first+visible>FIELD_COUNT) first=FIELD_COUNT-visible;
     write_text(&w,"[settings] Private draft. Active receiver remains unchanged.\n");
     write_text(&w,"%s%s\n",e->saved ? "SAVED - applies on restart. " : "",e->dirty ? "Unsaved draft edits." : "");

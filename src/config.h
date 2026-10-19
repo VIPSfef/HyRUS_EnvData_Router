@@ -14,6 +14,8 @@ typedef struct tb_config {
     unsigned target_system, target_component, system_time_uncert_us, duration_ms;
     unsigned origin_auto;
     double accel_bound_mps2;
+    char udp_bind[64];
+    unsigned udp_port, udp_enabled;
 } tb_config;
 
 /* Numeric parsing/formatting requires the C numeric locale. Errors never echo

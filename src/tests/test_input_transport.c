@@ -23,7 +23,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (argc != 3) return 2;
-    kind = !strcmp(argv[1], "serial") ? IT_SERIAL : IT_WEBSOCKET;
+    kind = !strcmp(argv[1], "serial") ? IT_SERIAL : (!strcmp(argv[1], "udp") || !strcmp(argv[1], "udp-idle")) ? IT_UDP : IT_WEBSOCKET;
     loops = !strcmp(argv[1], "ws-idle") ? 10 : 100;
     if (!it_open(&transport, kind, argv[2], 115200, 1500, 20)) {
         printf("OPENFAIL %s\n", it_error(&transport));
@@ -32,15 +32,18 @@ int main(int argc, char **argv) {
 #endif
         return 3;
     }
+    if(kind==IT_UDP) { loops=!strcmp(argv[1], "udp-idle") ? 10 : 1200; puts("READY"); fflush(stdout); }
     for (i = 0; i < loops; ++i) {
         n = it_read(&transport, data, sizeof data);
         if (n < 0) { printf("CLOSED %s\n", it_error(&transport)); break; }
+        if(kind==IT_UDP && !n && total) break;
         if (n) {
             int j;
             for (j = 0; j < n; ++j) printf("%02x", data[j]);
             total += n;
         }
     }
+    if(kind==IT_UDP) printf(" TX=%d",it_write(&transport,"never sent",10));
     it_close(&transport);
     printf(" TOTAL=%d\n", total);
     result = total ? 0 : 4;

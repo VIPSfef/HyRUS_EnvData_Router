@@ -22,7 +22,7 @@
 
 #define CFG_PATH_BYTES 4096
 #define CFG_LINE_BYTES 4096
-enum { URL, TOKEN, ENV_NAME, INPUT_MODE, SERIAL_PORT, WEBSOCKET_URL, UNIT_MAP,
+enum { URL, TOKEN, ENV_NAME, INPUT_MODE, SERIAL_PORT, WEBSOCKET_URL, UNIT_MAP, IPV4_LITERAL,
        REAL, UINT_VALUE, CFG_BOOL, BAUD_VALUE };
 typedef struct {
     const char *name;
@@ -62,7 +62,10 @@ static const cfg_field fields[] = {
     NUM_FIELD("accel_bound_mps2", REAL, accel_bound_mps2, 0, 1e6),
     NUM_FIELD("duration_ms", UINT_VALUE, duration_ms, 0, UINT32_MAX),
     STR_FIELD("unit_map", UNIT_MAP, unit_map),
-    NUM_FIELD("origin_auto", CFG_BOOL, origin_auto, 0, 1)
+    NUM_FIELD("origin_auto", CFG_BOOL, origin_auto, 0, 1),
+    STR_FIELD("udp_bind", IPV4_LITERAL, udp_bind),
+    NUM_FIELD("udp_port", UINT_VALUE, udp_port, 1, 65535),
+    NUM_FIELD("udp_enabled", CFG_BOOL, udp_enabled, 0, 1)
 };
 #define FIELD_COUNT (sizeof(fields) / sizeof(fields[0]))
 
@@ -145,6 +148,25 @@ static int url_valid(const char *url, int websocket)
 }
 
 
+/* Match canonical decimal IPv4 literals without DNS or ambiguous octal.
+ * Four octets cap this validation at 15 bytes and introduce no socket state. */
+static int ipv4_literal_valid(const char *address)
+{
+    const unsigned char *p = (const unsigned char *)address;
+    unsigned part;
+    for (part = 0; part < 4; ++part) {
+        unsigned octet = 0, digits = 0;
+        if (!digit(*p) || (*p == '0' && digit(p[1]))) return 0;
+        while (digit(*p)) {
+            if (++digits > 3) return 0;
+            octet = octet * 10 + (unsigned)(*p++ - '0');
+        }
+        if (octet > 255) return 0;
+        if (part == 3) return *p == '\0';
+        if (*p++ != '.') return 0;
+    }
+    return 0;
+}
 static int ascii_path_valid(const char *s)
 {
     const unsigned char *p = (const unsigned char *)s;
@@ -239,6 +261,7 @@ static int field_valid(const tb_config *c, const cfg_field *f)
         if (f->kind == INPUT_MODE) return !strcmp(p, "mavlink") || !strcmp(p, "csv");
         if (f->kind == SERIAL_PORT) return ascii_path_valid(p);
         if (f->kind == UNIT_MAP) return unit_map_valid(p);
+        if (f->kind == IPV4_LITERAL) return ipv4_literal_valid(p);
         return token_valid(p, f->kind == ENV_NAME);
     }
     if (f->kind == REAL) {
@@ -270,6 +293,9 @@ void cfg_defaults(tb_config *c)
     c->reconnect_ms = 1000;
     c->system_time_uncert_us = UINT32_MAX;
     c->accel_bound_mps2 = 10;
+    strcpy(c->udp_bind, "127.0.0.1");
+    c->udp_port = 14551;
+    c->udp_enabled = 1;
 }
 
 int cfg_set(tb_config *c, const char *key, const char *value, char *err, size_t cap)
