@@ -1,0 +1,11 @@
+module_name: shtc3
+parameters:
+- group: Sensors
+  definitions:
+    SENS_EN_SHTC3:
+      description:
+        short: SHTC3 temperature and hygrometer
+        long: Enables the SHTC3 driver on external I2C address 0x70.
+      type: boolean
+      default: 0
+      reboot_required: true

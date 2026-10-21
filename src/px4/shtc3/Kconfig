@@ -1,0 +1,5 @@
+menuconfig DRIVERS_HYGROMETER_SHTC3
+	bool "SHTC3 temperature and humidity sensor"
+	default n
+	---help---
+		Enable Sensirion SHTC3 on I2C address 0x70.

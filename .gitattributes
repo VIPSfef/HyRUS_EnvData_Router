@@ -13,3 +13,13 @@ CMakeLists.txt text eol=lf
 .gitignore text eol=lf
 *.cmake text eol=lf
 *.json text eol=lf
+
+# SHA256-verified PX4 overlay payloads must be byte-stable on Windows.
+*.cpp text eol=lf
+*.hpp text eol=lf
+*.yaml text eol=lf
+*.patch text eol=lf
+Kconfig text eol=lf
+
+# Unified-diff context intentionally begins with a space before tabs/blanks.
+*.patch whitespace=-blank-at-eol,-space-before-tab

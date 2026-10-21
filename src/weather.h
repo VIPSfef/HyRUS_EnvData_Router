@@ -18,8 +18,12 @@ enum { WEATHER_TEMPERATURE = 1, WEATHER_HUMIDITY = 2 };
  * p and v are local ENU meters and meters/second in a session-specific origin.
  * NaN measurement_variance/pos_error_m and UINT32_MAX time_uncert_us mean
  * unknown uncertainty. Variance describes a single measurement, not variation
- * between samples. sensor_id/instance identify a physical sensor within the
- * enclosing source system/component/session. quality bits above are reserved.
+ * between samples. sensor_id/instance identify a sensor within the enclosing
+ * source system/component/session when the wire supplies them; zero can mean
+ * unknown metadata and does not identify a chip. quality bits above are reserved.
+ * message_id identifies the actual wire protocol (8009 SENS_ATMOS, 12920
+ * HYGROMETER_SENSOR); 0 is unknown metadata for API callers. It is not a
+ * hardware identifier. Different wire protocols always form separate groups.
  * seq breaks ties; choose increasing, unique sequence numbers at the source. */
 typedef struct {
     uint64_t t_us;
@@ -27,10 +31,11 @@ typedef struct {
     double value, measurement_variance, p[3];
     float v[3], pos_error_m;
     uint8_t metric, sensor_instance, has_time, has_position;
+    uint32_t message_id;
 } weather_sample;
 
 typedef struct {
-    uint32_t sensor_id, n, raw_n, raw_dropped, time_known_n;
+    uint32_t sensor_id, message_id, n, raw_n, raw_dropped, time_known_n;
     uint64_t t_start_us, t_end_us;
     double mean, m2, min, max;
     weather_sample representative;
@@ -57,7 +62,7 @@ int weather_sample_valid(const weather_sample *sample);
  * full. The retained raw subset is the first WEATHER_CAPACITY arrivals. */
 int weather_batch_add(weather_batch *batch, const weather_sample *sample);
 /* Worker-side in-place heapsort, O(raw_n log raw_n + group_n log group_n).
- * Sort order is metric, sensor ID, instance, known time first, t_us, seq, value.
+ * Sort order is metric, wire message ID, sensor ID, instance, known time first, t_us, seq, value.
  * Call after final add, before serializing. An add invalidates preparation. */
 void weather_batch_prepare(weather_batch *batch);
 /* Whole JSON object with si_registry, host_window_ms (decimal string), counts,

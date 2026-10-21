@@ -33,7 +33,7 @@ void weather_batch_init(weather_batch *b, uint64_t host_window_ms) {
 static int sample_cmp(const weather_sample *a, const weather_sample *b) {
     unsigned i;
 #define CMP_FIELD(field) do { if (a->field < b->field) return -1; if (a->field > b->field) return 1; } while (0)
-    CMP_FIELD(metric); CMP_FIELD(sensor_id); CMP_FIELD(sensor_instance);
+    CMP_FIELD(metric); CMP_FIELD(message_id); CMP_FIELD(sensor_id); CMP_FIELD(sensor_instance);
     if (a->has_time != b->has_time) return a->has_time ? -1 : 1;
     if (a->has_time) { CMP_FIELD(t_us); }
     CMP_FIELD(seq); CMP_FIELD(value);
@@ -85,7 +85,7 @@ int weather_batch_add(weather_batch *b, const weather_sample *input) {
     if (!b || !weather_sample_valid(input) || b->n == UINT32_MAX) return 0;
     for (i = 0; i < b->group_n; ++i) {
         g = &b->group[i];
-        if (g->metric == input->metric && g->sensor_id == input->sensor_id &&
+        if (g->metric == input->metric && g->message_id == input->message_id && g->sensor_id == input->sensor_id &&
             g->sensor_instance == input->sensor_instance) break;
     }
     if (i == b->group_n && b->group_n == WEATHER_GROUP_CAPACITY) return 0;
@@ -96,7 +96,7 @@ int weather_batch_add(weather_batch *b, const weather_sample *input) {
     g = &b->group[i];
     if (i == b->group_n) {
         memset(g, 0, sizeof(*g));
-        g->metric = s.metric; g->sensor_id = s.sensor_id; g->sensor_instance = s.sensor_instance;
+        g->metric = s.metric; g->message_id = s.message_id; g->sensor_id = s.sensor_id; g->sensor_instance = s.sensor_instance;
         g->min = g->max = s.value;
         g->representative = s;
         ++b->group_n;
@@ -122,6 +122,7 @@ int weather_batch_add(weather_batch *b, const weather_sample *input) {
 
 static int group_cmp(const weather_group *a, const weather_group *b) {
     if (a->metric != b->metric) return a->metric < b->metric ? -1 : 1;
+    if (a->message_id != b->message_id) return a->message_id < b->message_id ? -1 : 1;
     if (a->sensor_id != b->sensor_id) return a->sensor_id < b->sensor_id ? -1 : 1;
     if (a->sensor_instance != b->sensor_instance) return a->sensor_instance < b->sensor_instance ? -1 : 1;
     return 0;
@@ -216,8 +217,8 @@ int weather_batch_json(const weather_batch *b, char *buf, size_t cap) {
             const weather_group *g = &b->group[i];
             int raw_comma = 0;
             if (g->metric != metric) continue;
-            put(&w, "%s{\"sensor_id\":%" PRIu32 ",\"sensor_instance\":%u,\"representative\":",
-                comma ? "," : "", g->sensor_id, (unsigned)g->sensor_instance);
+            put(&w, "%s{\"message_id\":%" PRIu32 ",\"sensor_id\":%" PRIu32 ",\"sensor_instance\":%u,\"representative\":",
+                comma ? "," : "", g->message_id, g->sensor_id, (unsigned)g->sensor_instance);
             comma = 1;
             sample_json(&w, &g->representative);
             put(&w, ",\"statistics\":{\"n\":%" PRIu32 ",\"mean\":%.17g,\"variance\":", g->n, g->mean);
@@ -229,7 +230,7 @@ int weather_batch_json(const weather_batch *b, char *buf, size_t cap) {
             put(&w, "},\"raw_n\":%" PRIu32 ",\"raw_dropped\":%" PRIu32 ",\"samples\":[", g->raw_n, g->raw_dropped);
             for (j = 0; j < b->raw_n; ++j) {
                 const weather_sample *s = &b->raw[j];
-                if (s->metric != g->metric || s->sensor_id != g->sensor_id || s->sensor_instance != g->sensor_instance) continue;
+                if (s->metric != g->metric || s->message_id != g->message_id || s->sensor_id != g->sensor_id || s->sensor_instance != g->sensor_instance) continue;
                 put(&w, "%s", raw_comma ? "," : ""); raw_comma = 1;
                 sample_json(&w, s);
             }

@@ -562,7 +562,7 @@ static int http_open(http *h, const tb_config *config) {
         h->route[n + c.dwExtraInfoLength] = 0;
     }
     h->flags = c.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
-    h->session = WinHttpOpen(L"mavlink_telemetry_data_router/0.7.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    h->session = WinHttpOpen(L"mavlink_telemetry_data_router/0.8.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                             WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!h->session) return 0;
     if (!WinHttpSetTimeouts(h->session, (int)config->connect_timeout_ms,

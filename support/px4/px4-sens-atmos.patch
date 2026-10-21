@@ -1,0 +1,281 @@
+diff --git a/ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink b/ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink
+index 0bd45d2beb..ebdff765f5 100644
+--- a/ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink
++++ b/ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink
+@@ -30,6 +30,9 @@ mavlink stream -r 10 -s OPTICAL_FLOW_RAD -u $udp_gcs_port_local
+ 
+ # API/Offboard link
+ mavlink start -x -u $udp_offboard_port_local -r 4000000 -f -m onboard -o $udp_offboard_port_remote $mavlink_network_interface_arg
++# Single atmospheric sensor on the existing API link; QGC remains separate.
++mavlink stream -u $udp_offboard_port_local -s HYGROMETER_SENSOR -r 0
++mavlink stream -u $udp_offboard_port_local -s SENS_ATMOS -r 10
+ 
+ # Onboard link to camera
+ mavlink start -x -u $udp_onboard_payload_port_local -r 4000 -f -m onboard -o $udp_onboard_payload_port_remote $mavlink_network_interface_arg
+diff --git a/src/examples/px4_mavlink_debug/px4_mavlink_debug.cpp b/src/examples/px4_mavlink_debug/px4_mavlink_debug.cpp
+index 97047f0748..6b35e1ffdb 100644
+--- a/src/examples/px4_mavlink_debug/px4_mavlink_debug.cpp
++++ b/src/examples/px4_mavlink_debug/px4_mavlink_debug.cpp
+@@ -39,10 +39,13 @@
+  */
+ 
+ #include <px4_platform_common/px4_config.h>
++#include <px4_platform_common/atomic.h>
+ #include <unistd.h>
+ #include <stdio.h>
+ #include <string.h>
+ #include <poll.h>
++#include <math.h>
++#include <stdlib.h>
+ 
+ #include <systemlib/err.h>
+ #include <drivers/drv_hrt.h>
+@@ -52,11 +55,103 @@
+ #include <uORB/topics/debug_value.h>
+ #include <uORB/topics/debug_vect.h>
+ #include <uORB/topics/debug_array.h>
++#include <uORB/topics/sensor_hygrometer.h>
+ 
+ extern "C" __EXPORT int px4_mavlink_debug_main(int argc, char *argv[]);
+ 
++#if defined(CONFIG_ARCH_BOARD_PX4_SITL)
++/** Explicit finite SITL test mode. Never overwrite a physical sensor or run twice. */
++static int run_hygrometer(int argc, char *argv[])
++{
++	constexpr unsigned sample_period_us = 100000; // 10 Hz
++	constexpr unsigned default_samples = 600; // one minute, opt-in only
++	constexpr unsigned max_samples = 36000; // at most one hour
++	constexpr float cycle_seconds = 60.f;
++	constexpr float two_pi = 6.2831853071795864769f;
++	static px4::atomic<bool> running{false};
++	unsigned samples = default_samples;
++
++	if (argc > 2) {
++		char *end = nullptr;
++		const long requested_samples = strtol(argv[2], &end, 10);
++
++		if (*argv[2] == '\0' || *end != '\0' || requested_samples < 1 || requested_samples > max_samples) {
++			PX4_ERR("hygrometer sample count must be 1..%u", max_samples);
++			return 1;
++		}
++
++		samples = static_cast<unsigned>(requested_samples);
++	}
++
++	bool expected = false;
++
++	if (!running.compare_exchange(&expected, true)) {
++		PX4_ERR("synthetic hygrometer is already running");
++		return 1;
++	}
++
++	sensor_hygrometer_s measurement{};
++	measurement.device_id = 0x7f000001u; // test identity, not transmitted by SENS_ATMOS
++	measurement.temperature = 20.f;
++	measurement.humidity = 40.f;
++	measurement.timestamp_sample = hrt_absolute_time();
++	measurement.timestamp = measurement.timestamp_sample;
++	int instance = 0;
++	orb_advert_t publisher = orb_advertise_multi(ORB_ID(sensor_hygrometer), &measurement, &instance);
++
++	if (!publisher || instance != 0) {
++		if (publisher) {
++			orb_unadvertise(publisher);
++		}
++
++		running.store(false);
++		PX4_ERR("hygrometer instance zero is unavailable");
++		return 1;
++	}
++
++	PX4_INFO("synthetic hygrometer 0: 10 Hz, %u samples", samples);
++	const uint64_t start = hrt_absolute_time();
++	uint64_t next_sample = start;
++
++	for (unsigned sample = 0; sample < samples; sample++) {
++		const uint64_t sample_time = hrt_absolute_time();
++		const float elapsed_seconds = (sample_time - start) * 1.e-6f;
++		const float signal = sinf(two_pi * elapsed_seconds / cycle_seconds);
++		measurement.timestamp_sample = sample_time;
++		measurement.temperature = 20.f + 2.f * signal;
++		measurement.humidity = 40.f + 5.f * signal;
++		measurement.timestamp = hrt_absolute_time();
++		orb_publish(ORB_ID(sensor_hygrometer), publisher, &measurement);
++		next_sample += sample_period_us;
++		const uint64_t now = hrt_absolute_time();
++
++		if (next_sample > now) {
++			px4_usleep(next_sample - now);
++
++		} else {
++			// Skip missed deadlines instead of sending catch-up bursts.
++			next_sample = now;
++		}
++	}
++
++	orb_unadvertise(publisher);
++	running.store(false);
++	PX4_INFO("synthetic hygrometer finished");
++	return 0;
++}
++#endif // CONFIG_ARCH_BOARD_PX4_SITL
++
+ int px4_mavlink_debug_main(int argc, char *argv[])
+ {
++	if (argc > 1 && strcmp(argv[1], "hygrometer") == 0) {
++#if defined(CONFIG_ARCH_BOARD_PX4_SITL)
++		return run_hygrometer(argc, argv);
++#else
++		PX4_ERR("synthetic hygrometer is SITL-only");
++		return 1;
++#endif
++	}
++
+ 	printf("Hello Debug!\n");
+ 
+ 	/* advertise named debug value */
+diff --git a/src/modules/mavlink/mavlink_messages.cpp b/src/modules/mavlink/mavlink_messages.cpp
+index aa01df6b31..eef28c335d 100644
+--- a/src/modules/mavlink/mavlink_messages.cpp
++++ b/src/modules/mavlink/mavlink_messages.cpp
+@@ -92,6 +92,9 @@
+ #include "streams/HIL_STATE_QUATERNION.hpp"
+ #include "streams/HOME_POSITION.hpp"
+ #include "streams/HYGROMETER_SENSOR.hpp"
++#if defined(MAVLINK_MSG_ID_SENS_ATMOS)
++#include "streams/SENS_ATMOS.hpp"
++#endif
+ #include "streams/LANDING_TARGET.hpp"
+ #include "streams/LOCAL_POSITION_NED.hpp"
+ #include "streams/MAG_CAL_REPORT.hpp"
+@@ -380,6 +383,9 @@ static constexpr StreamListItem streams_list[] = {
+ #if defined(HYGROMETER_SENSOR_HPP)
+ 	create_stream_list_item<MavlinkStreamHygrometerSensor>(),
+ #endif // HYGROMETER_SENSOR_HPP
++#if defined(SENS_ATMOS_HPP)
++	create_stream_list_item<MavlinkStreamSensAtmos>(),
++#endif // SENS_ATMOS_HPP
+ #if defined(SERVO_OUTPUT_RAW_HPP)
+ 	create_stream_list_item<MavlinkStreamServoOutputRaw<0> >(),
+ 	create_stream_list_item<MavlinkStreamServoOutputRaw<1> >(),
+diff --git a/src/modules/mavlink/streams/HYGROMETER_SENSOR.hpp b/src/modules/mavlink/streams/HYGROMETER_SENSOR.hpp
+index 9787f9dee2..d0f15565a1 100644
+--- a/src/modules/mavlink/streams/HYGROMETER_SENSOR.hpp
++++ b/src/modules/mavlink/streams/HYGROMETER_SENSOR.hpp
+@@ -70,7 +70,9 @@ private:
+ 				mavlink_hygrometer_sensor_t msg{};
+ 				msg.id          = i; // uint8_t Hygrometer ID
+ 				msg.temperature = roundf(sensor_hygrometer.temperature * 100.f); // degrees to centidegrees (int16_t)
+-				msg.humidity    = roundf(sensor_hygrometer.humidity);            // % (uint16_t)
++				// The MAVLink base field is centipercent, while uORB stores percent.
++				msg.humidity    = roundf(sensor_hygrometer.humidity * 100.f);
++
+ 
+ 				mavlink_msg_hygrometer_sensor_send_struct(_mavlink->get_channel(), &msg);
+ 
+diff --git a/boards/px4/sitl/default.px4board b/boards/px4/sitl/default.px4board
+--- a/boards/px4/sitl/default.px4board
++++ b/boards/px4/sitl/default.px4board
+@@ -90,4 +90,4 @@
+ CONFIG_EXAMPLES_PX4_SIMPLE_APP=y
+ CONFIG_EXAMPLES_WORK_ITEM=y
+ CONFIG_MODULES_SPACECRAFT=n
+-CONFIG_MAVLINK_DIALECT="development"
++CONFIG_MAVLINK_DIALECT="weather"
+diff --git a/src/modules/mavlink/streams/SENS_ATMOS.hpp b/src/modules/mavlink/streams/SENS_ATMOS.hpp
+new file mode 100644
+index 0000000000..53df4fa4ea
+--- /dev/null
++++ b/src/modules/mavlink/streams/SENS_ATMOS.hpp
+@@ -0,0 +1,91 @@
++/****************************************************************************
++ *
++ *   Copyright (c) 2021 PX4 Development Team. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in
++ *    the documentation and/or other materials provided with the
++ *    distribution.
++ * 3. Neither the name PX4 nor the names of its contributors may be
++ *    used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
++ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
++ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
++ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
++ * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ * POSSIBILITY OF SUCH DAMAGE.
++ *
++ ****************************************************************************/
++
++#ifndef SENS_ATMOS_HPP
++#define SENS_ATMOS_HPP
++
++#include <uORB/Subscription.hpp>
++#include <uORB/topics/sensor_hygrometer.h>
++#include <drivers/drv_hrt.h>
++
++/** One atmospheric sensor pair, using the unmodified official ASLUAV message. */
++class MavlinkStreamSensAtmos : public MavlinkStream
++{
++public:
++	static MavlinkStream *new_instance(Mavlink *mavlink) { return new MavlinkStreamSensAtmos(mavlink); }
++
++	static constexpr const char *get_name_static() { return "SENS_ATMOS"; }
++	static constexpr uint16_t get_id_static() { return MAVLINK_MSG_ID_SENS_ATMOS; }
++
++	const char *get_name() const override { return get_name_static(); }
++	uint16_t get_id() override { return get_id_static(); }
++
++	unsigned get_size() override
++	{
++		return _sensor_hygrometer_sub.advertised() ? MAVLINK_MSG_ID_SENS_ATMOS_LEN + MAVLINK_NUM_NON_PAYLOAD_BYTES : 0;
++	}
++
++private:
++	explicit MavlinkStreamSensAtmos(Mavlink *mavlink) : MavlinkStream(mavlink) {}
++
++	// SENS_ATMOS has no sensor ID: only instance zero may be sent on this component.
++	uORB::Subscription _sensor_hygrometer_sub{ORB_ID(sensor_hygrometer), 0};
++	static constexpr uint64_t MAX_SAMPLE_AGE_US = 1000000;
++
++	bool send() override
++	{
++		sensor_hygrometer_s sample{};
++
++		if (!_sensor_hygrometer_sub.update(&sample)) {
++			return false;
++		}
++
++		const uint64_t now = hrt_absolute_time();
++
++		if (sample.timestamp_sample == 0 || sample.timestamp_sample > now
++		    || now - sample.timestamp_sample > MAX_SAMPLE_AGE_US
++		    || !PX4_ISFINITE(sample.temperature) || sample.temperature < -273.15f
++		    || !PX4_ISFINITE(sample.humidity) || sample.humidity < 0.f || sample.humidity > 100.f) {
++			return false;
++		}
++
++		mavlink_sens_atmos_t msg{};
++		msg.timestamp = sample.timestamp_sample;
++		msg.TempAmbient = sample.temperature; // degC, no scale factor
++		msg.Humidity = sample.humidity; // percent RH, no scale factor
++		mavlink_msg_sens_atmos_send_struct(_mavlink->get_channel(), &msg);
++		return true;
++	}
++};
++
++#endif // SENS_ATMOS_HPP

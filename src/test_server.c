@@ -396,7 +396,7 @@ static int weather_body_record(const ts_json *j,unsigned record) {
     unsigned weather=field(j,record,"weather"),source=field(j,record,"source");
     unsigned measurements=field(j,weather,"measurements"),groups=0;
     uint64_t value,total_n,total_raw,total_dropped,sum_n=0,sum_raw=0,sum_dropped=0;
-    uint64_t ids[16]; unsigned instances[16],metrics[16];
+    uint64_t ids[16],messages[16]; unsigned instances[16],metrics[16];
     static const char *const names[]={"temperature","humidity"};
     if(!nonempty_string(j,field(j,record,"session")) ||
        !token_uint(j,field(j,record,"generation"),&value) ||
@@ -429,9 +429,10 @@ static int weather_body_record(const ts_json *j,unsigned record) {
         for(unsigned g=array+1;g<j->token[array].next;g=j->token[g].next) {
             unsigned stats=field(j,g,"statistics"),samples=field(j,g,"samples"),raw_count=0;
             unsigned rep=field(j,g,"representative");
-            uint64_t id,instance,n,raw,dropped,known,first=0,last=0;
+            uint64_t id,message_id,instance,n,raw,dropped,known,first=0,last=0;
             double mean,minimum,maximum,representative;
-            if(groups>=16 || !token_uint(j,field(j,g,"sensor_id"),&id) || id>UINT32_MAX ||
+            if(groups>=16 || !token_uint(j,field(j,g,"message_id"),&message_id) || message_id>UINT32_C(0x00ffffff) ||
+               !token_uint(j,field(j,g,"sensor_id"),&id) || id>UINT32_MAX ||
                !token_uint(j,field(j,g,"sensor_instance"),&instance) || instance>255 ||
                !weather_sample_record(j,rep,(int)metric) ||
                !token_uint(j,field(j,stats,"n"),&n) || !n || n>UINT32_MAX ||
@@ -451,8 +452,8 @@ static int weather_body_record(const ts_json *j,unsigned record) {
                    !token_u64_string(j,field(j,stats,"t_end_us"),&last) || first>last) return 0;
             } else if(!null_token(j,field(j,stats,"t_start_us")) || !null_token(j,field(j,stats,"t_end_us"))) return 0;
             for(unsigned previous=0;previous<groups;++previous)
-                if(ids[previous]==id && instances[previous]==instance && metrics[previous]==metric) return 0;
-            ids[groups]=id; instances[groups]=(unsigned)instance; metrics[groups++]=metric;
+                if(ids[previous]==id && messages[previous]==message_id && instances[previous]==instance && metrics[previous]==metric) return 0;
+            ids[groups]=id; messages[groups]=message_id; instances[groups]=(unsigned)instance; metrics[groups++]=metric;
             for(unsigned sample=samples+1;sample<j->token[samples].next;sample=j->token[sample].next) {
                 uint64_t timestamp;
                 if(++raw_count>128 || !weather_sample_record(j,sample,(int)metric)) return 0;
@@ -538,11 +539,12 @@ static void print_weather(unsigned record) {
         for(unsigned group=array+1;group<j->token[array].next;group=j->token[group].next) {
             unsigned rep=field(j,group,"representative"),stats=field(j,group,"statistics");
             unsigned position=field(j,rep,"position_m");
-            uint64_t id=0,instance=0,n=0,raw=0,dropped=0,t=0,uncertainty=0,quality=0;
+            uint64_t id=0,message_id=0,instance=0,n=0,raw=0,dropped=0,t=0,uncertainty=0,quality=0;
             double value=0,mean=0,variance=0; char variance_text[32],uncertainty_text[32];
             int have_t=token_u64_string(j,field(j,rep,"t_us"),&t);
             int have_variance=token_double(j,field(j,stats,"variance"),&variance);
             (void)token_uint(j,field(j,group,"sensor_id"),&id);
+            (void)token_uint(j,field(j,group,"message_id"),&message_id);
             (void)token_uint(j,field(j,group,"sensor_instance"),&instance);
             (void)token_uint(j,field(j,stats,"n"),&n);
             (void)token_uint(j,field(j,group,"raw_n"),&raw);
@@ -555,12 +557,12 @@ static void print_weather(unsigned record) {
             if(token_uint(j,field(j,rep,"time_uncertainty_us"),&uncertainty))
                 (void)snprintf(uncertainty_text,sizeof(uncertainty_text),"%" PRIu64 "us",uncertainty);
             else (void)snprintf(uncertainty_text,sizeof(uncertainty_text),"unknown");
-            log_line("#%" PRIu64 " %" PRIu64 ".%" PRIu64 " %s sensor=%" PRIu64 "/%" PRIu64 " value=%.6g%s",
-                     seq,sysid,compid,names[metric],id,instance,value,metric ? " RH fraction" : " K");
+            log_line("#%" PRIu64 " %" PRIu64 ".%" PRIu64 " %s msg=%" PRIu64 " sensor=%" PRIu64 "/%" PRIu64 " %.6g%s",
+                     seq,sysid,compid,names[metric],message_id,id,instance,value,metric ? " RH fraction" : " K");
             log_line("  n=%" PRIu64 " mean=%.6g variance=%s raw=%" PRIu64 " omitted=%" PRIu64,
                      n,mean,variance_text,raw,dropped);
             if(have_t) log_line("  boot_us=%" PRIu64 " dt=%s q=%08" PRIx64,t,uncertainty_text,quality);
-            else log_line("  acquisition time=unknown (standard 5-byte HYGROMETER)");
+            else log_line("  acquisition time=unknown (sender provided no usable timestamp)");
             if(!null_token(j,position)) {
                 double p[3]={0,0,0}; unsigned item=position+1;
                 for(unsigned k=0;k<3;++k) { (void)token_double(j,item,&p[k]); item=j->token[item].next; }

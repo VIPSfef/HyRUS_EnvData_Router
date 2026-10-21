@@ -1,0 +1,82 @@
+{
+  "format": 1,
+  "version": "0.8.0",
+  "package_root": "../..",
+  "profiles": [
+    "sitl",
+    "hardware"
+  ],
+  "repositories": {
+    "px4": {
+      "path": ".",
+      "commit": "ebf8b69c66fb30242bd9d6aa5f9ea9effcbe7e46"
+    },
+    "mavlink": {
+      "path": "src/modules/mavlink/mavlink",
+      "commit": "1b1e896aa3be0d591166e086e6b9d8613bd03716"
+    }
+  },
+  "patches": [
+    {
+      "repository": "px4",
+      "source": "support/px4/px4-sens-atmos.patch",
+      "sha256": "5d2a2ffd352f9cbd6c634f4f6d0fc97a8a23313d8bdac1f2df743ea74dc0b48d"
+    },
+    {
+      "repository": "mavlink",
+      "source": "support/px4/mavlink-weather-dialect.patch",
+      "sha256": "72400708161fdb5d9be3aed0baf1e85a36bbe8a44adde791f4ee49415604e21b"
+    },
+    {
+      "repository": "px4",
+      "source": "support/px4/px4-shtc3-registration.patch",
+      "sha256": "15c386f8acaf461f58f34cfe79d365c8523a91afb9c6fee929f076889b80d08d"
+    },
+    {
+      "repository": "px4",
+      "source": "support/px4/px4-shtc3-sitl-validation.patch",
+      "sha256": "1b30755bf52dd7427611c6d3dc72b2ccc1ee3cf82ef0a5fa28d7882970fc43ba",
+      "profiles": [
+        "sitl"
+      ]
+    }
+  ],
+  "overlays": [
+    {
+      "repository": "px4",
+      "source": "src/px4/shtc3/SHTC3.cpp",
+      "target": "src/drivers/hygrometer/shtc3/SHTC3.cpp",
+      "sha256": "6cec9d00c03d945677d15d2e048a1f5b3f1a5b62bd2bc87e5aa94ce73aba8c43"
+    },
+    {
+      "repository": "px4",
+      "source": "src/px4/shtc3/SHTC3.hpp",
+      "target": "src/drivers/hygrometer/shtc3/SHTC3.hpp",
+      "sha256": "1e0f1e8564736d6de6df3adfb0b8c98f03f82f9d6823939146818f774908a2b3"
+    },
+    {
+      "repository": "px4",
+      "source": "src/px4/shtc3/SHTC3Protocol.hpp",
+      "target": "src/drivers/hygrometer/shtc3/SHTC3Protocol.hpp",
+      "sha256": "24667dc91b36783cf4c3dff136245e7d0800cb12fbbb80e3f5c05d6a6b22ff67"
+    },
+    {
+      "repository": "px4",
+      "source": "src/px4/shtc3/CMakeLists.txt",
+      "target": "src/drivers/hygrometer/shtc3/CMakeLists.txt",
+      "sha256": "8580d967aae63a61d763194775f05f568fc85089ab78dacd3feb066fb71d803c"
+    },
+    {
+      "repository": "px4",
+      "source": "src/px4/shtc3/Kconfig",
+      "target": "src/drivers/hygrometer/shtc3/Kconfig",
+      "sha256": "838b33d8bc4f2ba6502b4efc376a4a74c158793d9800abbe844e039390ad0217"
+    },
+    {
+      "repository": "px4",
+      "source": "src/px4/shtc3/shtc3_params.yaml",
+      "target": "src/drivers/hygrometer/shtc3/shtc3_params.yaml",
+      "sha256": "4d0d171054b9ecfea3d973042573df55ee265c5b43c47c1fdce8dffbd3a74bb5"
+    }
+  ]
+}

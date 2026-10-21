@@ -63,6 +63,49 @@ static int grouping(void) {
     CHECK(strstr(json, "\"variance\":null") && !strstr(json, "unit"));
     return 1;
 }
+static int protocol_identity(void) {
+    weather_batch a, b;
+    weather_sample s[8];
+    unsigned i, gindex;
+    const uint32_t ids[2] = {8009,12920};
+    weather_batch_init(&a, 9000); weather_batch_init(&b, 9000);
+    for (i=0;i<8;++i) {
+        unsigned protocol=(i/2u)%2u, metric=i/4u;
+        s[i]=sample(metric ? WEATHER_HUMIDITY : WEATHER_TEMPERATURE,0,i+1,
+            metric ? (protocol ? 0.70 : 0.30)+(double)(i%2u)*0.02 : (protocol ? 305.0 : 295.0)+(double)(i%2u)*2.0);
+        s[i].message_id=ids[protocol];
+        if(protocol) s[i].has_time=s[i].has_position=0;
+        CHECK(weather_batch_add(&a,&s[i]));
+    }
+    for(i=8;i>0;--i) CHECK(weather_batch_add(&b,&s[i-1]));
+    CHECK(a.group_n==4 && a.n==8 && a.raw_n==8);
+    weather_batch_prepare(&a); weather_batch_prepare(&b);
+    CHECK(a.group[0].metric==WEATHER_TEMPERATURE && a.group[0].message_id==8009);
+    CHECK(a.group[1].metric==WEATHER_TEMPERATURE && a.group[1].message_id==12920);
+    CHECK(a.group[2].metric==WEATHER_HUMIDITY && a.group[2].message_id==8009);
+    CHECK(a.group[3].metric==WEATHER_HUMIDITY && a.group[3].message_id==12920);
+    CHECK(a.group[0].mean==296.0 && a.group[1].mean==306.0);
+    CHECK(fabs(a.group[2].mean-0.31)<1e-12 && fabs(a.group[3].mean-0.71)<1e-12);
+    for(gindex=0;gindex<4;++gindex) {
+        const weather_group *g=&a.group[gindex];
+        unsigned matching=0;
+        CHECK(g->n==2 && g->raw_n==2 && !g->raw_dropped);
+        CHECK(g->representative.message_id==g->message_id);
+        CHECK(g->representative.value==b.group[gindex].representative.value);
+        CHECK(g->time_known_n==(g->message_id==8009 ? 2u : 0u));
+        for(i=0;i<a.raw_n;++i) if(a.raw[i].metric==g->metric && a.raw[i].message_id==g->message_id) ++matching;
+        CHECK(matching==2);
+    }
+    for(i=0;i<8;++i) CHECK(a.raw[i].seq==b.raw[i].seq && a.raw[i].message_id==b.raw[i].message_id);
+    CHECK(weather_batch_json(&a,json,sizeof(json))>0);
+    { const char *at=json; unsigned count=0;
+      while((at=strstr(at,"\"message_id\":"))!=NULL) { ++count; at+=13; }
+      CHECK(count==4); /* group metadata is emitted once, not repeated per raw sample */
+    }
+    CHECK(strstr(json,"\"message_id\":8009,\"sensor_id\":0,\"sensor_instance\":0"));
+    CHECK(strstr(json,"\"message_id\":12920,\"sensor_id\":0,\"sensor_instance\":0"));
+    return 1;
+}
 static int missing_time(void) {
     weather_batch b;
     weather_sample s = sample(WEATHER_TEMPERATURE, 3, 1, 300.0);
@@ -204,7 +247,7 @@ static int cost(void) {
     return 1;
 }
 int main(void) {
-    if (!grouping() || !missing_time() || !representative() || !storage_and_numerics() || !limits() || !serialization() || !cost()) return 1;
+    if (!grouping() || !protocol_identity() || !missing_time() || !representative() || !storage_and_numerics() || !limits() || !serialization() || !cost()) return 1;
     printf("weather: %u checks passed\n", checks);
     return 0;
 }

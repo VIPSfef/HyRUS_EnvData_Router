@@ -1,4 +1,4 @@
-# 기술 참조 — mavlink_telemetry_data_router 0.7.0
+# 기술 참조 — mavlink_telemetry_data_router 0.8.0
 
 처음 실행할 때는 [README](../README.md)를 읽는다. 이 문서의 명령은 저장소 루트 기준이다. 기본 입력은 바이너리 MAVLink이고, CSV는 명시적인 개발용 재생 모드다.
 
@@ -58,23 +58,33 @@ UDP를 제외한 설정 포트와 WebSocket에는 연결 후, 자동 검색 포�
 
 토큰은 환경변수에 둔다. URL query는 화면에서 숨기지만 설정 파일에는 원문으로 저장된다. URL userinfo와 fragment는 거부한다. Windows timeout은 WinHTTP 단계별이며 Linux 총 HTTP timeout은 connect+2×io로 적용한다. DNS/TLS/OS까지 포함한 하드 실시간 상한을 뜻하지 않는다.
 
-## HYGROMETER_SENSOR와 SI 관측 구조
+## SENS_ATMOS·HYGROMETER_SENSOR와 SI 관측 구조
 
-공식 common 메시지 `HYGROMETER_SENSOR`(12920, CRC_EXTRA 20)의 기본 본문은 5 B이다. 필드 선언 순서와 wire 순서는 다르며 wire offset은 온도 int16(0), 습도 uint16(2), 센서 instance uint8(4)이다. 온도는 0.01°C, 상대습도는 0.01%이므로 수집기에 들어온 정수 `T`, `H`를 다음 식으로 변환한다.
+측정시각이 필요한 단일 온습도 입력에는 공식 ASLUAV dialect의 `SENS_ATMOS`를 사용한다. common.xml 메시지는 아니지만 공개된 공식 MAVLink 정의이며 사설 확장이 아니다. 기본 본문16 B, CRC_EXTRA144, 메시지 ID8009이므로 MAVLink2가 필요하다. unsigned 패킷은 최대28 B(헤더10+본문16+CRC2)이며 끝0바이트는 생략될 수 있다.
+
+| wire offset | 공식 필드 | 형식·단위 |
+|---|---|---|
+| 0 | timestamp | uint64, 부팅 기준 µs |
+| 8 | TempAmbient | float32, °C |
+| 12 | Humidity | float32, 상대습도 % |
+
+수집기는 다음 식으로 SI 값에 정규화한다. wire 상대습도65.20은65.20%이며6520이나0.6520을 보내는 규격이 아니다.
 
 ```text
-temperature_K = T * 0.01 + 273.15
-humidity_fraction = H * 0.0001
+temperature_K = TempAmbient + 273.15
+humidity_fraction = Humidity * 0.01
 variance_SI = scale^2 * variance_source
 ```
 
-예를 들어 2345와 6520은 각각 296.60 K(23.45°C), 0.6520(65.20%)이다. 이 값은 하나의 온습도 패킷에서 나왔지만 통계는 `(metric, sensor_id, sensor_instance)`별로 분리된다. source의 system/component/session과 ENU 원점은 바깥 전송 레코드에 속한다. 서로 다른 센서·소스·부팅 시계를 합치지 않는다.
+SENS_ATMOS에는 센서 ID·instance·품질·시각 오차·측정분산이 없다. 수집기의 논리 그룹 `sensor_id=0,sensor_instance=0`은 이 source의 단일 온습도 입력을 식별할 뿐 물리 센서 종류를 증명하지 않는다. source system/component/session과 ENU 원점은 바깥 전송 레코드로 구분한다. 측정시각은 같은 PX4 부팅 시계의 실제 앞뒤 항법 두 점 사이에서만 위치를 보간한다. timestamp의 µs 자료형을 근거로 시각 정확도1µs를 가정하지 않는다. 상대 시각 오차와 측정분산은 null이고, 이 때문에 시각 오차까지 합산한 위치 오차 추정도 null일 수 있다. 위치 자체를 보간할 수 없는 경우에도 관측값·시각·통계를 보존하고 위치를 null로 남긴다.
 
-`weather.h`의 `WEATHER_SI_REGISTRY=1`이 temperature→K, humidity→비율을 정의한다. 새 온습도 JSON은 단위 문자열을 매 표본마다 반복하지 않는다. 기존 key–value schema3의 `unit_map`은 단위 표시이며 값을 SI로 변환하는 설정이 아니다. 따라서 일반 압력·내부 온도 등 기존 경로의 단위까지 새 구조와 같다고 가정하지 않는다.
+같은 source가 HYGROMETER_SENSOR와 SENS_ATMOS를 함께 보내면 실제 wire의 message_id를 그룹 키에 포함해 서로 분리한다. 단위가 같다는 이유로 평균·원본을 합치지 않는다. 동일 물리 관측의 중복인지 확인할 식별자는 없으므로 시험 패치는 SENS_ATMOS 하나만 선택한다. 표준 메시지만으로 SENS_ATMOS에 없는 센서 ID를 복원하거나 같은 component의 여러 물리 센서를 자동 분리할 수 없다.
 
-공식 기본 메시지에는 측정시각·품질·측정 불확도·위치가 없다. 기본 메시지의 측정시각을 수신시각으로 치환하지 않는다. 원본 값과 통계는 보존하되 `t_us`, `position_m`, `velocity_mps`는 null이다. `sensor_id=0`은 device ID 미상이며 공식 `id`는 `sensor_instance`로 유지한다.
+공식 common 메시지 `HYGROMETER_SENSOR`(12920, CRC_EXTRA20)도 계속 지원한다. 기본 본문5 B의 wire 순서는 온도 int16(offset0,0.01°C), 습도 uint16(offset2,0.01%), 센서 instance uint8(offset4)이다. 정수 T,H는 `T*0.01+273.15` K, `H*0.0001` 비율로 변환한다. 예를 들어2345,6520은296.60 K와0.6520이다. 이 메시지는 측정시각이 없으므로 t_us/position_m/velocity_mps를 null로 남긴다. 수신시각이나 최근 위치를 측정 메타데이터로 대입하지 않는다. device ID도 미상이므로0이다.
 
-선택 PX4 패치는 기본 본문 뒤에 `time_boot_us:uint64`(offset5), `device_id:uint32`(13), `time_uncertainty_us:uint32`(17)를 추가한다. **이것은 공식 표준이 아닌 로컬 MAVLink 2 확장**이다. 최대21 B이며 끝 0바이트 생략을 허용한다. 확장 측정시각은 PX4 부팅 기준 µs, 0은 미상이고 상대 시각 불확도 UINT32_MAX는 미상이다. 같은 source의 실제 항법 두 점 사이에서만 위치를 보간한다. 항법을 얻지 못해도 원본 관측을 버리지 않고 위치를 null로 남긴다.
+v0.7.0의 HYGROMETER_SENSOR 사설 time/device/uncertainty 확장은 제거했다. 기본 필드 뒤 바이트는 알 수 없는 확장으로 무시하고 시각으로 해석하지 않는다. PX4 시험 패치도 공식 common.xml을 바꾸지 않는다. HYGROMETER_SENSOR의 습도 배율 교정은 해당 송신기의 문제를 해결하는 별도 사항이며, 표준 SENS_ATMOS의 float RH에는100배를 적용하지 않는다.
+
+`weather.h`의 `WEATHER_SI_REGISTRY=1`은 temperature→K, humidity→비율을 정의한다. 그룹 JSON은 단위 문자열을 매 표본마다 반복하지 않는다. 기존 key–value schema3의 unit_map은 단위 표시이며 값의 SI 변환 설정이 아니다. 일반 압력·내부 온도 등 기존 경로의 단위까지 새 구조와 같다고 가정하지 않는다. 물리 센서 드라이버가 내부 uORB에 발행한 값과 그 관측시각을 PX4 MAVLink stream이 공식 메시지로 보내는 구조이며, 가상 센서 예제는 물리 센서 드라이버를 대체하지 않는다.
 
 그룹 JSON의 구성은 다음과 같다. temperature/humidity 아래 센서 배열을 사용하며 필드 이름을 관측 종류의 별도 키로 등록하지 않는다.
 
@@ -84,8 +94,8 @@ weather: {
   host_window_ms: "collector monotonic window start",
   n, raw_n, raw_dropped,
   measurements: {
-    temperature: [{sensor_id, sensor_instance, representative, statistics, samples, raw_n, raw_dropped}],
-    humidity:    [{sensor_id, sensor_instance, representative, statistics, samples, raw_n, raw_dropped}]
+    temperature: [{message_id, sensor_id, sensor_instance, representative, statistics, samples, raw_n, raw_dropped}],
+    humidity:    [{message_id, sensor_id, sensor_instance, representative, statistics, samples, raw_n, raw_dropped}]
   }
 }
 ```
@@ -100,9 +110,13 @@ weather: {
 
 시험 모드 `--test-weather`는 `mavlink_weather_v1` envelope의 `records[]`에 `{seq,generation,session,source,frame,origin_wgs84,time_basis,host_time_basis,clock_model,weather}`를 넣는다. 순번·시각의 64비트 표현 규약은 각 schema를 따른다. 서버는 `(stream, session, seq)`로 중복 제거하고 요청 전체 검사·수락 뒤204로 답해야 한다. 실패·202·응답 단절에서는 동일 순번과 관측을 재전송한다. `--summary`는 기존 key–value 출력에 적용하며 온습도 원본을 생략하지 않는다.
 
-PX4의 정확한 기준 커밋·습도 배율 교정·XML 적용·재생성·가상 센서 명령은 [support/px4](../support/px4/README.md)에 있다. HYGROMETER_SENSOR는 온도와 상대습도를 재는 hygrometer의 센서 인스턴스를 전달하는 메시지다. 비행제어기 내부 barometer/IMU 온도를 주변 대기 온도로 간주하지 않는다. 표준에 다른 센서 메시지도 있지만 공통적인 측정시각·품질·이동 관측 통계를 모두 제공하는 한 가지 범용 기상 메시지가 되는 것은 아니다.
+PX4의 정확한 기준 커밋·ASLUAV 포함 빌드·가상 센서 명령은 [support/px4](../support/px4/README.md)에 있다. HYGROMETER_SENSOR는 온도와 상대습도를 재는 hygrometer의 센서 인스턴스를 전달하는 메시지다. 비행제어기 내부 barometer/IMU 온도를 주변 대기 온도로 간주하지 않는다. 표준에 다른 센서 메시지도 있지만 공통적인 측정시각·품질·이동 관측 통계를 모두 제공하는 한 가지 범용 기상 메시지가 되는 것은 아니다.
 
-공식 근거: [HYGROMETER_SENSOR](https://mavlink.io/en/messages/common.html#HYGROMETER_SENSOR), [MAVLink 2 확장과 CRC](https://mavlink.io/en/guide/serialization.html), [SI](https://www.bipm.org/en/publications/si-brochure).
+그룹 식별자는 `(metric,message_id,sensor_id,sensor_instance)`이고 message_id는 한 그룹에 한 번 기록한다. 샘플마다 반복하지 않으며 `8009`는SENS_ATMOS, `12920`은HYGROMETER_SENSOR다. API의0은출처메시지미상이고운용MAVLink해독기는실제ID를기록한다.
+
+센서의 동적응답은 시계동기화와 다른 오차다. 드라이버가 보고한 timestamp_sample은 읽기·변환 시각을 나타낼 수 있으며, 그 시각의 대기 물리량을 지연 없이 측정했다는 보장이 아니다. 1차응답 가정 `τ·dy/dt+y=x`에서 센서 지연으로 인한 공간 오차 규모는 대략 `|v|·τ`지만 설치조건에 따라 달라지는 추정이며 위치 보간의 보정값으로 자동 적용하지 않는다. 선택한 SHTC3의 제조사 공칭 습도응답은25°C·기류1 m/s 조건에서약8초이며 실제 외함·통풍·복사열은 별도 검증해야 한다. 현재 코드는 역필터·지연보정·물리 기상장 복원을 구현하지 않는다. [제조사 SHTC3 데이터시트](https://sensirion.com/media/documents/643F9C8E/63A5A436/Datasheet_SHTC3.pdf)
+
+공식 근거: [SENS_ATMOS](https://mavlink.io/en/messages/ASLUAV.html#SENS_ATMOS), [HYGROMETER_SENSOR](https://mavlink.io/en/messages/common.html#HYGROMETER_SENSOR), [MAVLink 직렬화와 CRC](https://mavlink.io/en/guide/serialization.html), [SI](https://www.bipm.org/en/publications/si-brochure).
 
 ## 키–값, 위치와 시각
 
@@ -119,6 +133,18 @@ GLOBAL_POSITION_INT의 boot-ms와 위치/속도를 사용한다. NED 속도는 E
 SYSTEM_TIME의 원시 boot/UTC 쌍은 raw_clock_anchor로 보존한다. 기본 오차 미상에서는 관측별 UTC를 만들지 않는다. 지정한 오차가 있으면 최근16anchor 중심화 OLS와 ±500ppm 필터, 마지막 anchor 뒤10초 외삽 한도로 UTC/오차를 추정한다. 추정오차는 입력 오차·RTT/2·잔차·드리프트 가정의 합이며 교정된 절대상한이나95%신뢰구간이 아니다.
 
 MAVLink 입력은200ms 제한 재정렬 뒤 시각순으로 처리한다. 수신 후200ms 대기는 재정렬만 끝내며 측정시각·좌표·원천 boot watermark를 만들어 내지 않는다. 너무 늦은 입력, 중복, 다른 컴포넌트 시계는 별도 거부 수로 표시한다. 32bit-ms wrap은 확장하고 큰 boot 후퇴는 새 epoch로 분리한다. 재연결·부트 재설정 시 미확인 이전 묶음의 ID·원점·시각은 바꾸지 않는다.
+
+## SHTC3 드라이버와 업스트림 오버레이
+
+SHTC3용 소프트웨어 모듈의 원본은 `src/px4/shtc3/`에 둔다. sensor_hygrometer uORB로 온도°C·상대습도%·드라이버 timestamp_sample을 발행하고 SENS_ATMOS stream이 이를 공식 wire 형식으로 보낸다. SHTC3의 I²C 주소0x70과 명령·CRC는 SHT3x0x44/0x45와 다르며 기존 SHT3x 지원만으로 SHTC3를 지원한다고 주장하지 않는다.
+
+공급은 칩 기준1.62..3.6 V, 3.3 V 연결을 전제로 한다. 제조사 조건에서 typical 정확도는±2%RH·±0.2°C이며 규정 범위·최대오차·설치조건은 데이터시트를 따라야 한다. 디지털 변환 완료 대기와 대기 변화에 대한 물리 응답은 다르다. normal 변환 최대12.1 ms를 기다리는 것은 습도 시정수8초를 보정하는 것이 아니다. 제품ID 확인은 센서 계열 확인이며 고유 일련번호나 실제 기상측정 정확도 인증으로 사용하지 않는다. [SHTC3 공식 사양](https://sensirion.com/media/documents/643F9C8E/63A5A436/Datasheet_SHTC3.pdf)
+
+정상 SHTC3 한 주기는 wake쓰기27·측정명령27·6바이트읽기63·sleep쓰기27로 약144 SCL clock이다(주소·ACK 포함, START/STOP·컨트롤러 지연 제외). 100 kHz 버스에서약1.44 ms/표본,10 Hz이면약1.44% 버스 점유이며400 kHz에서는약0.36%다. 약13 ms 변환 완료는 지연 스케줄로 기다리며 CPU를 계속 점유하지 않는다. 정상 상태 머신은 대략5회 호출/표본,50회/초이고 두 측정 CRC는총32 bit 반복과 값변환2회로 O(1)이다. 제품ID CRC는 시작·복구에서만 추가한다. I²C 전송·타임아웃·OS 스케줄링·재시도까지 포함한 실행시간 상한은 이 계산으로 보장하지 않는다.
+
+업스트림 유지보수는 수집기와 PX4를 같은 저장소로 합치는 대신 프로젝트 소유 모듈·최소 등록 패치·공식 ASLUAV wrapper를 별도로 관리한다. `support/px4/overlay-manifest.json`에 기준 PX4/MAVLink 커밋과 파일 SHA256을 고정하고, `apply_overlay.py` 기본 검사는 실제 PX4 파일을 쓰지 않는다. 전체 패치를 임시 파일 사본에 먼저 적용해 충돌을 확인한다. 명시적 `--apply`만 변경을 수행하며 새 파일 또는 정확히 같은 모듈 파일을 허용하고 내용이 다른 모듈은 거부한다. 파일 쓰기 오류에는 이미 쓴 파일을 복구한다. 강제 적용·자동 pull/reset·펌웨어 업로드는 하지 않는다.
+
+새 PX4 버전은 별도 체크아웃에서 `--check --allow-other-revision`으로 문맥 호환성을 검토한다. 이 플래그는 기준 버전과 다름을 명시적으로 허용할 뿐 빌드·동작 호환성을 보증하지 않는다. 검사 후 실제 대상 빌드와 fake-bus 회귀 검사, 실물 시험을 다시 수행한 다음 manifest 기준을 갱신한다. 업스트림 변경으로 패치 문맥이 달라지면 중단하고 해당 작은 등록 패치를 검토해 갱신한다. 사용자가 수정한 기존 모듈을 도구로 덮어쓰지 않는다.
 
 ## 혼합 관측의 전송 묶음
 

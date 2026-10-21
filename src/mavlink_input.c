@@ -40,7 +40,10 @@ static uint16_t checksum(const uint8_t *p, size_t n, uint8_t extra)
 }
 static const mi_message_info *message_info(uint32_t id)
 {
+    /* Official ASLUAV.xml SENS_ATMOS; keep the generated common table intact. */
+    static const mi_message_info sens_atmos = {8009, 144, 16, 16};
     size_t lo = 0, hi = sizeof(mi_common) / sizeof(mi_common[0]);
+    if(id == sens_atmos.id) return &sens_atmos;
     while (lo < hi) {
         size_t m = lo + (hi - lo) / 2;
         if (mi_common[m].id == id) return mi_common + m;
@@ -249,24 +252,35 @@ static void emit_weather(mi_input *m, const weather_sample *sample)
     ++m->report.observations;
     if(m->emit) m->emit(m->context,&e);
 }
-static void weather_observation(mi_input *m,const uint8_t *p,unsigned length,uint64_t now)
+/* Official wire schemas only. Unknown HYG extension bytes are ignored.
+ * SENS_ATMOS has one timestamped temperature/humidity pair, no sensor ID or
+ * accuracy field. Its logical sensor is instance 0; message_id keeps it apart
+ * from HYG instances if a source explicitly streams both representations. */
+static void weather_observation(mi_input *m,const uint8_t *p,uint32_t id,uint64_t now)
 {
     weather_sample s; uint64_t stamp=0; unsigned metric;
-    if(u16(p+2)>10000 || (double)i16(p)*.01 < -273.15) { ++m->report.invalid_value; return; }
-    if(m->weather_seq>UINT32_MAX-2u) reset_clock(m);
-    memset(&s,0,sizeof(s)); s.sensor_instance=p[4];
-    s.sensor_id=length>13 ? u32(p+13) : 0;
-    s.measurement_variance=NAN; s.pos_error_m=NAN;
-    s.time_uncert_us=length>17 ? u32(p+17) : UINT32_MAX;
-    s.quality=MI_QUALITY_CLOCK_UNSIGNED;
-    /* Standard 5-byte packet has NO acquisition timestamp. Local MAVLink2
-     * extensions append boot-us/device/uncertainty without changing CRC20. */
-    if(length>5 && u64(p+5) && boot_usec(m,u64(p+5),&stamp)) {
-        s.has_time=1; s.t_us=stamp;
+    double temperature,humidity;
+    if(id==8009) {
+        temperature=(double)f32(p+8); humidity=(double)f32(p+12);
+        stamp=u64(p);
+    } else {
+        temperature=(double)i16(p)*.01; humidity=(double)u16(p+2)*.01;
     }
+    if(!isfinite(temperature) || temperature < -273.15 ||
+       !isfinite(humidity) || humidity < 0 || humidity > 100) {
+        ++m->report.invalid_value; return;
+    }
+    /* A UNIX time cannot be joined to the FC boot clock by guessing. */
+    if(stamp>=MI_UNIX_MIN_US) { ++m->report.no_clock; ++m->report.invalid_value; return; }
+    if(m->weather_seq>UINT32_MAX-2u) reset_clock(m);
+    memset(&s,0,sizeof(s)); s.message_id=id;
+    s.sensor_instance=id==12920 ? p[4] : 0;
+    s.measurement_variance=NAN; s.pos_error_m=NAN;
+    s.time_uncert_us=UINT32_MAX; s.quality=MI_QUALITY_CLOCK_UNSIGNED;
+    if(stamp && boot_usec(m,stamp,&stamp)) { s.has_time=1; s.t_us=stamp; }
     for(metric=WEATHER_TEMPERATURE;metric<=WEATHER_HUMIDITY;++metric) {
         s.metric=(uint8_t)metric;
-        s.value=metric==WEATHER_TEMPERATURE ? (double)i16(p)*.01+273.15 : (double)u16(p+2)*.0001;
+        s.value=metric==WEATHER_TEMPERATURE ? temperature+273.15 : humidity*.01;
         s.seq=++m->weather_seq;
         if(!s.has_time) emit_weather(m,&s);
         else if(m->weather_pending_count<WEATHER_CAPACITY) {
@@ -425,7 +439,7 @@ static void global_navigation(mi_input *m, const uint8_t *p, uint64_t now)
     add_nav(m, &nav);
 }
 static void packet(mi_input *m, uint32_t id, const uint8_t *p, uint8_t sysid,
-                   uint8_t compid, uint8_t sequence, unsigned length, uint64_t now)
+                   uint8_t compid, uint8_t sequence, uint64_t now)
 {
     mi_device *d = device(m, sysid, compid, now);
     uint64_t stamp;
@@ -456,11 +470,11 @@ static void packet(mi_input *m, uint32_t id, const uint8_t *p, uint8_t sysid,
     if (!m->report.selected_system || !m->report.selected_component ||
         m->report.selected_system != sysid) return;
     if (m->report.selected_component != compid) {
-        if (id == 251 || id == 252 || id == 29 || id == 137 || id == 143 || id == 105 || id == 12920)
+        if (id == 251 || id == 252 || id == 29 || id == 137 || id == 143 || id == 105 || id == 12920 || id == 8009)
             ++m->report.wrong_clock_component;
         return;
     }
-    if(id==12920) weather_observation(m,p,length,now);
+    if(id==12920 || id==8009) weather_observation(m,p,id,now);
     else if (id == 2) {
         uint64_t utc = u64(p);
         stamp = boot_ms(m, u32(p + 8));
@@ -556,7 +570,7 @@ static void parse(mi_input *m, uint64_t now)
         } else {
             memset(payload, 0, sizeof(payload)); memcpy(payload, m->frame + header, length);
             ++m->report.frames;
-            packet(m, id, payload, m->frame[v2 ? 5 : 3], m->frame[v2 ? 6 : 4], m->frame[v2 ? 4 : 2], (unsigned)length, now);
+            packet(m, id, payload, m->frame[v2 ? 5 : 3], m->frame[v2 ? 6 : 4], m->frame[v2 ? 4 : 2], now);
         }
         m->used -= total;
         if (m->used) memmove(m->frame, m->frame + total, m->used);

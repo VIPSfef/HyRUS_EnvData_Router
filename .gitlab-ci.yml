@@ -1,6 +1,6 @@
 # Native Linux and Windows x64 jobs; four application executables in build/.
 # Linux needs an x64 Docker executor. Windows is opt-in with Clang, Ninja,
-# Python and an initialized x64 Visual Studio SDK environment on PATH.
+# Python, Git and an initialized x64 Visual Studio SDK environment on PATH.
 # Build artifacts only; no deployment or release publishing.
 stages: [verify]
 
@@ -10,7 +10,7 @@ linux-x64:
   before_script:
     - test "$(uname -m)" = x86_64
     - apt-get update
-    - DEBIAN_FRONTEND=noninteractive apt-get install -y cmake ninja-build gcc libcurl4-openssl-dev:amd64 python3
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y cmake ninja-build gcc g++ git libcurl4-openssl-dev:amd64 python3
   script:
     - |
       cmake --preset linux-x64-tests -DCMAKE_C_COMPILER=gcc -DBUILD_TEST_SERVER=ON \
@@ -19,6 +19,10 @@ linux-x64:
         -DCURL_INCLUDE_DIR=/usr/include/x86_64-linux-gnu \
         -DCURL_LIBRARY=/usr/lib/x86_64-linux-gnu/libcurl.so
     - cmake --build --preset linux-x64-tests
+    - python3 support/px4/test_apply_overlay.py
+    - cmake -S src/px4/shtc3/tests -B build/shtc3-tests-linux -G Ninja -DCMAKE_CXX_COMPILER=g++
+    - cmake --build build/shtc3-tests-linux
+    - ctest --test-dir build/shtc3-tests-linux --output-on-failure
     - python3 src/tests/test_arch.py build/linux-x64/mavlink_telemetry_data_router_headless --arch x64
     - python3 src/tests/test_arch.py build/linux-x64/mavlink_telemetry_data_router_interactive --arch x64
     - ctest --preset linux-x64-tests
@@ -46,6 +50,10 @@ windows-x64:
   script:
     - cmake --preset windows-x64-tests -DCMAKE_C_COMPILER=clang-cl -DCMAKE_C_FLAGS=--target=x86_64-pc-windows-msvc -DBUILD_TEST_SERVER=ON
     - cmake --build --preset windows-x64-tests
+    - python support/px4/test_apply_overlay.py
+    - cmake -S src/px4/shtc3/tests -B build/shtc3-tests-windows -G Ninja -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_CXX_FLAGS=--target=x86_64-pc-windows-msvc
+    - cmake --build build/shtc3-tests-windows
+    - ctest --test-dir build/shtc3-tests-windows --output-on-failure
     - python src/tests/test_arch.py build/windows-x64/mavlink_telemetry_data_router_headless.exe --arch x64
     - python src/tests/test_arch.py build/windows-x64/mavlink_telemetry_data_router_interactive.exe --arch x64
     - ctest --preset windows-x64-tests
