@@ -319,6 +319,8 @@ Linux에서는 `windows`를 `linux`로 바꿉니다. 일반 프리셋으로 다�
 
 ## 상세 자료와 검증 범위
 
+**다른 PC에 소스와 문서를 가져가려면** 공유용 ZIP의 압축을 풀고 **`Start-Sync.cmd`를 두 번 클릭**하세요. 처음에는 가져오고, 이후에는 같은 작업 폴더를 업데이트합니다. 새 버전은 새 전달 폴더에 풀어 실행하면 됩니다. 압축 안의 `source\docs\SERVER_API.md`에서 API 문서를 바로 읽을 수도 있습니다. Git 설치와 실행 명령은 [다른 PC에서 가져오기](docs/COLLABORATION.md#zip-하나로-처음-가져오기와-업데이트하기)에 적었습니다.
+
 - [서버 개발자용 API](docs/SERVER_API.md): HTTP204·데이터 규격·중복 제거·거리 구간 revision·저장 절차
 - [OpenAPI·JSON Schema·합성 예제](docs/api/README.md): 서버 구현·구조 검사에 사용할 기계 판독 규격
 - [개발자 공유·다른 PC 업데이트](docs/COLLABORATION.md): private GitLab/GitHub, OneDrive Git bundle 사용법

@@ -1,10 +1,60 @@
 # 다른 PC에서 가져오기와 개발자 협업
 
-OneDrive로 받은 Git bundle을 사용하면 인터넷의 Git 서버에 접속하지 않고도 소스와 문서, 변경 이력을 가져올 수 있습니다. 처음에는 `git clone`으로 작업 폴더를 만들고, 이후에는 새 bundle을 받아 `git fetch`와 `git merge`로 갱신합니다.
+다른 PC에서는 전달받은 ZIP의 압축을 풀고 스크립트 하나를 실행하면 됩니다. 처음에는 소스와 문서, Git 변경 이력을 가져오고, 같은 PC에서 다시 실행하면 새 버전으로 업데이트합니다. Git 서버에 접속할 필요는 없습니다.
 
-아래 Windows 명령은 **PowerShell**에서 실행하세요. 각 단계에서 오류가 나면 다음 단계로 넘어가지 말고 오류 내용을 확인하세요. Git이 설치되어 있어야 하며, `git --version`으로 확인할 수 있습니다.
+## ZIP 하나로 처음 가져오기와 업데이트하기
 
-## OneDrive로 받은 bundle 사용하기
+공유용 ZIP의 이름은 `mavlink-router-handoff-커밋번호.zip`이며, 발행 PC의 `build\sharing` 폴더에 있습니다. 실행 파일 배포물이 아니라 소스·문서를 Git으로 가져오는 데 필요한 자료를 한데 모은 파일입니다.
+
+Windows에 **Git for Windows**가 설치되어 있어야 합니다. PowerShell에서 `git --version`을 실행했을 때 버전이 나오면 준비된 것입니다. 받는 PC에는 Git과 Windows PowerShell만 있으면 되며 Python은 필요하지 않습니다. Git 설치 프로그램은 ZIP에 포함하지 않으며, 스크립트가 자동으로 내려받거나 설치하지도 않습니다. Git이 없다면 [공식 다운로드 페이지](https://git-scm.com/downloads/win)에서 먼저 설치하세요.
+
+1. 전달받은 공유용 ZIP을 `다운로드\mavlink-router-share`처럼 **자료를 전달받을 폴더**에 풉니다. 기존 소스 작업 폴더에 풀지 마세요.
+2. 압축을 푼 폴더 안에 `Start-Sync.cmd`, `Sync-MavlinkRouter.ps1`, `LATEST.json`, `.bundle` 파일이 함께 있는지 확인합니다.
+3. **`Start-Sync.cmd`를 두 번 클릭합니다.** 처음 가져오기인지 업데이트인지 스크립트가 알아서 판단합니다. 완료되거나 오류가 나면 창에 결과가 표시되고, 확인할 때까지 창이 유지됩니다.
+
+PowerShell에서 직접 실행하고 싶다면 압축을 푼 폴더에서 아래 명령을 사용해도 됩니다.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Sync-MavlinkRouter.ps1
+```
+
+압축을 풀었을 때의 `source` 폴더에는 소스와 문서가 모두 들어 있습니다. 스크립트를 실행하기 전에도 `source\docs\SERVER_API.md`를 열어 서버 API를 읽을 수 있습니다. 문서끼리의 링크도 그대로 사용할 수 있습니다.
+
+처음 실행하면 기본적으로 **`C:\Users\사용자이름\dev\mavlink_telemetry_data_router`**에 Git 작업 폴더를 만듭니다. 정확한 기본값은 `%USERPROFILE%\dev\mavlink_telemetry_data_router`입니다. 완료되면 그 폴더의 `README.md`와 `docs\SERVER_API.md`를 열어 보세요. 소스를 빌드하거나 수집 프로그램을 실행하는 작업은 별도로 해야 합니다.
+
+명령의 `ExecutionPolicy Bypass`는 이번에 실행한 PowerShell 프로세스에만 적용됩니다. PC의 실행 정책 설정을 영구적으로 바꾸지 않습니다.
+
+**다음 버전을 받을 때도 같은 방법으로 실행합니다.** 새 공유용 ZIP을 받아 새 전달 폴더에 풀고 그 안의 `Start-Sync.cmd`를 두 번 클릭하세요. ZIP을 푼 폴더가 달라도 기본 작업 폴더는 같으므로, 스크립트가 기존 Git 작업 폴더를 찾아 새 커밋만 적용합니다. PowerShell을 사용한다면 새 전달 폴더에서 앞의 명령을 실행합니다. ZIP은 만들 당시의 사본이므로, 예전 ZIP의 스크립트를 반복 실행하는 것만으로 아직 전달받지 않은 새 버전까지 가져오지는 못합니다.
+
+작업 폴더를 바꾸고 싶다면 처음부터 `-Destination`으로 지정하세요. 이후 업데이트할 때도 같은 경로를 사용합니다.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Sync-MavlinkRouter.ps1 -Destination 'D:\dev\mavlink_telemetry_data_router'
+```
+
+### OneDrive 공유 폴더를 계속 읽게 하려면
+
+발행자가 OneDrive의 공유 폴더를 계속 갱신한다면 ZIP을 매번 받을 필요 없이 그 폴더를 지정할 수도 있습니다. OneDrive 동기화와 파일 내려받기가 끝난 뒤 실행하세요. 다음 경로는 이 프로젝트의 예시이므로 이 PC의 실제 공유 폴더로 바꿉니다.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Sync-MavlinkRouter.ps1 -SharedDirectory 'C:\Users\사용자이름\OneDrive\문서\New project 3\mavlink-server-transfer\build\sharing'
+```
+
+`-SharedDirectory`를 생략하면 스크립트가 들어 있는 폴더를 읽습니다. 그곳의 `LATEST.json`에서 최신 bundle과 해시를 확인하고, bundle을 `%LOCALAPPDATA%\mavlink-router\bundles`로 복사한 뒤 Git으로 처리합니다. 로컬 사본의 위치도 바꾸려면 `-CacheDirectory 'D:\cache\mavlink-router'`를 추가하세요. 이 옵션은 소스 작업 폴더의 위치를 바꾸지 않습니다.
+
+전달 폴더와 소스 작업 폴더는 서로 다른 폴더로 두세요. 소스를 수정하는 작업 폴더는 OneDrive 밖에 두는 것을 권장합니다. 스크립트의 원본은 [support/sharing/Sync-MavlinkRouter.ps1](../support/sharing/Sync-MavlinkRouter.ps1)입니다.
+
+### 업데이트가 멈추면
+
+스크립트는 수정하거나 새로 만든 파일이 남아 있거나, 현재 브랜치가 `main`이 아니거나, 로컬에 별도 커밋이 있어 받은 버전으로 곧바로 이어질 수 없으면 멈춥니다. Git 저장소가 아닌 기존 폴더, 다른 프로젝트의 이력, 파일 해시 불일치도 오류로 알려 줍니다.
+
+이때 화면에 나온 이유를 확인하세요. 수정한 작업은 개발자와 함께 커밋하거나 별도로 보관한 뒤 다시 실행하면 됩니다. 스크립트가 작업을 자동으로 지우거나 숨기거나, 강제로 덮어쓰지는 않습니다. 다른 프로젝트가 들어 있는 폴더라면 `-Destination`으로 새 경로를 지정하세요.
+
+## 직접 명령을 실행하는 방법 — 고급 참고
+
+자동 스크립트를 사용한다면 이 절의 명령을 따로 실행할 필요는 없습니다. Git이 어떤 순서로 동작하는지 확인하거나 수동으로 처리하고 싶을 때 참고하세요. 아래 Windows 명령은 **PowerShell** 기준이며, 오류가 나면 다음 단계로 넘어가지 말고 내용을 확인합니다.
+
+### OneDrive로 받은 bundle 준비하기
 
 OneDrive는 bundle을 전달하는 용도로 사용합니다. 실제 작업 폴더는 `C:\dev\mavlink_telemetry_data_router`처럼 OneDrive 밖에 두세요. 같은 `.git` 폴더를 여러 PC가 동시에 동기화하며 수정하면 각 PC의 작업과 Git 내부 파일이 충돌할 수 있습니다.
 
@@ -12,6 +62,8 @@ OneDrive는 bundle을 전달하는 용도로 사용합니다. 실제 작업 폴�
 
 | 파일 | 용도 |
 |---|---|
+| `Start-Sync.cmd` | 두 번 클릭해서 자동 가져오기·업데이트를 시작합니다. |
+| `Sync-MavlinkRouter.ps1` | 처음 가져오기와 이후 업데이트를 한 번에 처리하는 스크립트입니다. |
 | `LATEST.json` | 가장 최근에 공유한 bundle의 이름, 커밋 번호, SHA256을 알려 줍니다. |
 | `mavlink-router-커밋번호.bundle` | 소스·문서와 `main`의 전체 변경 이력을 담습니다. Git으로 가져올 때 사용합니다. |
 | `mavlink-router-source-커밋번호.zip` | 해당 커밋의 소스와 문서를 읽기 편하게 묶은 파일입니다. Git 이력은 들어 있지 않습니다. |
@@ -201,6 +253,18 @@ git push -u origin feature/describe-the-change
 그런 다음 GitHub에서는 PR, GitLab에서는 MR을 만들어 검토를 요청합니다. 변경 이유와 바뀐 동작, 검사 결과, API 호환성에 미치는 영향을 적으면 검토자가 이해하기 쉽습니다. [GitHub PR](https://docs.github.com/en/pull-requests/reference/pull-requests), [GitLab MR](https://docs.gitlab.com/user/project/merge_requests/)
 
 ## 새 bundle을 발행하는 사람의 작업
+
+발행 PC에서는 프로젝트 폴더에서 다음 도구를 실행하는 방법을 권장합니다. 소스와 문서를 검토하고 `main`에 커밋한 뒤 실행하세요. 이 발행 도구에는 Python이 필요하지만, ZIP을 받는 PC에는 필요하지 않습니다.
+
+```powershell
+python support/sharing/package_handoff.py
+```
+
+이 발행 명령은 Git과 Python 3.9 이상이 있는 원본 개발 PC에서 실행합니다. 받는 PC에는 Python이 필요하지 않습니다.
+
+도구는 커밋된 `main`을 기준으로 `build\sharing`에 전체 이력이 담긴 bundle, 단독 소스 ZIP, 공유용 handoff ZIP과 `LATEST.json`을 만듭니다. 받는 사람에게는 **`mavlink-router-handoff-커밋번호.zip` 하나**를 전달하면 됩니다. 이 ZIP의 루트에는 실행 스크립트·bundle·배포 목록·안내·검증용 해시가 있고, `source` 아래에는 소스와 문서 전체가 펼쳐져 있습니다.
+
+### 직접 발행하는 방법 — 고급 참고
 
 받는 PC의 명령이 최신 파일을 찾으려면 발행자가 `LATEST.json`도 함께 갱신해야 합니다. 소스 변경을 검토하고 `main`에 커밋한 다음, 아래 순서로 묶으세요. 전체 이력을 포함하므로 처음 받는 PC도 같은 bundle을 사용할 수 있습니다.
 

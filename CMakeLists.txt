@@ -33,6 +33,8 @@ install(FILES src/vendor/MAVLINK_COPYING.txt DESTINATION ${CMAKE_INSTALL_DOCDIR}
 install(FILES docs/REFERENCE.md docs/REVIEW.md docs/SERVER_API.md docs/COLLABORATION.md DESTINATION ${CMAKE_INSTALL_DOCDIR}/docs)
 install(DIRECTORY docs/api DESTINATION ${CMAKE_INSTALL_DOCDIR}/docs
   PATTERN "__pycache__" EXCLUDE PATTERN "*.pyc" EXCLUDE)
+install(DIRECTORY support/sharing DESTINATION ${CMAKE_INSTALL_DOCDIR}/support
+  PATTERN "__pycache__" EXCLUDE)
 install(DIRECTORY support/px4 DESTINATION ${CMAKE_INSTALL_DOCDIR}/support
   PATTERN "__pycache__" EXCLUDE)
 # Keep the PX4 overlay installer and its independent source payload together.
