@@ -23,8 +23,9 @@ ENV = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
            GIT_TERMINAL_PROMPT="0")
 
 
-def run(command, *, cwd=None):
-    return subprocess.run([str(part) for part in command], cwd=cwd, env=ENV,
+def run(command, *, cwd=None, environment=None):
+    return subprocess.run([str(part) for part in command], cwd=cwd,
+                          env=ENV if environment is None else environment,
                           capture_output=True, text=True, encoding="utf-8",
                           errors="replace", timeout=30)
 
@@ -96,11 +97,14 @@ class BundleSyncTests(unittest.TestCase):
         (self.shared / "LATEST.json").write_text(
             json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
 
-    def sync(self, expected=0, destination=None):
-        result = run([POWERSHELL, "-NoLogo", "-NoProfile", "-NonInteractive",
-                      "-ExecutionPolicy", "Bypass", "-File", SCRIPT,
-                      "-SharedDirectory", self.shared, "-Destination",
-                      destination or self.destination, "-CacheDirectory", self.cache])
+    def sync(self, expected=0, destination=None, script=None, default_shared=False):
+        command = [POWERSHELL, "-NoLogo", "-NoProfile", "-NonInteractive",
+                   "-ExecutionPolicy", "Bypass", "-File", script or SCRIPT,
+                   "-Destination", destination or self.destination,
+                   "-CacheDirectory", self.cache]
+        if not default_shared:
+            command.extend(["-SharedDirectory", self.shared])
+        result = run(command)
         self.assertEqual(result.returncode, expected,
                          "Unexpected helper result:\n" + result.stdout + result.stderr)
         return result
@@ -143,6 +147,32 @@ class BundleSyncTests(unittest.TestCase):
         self.assertEqual(git(self.destination, "rev-parse", "onedrive/main"), self.commit_b)
         self.assertEqual(git(self.destination, "rev-list", "--left-right", "--count",
                              "main...onedrive/main"), "0\t0")
+
+    def test_script_folder_is_default_shared_directory(self):
+        copied_script = self.shared / "Sync-MavlinkRouter.ps1"
+        shutil.copyfile(SCRIPT, copied_script)
+        self.sync(script=copied_script, default_shared=True)
+        self.assertEqual(git(self.destination, "rev-parse", "HEAD"), self.commit_a)
+        self.sync(script=copied_script, default_shared=True)
+        self.publish("b")
+        self.sync(script=copied_script, default_shared=True)
+        self.assertEqual(git(self.destination, "rev-parse", "HEAD"), self.commit_b)
+        self.assertEqual(git(self.destination, "rev-parse", "onedrive/main"), self.commit_b)
+        self.assertEqual(git(self.destination, "status", "--porcelain"), "")
+        # Zero-argument launch must also honor a separate user home/cache. Only
+        # this child process receives these paths; no actual user folder is used.
+        fake_home = self.case / "isolated user home"
+        fake_local = self.case / "isolated local appdata"
+        fake_home.mkdir()
+        fake_local.mkdir()
+        environment = dict(ENV, USERPROFILE=str(fake_home), LOCALAPPDATA=str(fake_local))
+        result = run([POWERSHELL, "-NoLogo", "-NoProfile", "-NonInteractive",
+                      "-ExecutionPolicy", "Bypass", "-File", copied_script],
+                     environment=environment)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        default_destination = fake_home / "dev/mavlink_telemetry_data_router"
+        self.assertEqual(git(default_destination, "rev-parse", "HEAD"), self.commit_b)
+        self.assertTrue((fake_local / "mavlink-router/bundles").is_dir())
 
     def test_dirty_tracked_file_is_preserved(self):
         self.sync()

@@ -6,7 +6,7 @@
 
 공유용 ZIP의 이름은 `mavlink-router-handoff-커밋번호.zip`이며, 발행 PC의 `build\sharing` 폴더에 있습니다. 실행 파일 배포물이 아니라 소스·문서를 Git으로 가져오는 데 필요한 자료를 한데 모은 파일입니다.
 
-Windows에 **Git for Windows**가 설치되어 있어야 합니다. PowerShell에서 `git --version`을 실행했을 때 버전이 나오면 준비된 것입니다. 받는 PC에는 Git과 Windows PowerShell만 있으면 되며 Python은 필요하지 않습니다. Git 설치 프로그램은 ZIP에 포함하지 않으며, 스크립트가 자동으로 내려받거나 설치하지도 않습니다. Git이 없다면 [공식 다운로드 페이지](https://git-scm.com/downloads/win)에서 먼저 설치하세요.
+Windows에 **Git for Windows**가 설치되어 있어야 합니다. PowerShell에서 `git --version`을 실행했을 때 버전이 나오면 준비된 것입니다. 받는 PC에는 Git과 Windows PowerShell만 있으면 되며 Python은 필요하지 않습니다. Git 설치 프로그램은 ZIP에 포함하지 않으며, 스크립트가 자동으로 내려받거나 설치하지도 않습니다. Git이 없다면 [공식 다운로드 페이지](https://git-scm.com/install/windows)에서 먼저 설치하세요.
 
 1. 전달받은 공유용 ZIP을 `다운로드\mavlink-router-share`처럼 **자료를 전달받을 폴더**에 풉니다. 기존 소스 작업 폴더에 풀지 마세요.
 2. 압축을 푼 폴더 안에 `Start-Sync.cmd`, `Sync-MavlinkRouter.ps1`, `LATEST.json`, `.bundle` 파일이 함께 있는지 확인합니다.

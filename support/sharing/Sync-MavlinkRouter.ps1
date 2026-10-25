@@ -18,7 +18,7 @@ LATEST.json과 bundle이 있는 폴더입니다. 기본값은 이 스크립트�
 #>
 [CmdletBinding()]
 param(
-    [string]$SharedDirectory = $PSScriptRoot,
+    [string]$SharedDirectory = '',
     [string]$Destination = (Join-Path $env:USERPROFILE 'dev\mavlink_telemetry_data_router'),
     [string]$CacheDirectory = (Join-Path $env:LOCALAPPDATA 'mavlink-router\bundles')
 )
@@ -114,6 +114,14 @@ try {
         throw 'Git이 설치되어 있지 않거나 PATH에 없습니다. Git for Windows를 설치한 뒤 새 PowerShell 창에서 다시 실행하세요.'
     }
     $script:GitPath = $gitCommand.Source
+    # Windows PowerShell 5.1의 -File 실행에서는 매개변수 기본값을 평가할 때
+    # $PSScriptRoot가 아직 비어 있을 수 있으므로 본문에서 기본 경로를 정합니다.
+    if (-not $PSBoundParameters.ContainsKey('SharedDirectory')) {
+        $SharedDirectory = $PSScriptRoot
+        if ([string]::IsNullOrWhiteSpace($SharedDirectory)) {
+            $SharedDirectory = Split-Path -Parent $PSCommandPath
+        }
+    }
     $sharedPath = Get-FullDirectoryPath -Path $SharedDirectory -Label '공유 폴더'
     $destinationPath = Get-FullDirectoryPath -Path $Destination -Label '작업 폴더'
     $cachePath = Get-FullDirectoryPath -Path $CacheDirectory -Label '임시 보관 폴더'
