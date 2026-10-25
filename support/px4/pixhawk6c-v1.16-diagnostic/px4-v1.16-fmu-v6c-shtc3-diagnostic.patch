@@ -1,0 +1,32 @@
+diff --git a/boards/px4/fmu-v6c/default.px4board b/boards/px4/fmu-v6c/default.px4board
+index e6b812fffd..190fd43192 100644
+--- a/boards/px4/fmu-v6c/default.px4board
++++ b/boards/px4/fmu-v6c/default.px4board
+@@ -19,6 +19,7 @@ CONFIG_DRIVERS_DSHOT=y
+ CONFIG_DRIVERS_GNSS_SEPTENTRIO=y
+ CONFIG_DRIVERS_GPS=y
+ CONFIG_DRIVERS_HEATER=y
++CONFIG_DRIVERS_HYGROMETER_SHTC3=y
+ CONFIG_DRIVERS_IMU_BOSCH_BMI055=y
+ CONFIG_DRIVERS_IMU_BOSCH_BMI088=y
+ CONFIG_DRIVERS_IMU_INVENSENSE_ICM42688P=y
+@@ -86,6 +87,7 @@ CONFIG_SYSTEMCMDS_PERF=y
+ CONFIG_SYSTEMCMDS_REBOOT=y
+ CONFIG_SYSTEMCMDS_SD_BENCH=y
+ CONFIG_SYSTEMCMDS_SYSTEM_TIME=y
++CONFIG_SYSTEMCMDS_SHTC3_PROBE=y
+ CONFIG_SYSTEMCMDS_TOP=y
+ CONFIG_SYSTEMCMDS_TOPIC_LISTENER=y
+ CONFIG_SYSTEMCMDS_TUNE_CONTROL=y
+diff --git a/src/drivers/drv_sensor.h b/src/drivers/drv_sensor.h
+index 4560ed1f58..2e1af42bf2 100644
+--- a/src/drivers/drv_sensor.h
++++ b/src/drivers/drv_sensor.h
+@@ -218,6 +218,7 @@
+ #define DRV_TRNS_DEVTYPE_MXS 0xB0
+ 
+ #define DRV_HYGRO_DEVTYPE_SHT3X 0xB1
++#define DRV_HYGRO_DEVTYPE_SHTC3 0xB9 // local allocation; review against upstream when rebasing
+ 
+ #define DRV_FLOW_DEVTYPE_MAVLINK 0xB2
+ #define DRV_FLOW_DEVTYPE_PMW3901 0xB3

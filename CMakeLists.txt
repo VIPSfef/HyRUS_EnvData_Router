@@ -34,7 +34,7 @@ install(FILES docs/REFERENCE.md docs/REVIEW.md DESTINATION ${CMAKE_INSTALL_DOCDI
 install(DIRECTORY support/px4 DESTINATION ${CMAKE_INSTALL_DOCDIR}/support
   PATTERN "__pycache__" EXCLUDE)
 # Keep the PX4 overlay installer and its independent source payload together.
-install(DIRECTORY src/px4/shtc3 DESTINATION ${CMAKE_INSTALL_DOCDIR}/src/px4
+install(DIRECTORY src/px4/shtc3 src/px4/shtc3_probe DESTINATION ${CMAKE_INSTALL_DOCDIR}/src/px4
   PATTERN "__pycache__" EXCLUDE)
 install(FILES examples/example.csv DESTINATION ${CMAKE_INSTALL_DOCDIR}/examples)
 install(FILES config/telemetry.ini.example DESTINATION ${CMAKE_INSTALL_DOCDIR}/config)
