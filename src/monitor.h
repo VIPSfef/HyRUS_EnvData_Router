@@ -61,6 +61,10 @@ typedef struct {
     int have_geodetic, have_fix_age, have_position_error;
     double latitude_deg, longitude_deg, altitude_msl_m, estimated_error_m;
     uint64_t last_fix_age_ms;
+    int spatial_known;
+    double spatial_effective_m, spatial_distance_m;
+    uint64_t spatial_completed, spatial_unknown, spatial_dropped, spatial_undersampled;
+    uint32_t spatial_flags, spatial_open;
 } tm_snapshot;
 
 /* tm_snapshot stays below 64 KiB (enforced in monitor.c).

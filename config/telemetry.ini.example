@@ -58,3 +58,14 @@ udp_enabled=1
 # Token values stay in the environment named by token_env; only its NAME is saved.
 # Windows applies HTTP I/O timeouts per stage. Linux total HTTP timeout is
 # connect_timeout_ms + 2 * io_timeout_ms. Warning thresholds affect the monitor.
+
+# Horizontal path-distance summaries (SI metres); edits apply after restart.
+# 10 m is the target; adaptive mode may widen the effective spacing for load.
+# Bins cross 1-second send windows; one request can carry several bins.
+# Raw observations remain available. Gap limit prevents joining stale tracks.
+# step 0.01..10000 m; gap 100..60000 ms; enabled/adaptive 0/1.
+# adaptive=0 keeps fixed target spacing; adaptive=1 permits automatic coarsening.
+spatial_step_m=10.0
+spatial_gap_ms=2000
+spatial_enabled=1
+spatial_adaptive=1

@@ -238,6 +238,11 @@ static int position_provenance(void) {
     weather_sample s=sample(WEATHER_TEMPERATURE,1,1,300);
     weather_batch_init(&b,0);
     s.position_kind=WEATHER_POSITION_ESTGPS; s.estimation_age_us=2000000;
+    s.has_velocity=1; s.navigation_segment=7;
+    CHECK(weather_sample_json(&s,json,sizeof(json))>0);
+    CHECK(strstr(json,"\"quality\":268435456"));
+    CHECK(strstr(json,"\"velocity_valid\":true,\"navigation_segment\":7"));
+    CHECK(s.quality==0); /* Serializer normalizes its local copy only. */
     CHECK(weather_batch_add(&b,&s));
     CHECK(b.raw[0].quality & WEATHER_QUALITY_POSITION_ESTIMATED);
     CHECK(b.raw[0].estimation_age_us==2000000);
@@ -251,7 +256,7 @@ static int position_provenance(void) {
     CHECK(strstr(json,"\"position_source\":\"ESTGPS\",\"estimation_age_us\":2000000"));
     CHECK(strstr(json,"\"position_source\":\"GPS\",\"estimation_age_us\":0"));
     s.has_position=0; CHECK(!weather_sample_valid(&s));
-    s.position_kind=WEATHER_POSITION_UNKNOWN; ++s.seq; ++s.t_us;
+    s.position_kind=WEATHER_POSITION_UNKNOWN; s.has_velocity=0; ++s.seq; ++s.t_us;
     CHECK(weather_batch_add(&b,&s));
     CHECK(b.raw[2].estimation_age_us==UINT32_MAX);
     weather_batch_prepare(&b); CHECK(weather_batch_json(&b,json,sizeof(json))>0);

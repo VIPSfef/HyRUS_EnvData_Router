@@ -65,9 +65,15 @@ static const cfg_field fields[] = {
     NUM_FIELD("origin_auto", CFG_BOOL, origin_auto, 0, 1),
     STR_FIELD("udp_bind", IPV4_LITERAL, udp_bind),
     NUM_FIELD("udp_port", UINT_VALUE, udp_port, 1, 65535),
-    NUM_FIELD("udp_enabled", CFG_BOOL, udp_enabled, 0, 1)
+    NUM_FIELD("udp_enabled", CFG_BOOL, udp_enabled, 0, 1),
+    NUM_FIELD("spatial_step_m", REAL, spatial_step_m, 0.01, 10000),
+    NUM_FIELD("spatial_gap_ms", UINT_VALUE, spatial_gap_ms, 100, 60000),
+    NUM_FIELD("spatial_enabled", CFG_BOOL, spatial_enabled, 0, 1),
+    NUM_FIELD("spatial_adaptive", CFG_BOOL, spatial_adaptive, 0, 1)
 };
 #define FIELD_COUNT (sizeof(fields) / sizeof(fields[0]))
+/* cfg_load tracks duplicate fields in one fixed-width mask. */
+typedef char cfg_fields_fit_seen_mask[(FIELD_COUNT <= 64) ? 1 : -1];
 
 static int fail(char *err, size_t cap, const char *message)
 {
@@ -296,6 +302,10 @@ void cfg_defaults(tb_config *c)
     strcpy(c->udp_bind, "127.0.0.1");
     c->udp_port = 14540;
     c->udp_enabled = 1;
+    c->spatial_step_m = 10.0;
+    c->spatial_gap_ms = 2000;
+    c->spatial_enabled = 1;
+    c->spatial_adaptive = 1;
 }
 
 int cfg_set(tb_config *c, const char *key, const char *value, char *err, size_t cap)

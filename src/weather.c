@@ -16,6 +16,7 @@ int weather_sample_valid(const weather_sample *s) {
         !isfinite(s->value) || s->value < 0.0 || s->value > FLT_MAX ||
         (s->metric == WEATHER_HUMIDITY && s->value > 1.0) ||
         s->has_time > 1 || s->has_position > 1 ||
+        s->has_velocity > 1 || (s->has_velocity && !s->has_position) ||
         s->position_kind > WEATHER_POSITION_ESTGPS ||
         (!s->has_position && s->position_kind != WEATHER_POSITION_UNKNOWN) ||
         (s->has_position && !s->has_time) || !uncertainty_valid(s->measurement_variance)) return 0;
@@ -46,7 +47,7 @@ static int sample_cmp(const weather_sample *a, const weather_sample *b) {
             if (a->p[i] > b->p[i]) return 1;
         }
     }
-    CMP_FIELD(position_kind); CMP_FIELD(estimation_age_us);
+    CMP_FIELD(position_kind); CMP_FIELD(estimation_age_us); CMP_FIELD(has_velocity); CMP_FIELD(navigation_segment);
     CMP_FIELD(quality); CMP_FIELD(time_uncert_us);
 #undef CMP_FIELD
     return 0;
@@ -214,9 +215,27 @@ static void sample_json(writer *w, const weather_sample *s) {
     if(s->has_position && s->position_kind!=WEATHER_POSITION_UNKNOWN && s->estimation_age_us!=UINT32_MAX)
         put(w,"%" PRIu32,s->estimation_age_us);
     else put(w,"null");
+    put(w,",\"velocity_valid\":%s,\"navigation_segment\":%" PRIu32,
+        s->has_velocity ? "true" : "false",s->has_position ? s->navigation_segment : 0);
     put(w,"}");
 }
 
+int weather_sample_json(const weather_sample *s,char *buf,size_t cap) {
+    writer w={buf,0,cap,0};
+    weather_sample normalized;
+    if(!buf || !cap) return -1;
+    buf[0]='\0';
+    if(!weather_sample_valid(s)) return -1;
+    normalized=*s;
+    normalized.quality&=~(WEATHER_QUALITY_TIME_UNKNOWN|WEATHER_QUALITY_POSITION_UNKNOWN|WEATHER_QUALITY_POSITION_ESTIMATED);
+    if(!s->has_time) normalized.quality|=WEATHER_QUALITY_TIME_UNKNOWN;
+    if(!s->has_position) { normalized.quality|=WEATHER_QUALITY_POSITION_UNKNOWN; normalized.estimation_age_us=UINT32_MAX; }
+    if(s->position_kind==WEATHER_POSITION_GPS) normalized.estimation_age_us=0;
+    if(s->position_kind==WEATHER_POSITION_ESTGPS) normalized.quality|=WEATHER_QUALITY_POSITION_ESTIMATED;
+    sample_json(&w,&normalized);
+    if(w.failed || w.pos>INT_MAX) { buf[0]='\0'; return -1; }
+    return (int)w.pos;
+}
 int weather_batch_json(const weather_batch *b, char *buf, size_t cap) {
     writer w;
     unsigned metric, i, j;

@@ -84,7 +84,7 @@ typedef struct {
 typedef struct {
     uint64_t anchor_us;
     uint32_t segment;
-    uint8_t position_kind, have_anchor, source;
+    uint8_t position_kind, have_anchor, source, velocity_valid;
 } mi_nav_info;
 
 typedef struct {

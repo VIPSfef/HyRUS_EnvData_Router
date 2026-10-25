@@ -92,6 +92,12 @@ static void navigation_at(uint32_t t, int32_t lat_delta, uint8_t sysid, uint64_t
 }
 static void navigation(uint32_t t, int32_t lat_delta, uint8_t sysid)
 { navigation_at(t,lat_delta,sysid,t); }
+static void stationary_navigation(uint32_t t, uint64_t now)
+{
+    uint8_t p[28]={0};
+    put32(p,t); put32(p+4,370000000); put32(p+8,1270000000); put32(p+12,100000);
+    feed(33,p,sizeof(p),104,1,1,now);
+}
 static void named(uint32_t t, const char *key, float value, uint8_t compid)
 {
     uint8_t p[18]={0}; size_t n=strlen(key); if(n>10)n=10;
@@ -327,6 +333,8 @@ static int check_estgps_trapezoid_and_weather(void)
     atmospheric(1600000,1602); local_velocity(1800,6,12,-3,1802); mi_finish(&input,1803);
     CHECK(weather_count==2 && weather_samples[0].has_position && weather_samples[1].has_position);
     CHECK(weather_samples[0].position_kind==WEATHER_POSITION_ESTGPS && weather_samples[0].estimation_age_us==600000);
+    CHECK(weather_samples[0].has_velocity && weather_samples[1].has_velocity);
+    CHECK(weather_samples[0].navigation_segment==input.navigation_segment && weather_samples[1].navigation_segment==input.navigation_segment);
     CHECK((weather_samples[0].quality&MI_QUALITY_ESTGPS) && isnan(weather_samples[0].pos_error_m));
     CHECK(fabs(weather_samples[0].p[0]-3.6)<1e-12 && weather_samples[0].t_us==1600000);
     CHECK(weather_samples[0].t_us==weather_samples[1].t_us && weather_samples[1].position_kind==WEATHER_POSITION_ESTGPS);
@@ -564,6 +572,109 @@ static int check_estgps_invalid_interval_and_origin(void)
     CHECK(input.nav[0].p[0]==0 && input.nav[0].p[1]==0 && input.nav[0].p[2]==0);
     return 1;
 }
+/* Position and velocity have separate evidence: a usable FC coordinate does
+ * not make unvalidated velocity suitable for distance-time weighting. */
+static int check_weather_velocity_metadata(void)
+{
+    static const uint16_t left_flags[]={0,54,182,48,54,48,0};
+    static const uint16_t right_flags[]={0,54,182,48,48,54,54};
+    unsigned scenario,j;
+    for(scenario=0;scenario<sizeof(left_flags)/sizeof(left_flags[0]);++scenario) {
+        const unsigned left_valid=(left_flags[scenario]&6u)==6u;
+        const unsigned right_valid=(right_flags[scenario]&6u)==6u;
+        initialize(); heartbeat(1,1,2,12);
+        local_velocity(1000,0,0,0,1000); /* establish boot time without a global point */
+        if(left_flags[scenario]) estimator(1000,left_flags[scenario],1000);
+        gps(3,1000);
+        if(left_flags[scenario]==182) stationary_navigation(1000,1000); else navigation(1000,0,1);
+        if(right_flags[scenario]) estimator(1100,right_flags[scenario],1100);
+        gps(3,1100);
+        if(right_flags[scenario]==182) stationary_navigation(1100,1100); else navigation(1100,1000,1);
+        CHECK(input.nav_count==2);
+        CHECK(input.nav_info[0].velocity_valid==left_valid && input.nav_info[1].velocity_valid==right_valid);
+        CHECK(input.nav_info[0].segment==input.nav_info[1].segment);
+        atmospheric(1050000,1101); atmospheric(1000000,1102); atmospheric(1100000,1103);
+        mi_finish(&input,1104);
+        CHECK(weather_count==6);
+        for(j=0;j<weather_count;++j) {
+            const unsigned valid=j<2 ? left_valid : j<4 ? left_valid && right_valid : right_valid;
+            CHECK(weather_samples[j].has_position && weather_samples[j].has_velocity==valid);
+            CHECK(weather_samples[j].navigation_segment==input.nav_info[0].segment);
+            CHECK(weather_sample_valid(weather_samples+j));
+            if(left_flags[scenario]==182) {
+                CHECK(weather_samples[j].position_kind==WEATHER_POSITION_GPS);
+                CHECK(weather_samples[j].v[0]==0 && weather_samples[j].v[1]==0 && weather_samples[j].v[2]==0);
+            } else CHECK(weather_samples[j].v[0]==20 && weather_samples[j].v[1]==10 && weather_samples[j].v[2]==3);
+        }
+        CHECK(weather_samples[0].t_us==1000000 && weather_samples[2].t_us==1050000 && weather_samples[4].t_us==1100000);
+    }
+    /* A fresh source timestamp alone cannot renew a status received >2s ago. */
+    trusted_anchor(1000,0,0,0); navigation_at(1100,1000,1,3101);
+    CHECK(input.nav_count==2 && input.nav_info[0].velocity_valid && !input.nav_info[1].velocity_valid);
+    atmospheric(1050000,3102); mi_finish(&input,3103);
+    CHECK(weather_count==2 && weather_samples[0].has_position && weather_samples[1].has_position);
+    CHECK(!weather_samples[0].has_velocity && !weather_samples[1].has_velocity);
+    CHECK(weather_samples[0].navigation_segment==input.nav_info[0].segment);
+    return 1;
+}
+static int check_weather_cached_metadata_invalidation(void)
+{
+    uint32_t old_segment;
+    trusted_anchor(1000,0,0,0); navigation(1100,1000,1);
+    old_segment=input.navigation_segment;
+    atmospheric(1050000,1101);
+    CHECK(input.weather_pending_count==2 && input.weather_pending[0].aligned);
+    CHECK(input.weather_pending[0].sample.has_position && input.weather_pending[0].sample.has_velocity);
+    CHECK(input.weather_pending[0].sample.navigation_segment==old_segment);
+    /* Late evidence invalidates a previously cached bracket before emission. */
+    estimator(1050,6,1102); navigation_at(1050,500,1,1103);
+    CHECK(input.navigation_segment!=old_segment && input.weather_pending_count==2);
+    CHECK(!input.weather_pending[0].aligned && !input.weather_pending[1].aligned);
+    CHECK(!input.weather_pending[0].sample.has_position && !input.weather_pending[0].sample.has_velocity);
+    CHECK(!input.weather_pending[1].sample.has_position && !input.weather_pending[1].sample.has_velocity);
+    CHECK(input.weather_pending[0].sample.navigation_segment==0 && input.weather_pending[1].sample.navigation_segment==0);
+    estimator(1200,54,1200); gps(3,1200); navigation(1200,2000,1);
+    atmospheric(1200000,1201); mi_finish(&input,1202);
+    CHECK(weather_count==4);
+    CHECK(!weather_samples[0].has_position && !weather_samples[0].has_velocity && weather_samples[0].navigation_segment==0);
+    CHECK(!weather_samples[1].has_position && !weather_samples[1].has_velocity && weather_samples[1].navigation_segment==0);
+    CHECK(weather_samples[2].has_position && weather_samples[2].has_velocity && weather_samples[2].navigation_segment!=old_segment);
+    CHECK(weather_samples[3].has_position && weather_samples[3].has_velocity && weather_samples[3].navigation_segment==weather_samples[2].navigation_segment);
+    CHECK(weather_samples[2].t_us==1200000 && weather_samples[2].position_kind==WEATHER_POSITION_GPS);
+    return 1;
+}
+static int check_weather_acquisition_order(void)
+{
+    static const uint32_t expected_seq[]={7,8,3,4,5,6,1,2};
+    static const uint64_t expected_time[]={1050000,1050000,1100000,1100000,1100000,1100000,1150000,1150000};
+    unsigned located,finishing,j;
+    for(located=0;located<2;++located) for(finishing=0;finishing<2;++finishing) {
+        if(located) { trusted_anchor(1000,0,0,0); navigation(1200,2000,1); }
+        else { initialize(); heartbeat(1,1,2,12); }
+        /* Reversed wire arrival and duplicate acquisition times are distinct
+         * samples. Metric sequence breaks ties without replacing source IDs. */
+        atmospheric(1150000,1201); atmospheric(1100000,1202);
+        atmospheric(1100000,1203); atmospheric(1050000,1204);
+        CHECK(weather_count==0 && input.weather_pending_count==8);
+        if(finishing) mi_finish(&input,1205);
+        else {
+            mi_tick(&input,1401); /* oldest acquisition has not completed reorder wait */
+            CHECK(weather_count==0 && input.weather_pending_count==8);
+            mi_tick(&input,1404);
+        }
+        CHECK(weather_count==8 && input.weather_pending_count==0);
+        for(j=0;j<weather_count;++j) {
+            CHECK(weather_samples[j].t_us==expected_time[j] && weather_samples[j].seq==expected_seq[j]);
+            CHECK(weather_samples[j].metric==(j%2 ? WEATHER_HUMIDITY : WEATHER_TEMPERATURE));
+            CHECK(weather_samples[j].has_time && weather_samples[j].has_position==located && weather_samples[j].has_velocity==located);
+            CHECK(weather_sample_valid(weather_samples+j));
+            if(j) CHECK(weather_samples[j-1].t_us<weather_samples[j].t_us ||
+                       (weather_samples[j-1].t_us==weather_samples[j].t_us && weather_samples[j-1].seq<weather_samples[j].seq));
+        }
+        mi_finish(&input,1405); CHECK(weather_count==8 && input.report.pending==0);
+    }
+    return 1;
+}
 static double seconds(void)
 {
 #ifdef _WIN32
@@ -615,6 +726,7 @@ int main(int argc, char **argv)
        !check_estgps_missing_evidence() || !check_estgps_validity_and_gaps() || !check_estgps_expiry_and_resets() ||
        !check_estgps_status_is_not_clock_owner() || !check_estgps_stale_and_known_invalid_global() ||
        !check_estgps_local_before_delayed_global() || !check_estgps_raw_gps_source_clock() ||
-       !check_estgps_invalid_interval_and_origin() || failures) return 1;
+       !check_estgps_invalid_interval_and_origin() || !check_weather_velocity_metadata() ||
+       !check_weather_cached_metadata_invalidation() || !check_weather_acquisition_order() || failures) return 1;
     printf("PASS %u MAVLink wire checks\n",checks); return 0;
 }

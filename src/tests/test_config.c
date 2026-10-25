@@ -406,10 +406,71 @@ static int check_udp_settings(void)
     return 1;
 }
 
+/* Distances and gap limits are independent of the 1-second send interval. */
+static int check_spatial_settings(void)
+{
+    tb_config c, loaded, saved;
+    char error[160], path[128];
+    static const char *bad_step[] = {"0", "0.009999", "10000.001", "-1", "nan", "inf", "1e309", "1m"};
+    static const char *bad_gap[] = {"0", "99", "60001", "-1", "2000.0", "4294967296"};
+    static const char legacy[] = "url=-\nstream=s\nsession=legacy\n";
+    static const char duplicate[] = "url=-\nstream=s\nsession=x\nspatial_enabled=0\nspatial_enabled=1\n";
+    static const char duplicate_adaptive[] = "url=-\nstream=s\nsession=x\nspatial_adaptive=0\nspatial_adaptive=1\n";
+    size_t i;
+    cfg_defaults(&c);
+    CHECK(c.spatial_step_m==10.0 && c.spatial_gap_ms==2000 && c.spatial_enabled==1 && c.spatial_adaptive==1);
+    CHECK(valid_config(&c));
+    CHECK(cfg_set(&c,"spatial_step_m","0.01",error,sizeof(error)) && c.spatial_step_m==0.01);
+    CHECK(cfg_set(&c,"spatial_step_m","10000",error,sizeof(error)) && c.spatial_step_m==10000.0);
+    for(i=0;i<sizeof(bad_step)/sizeof(bad_step[0]);++i)
+        CHECK(invalid_set(&c,"spatial_step_m",bad_step[i]));
+    CHECK(cfg_set(&c,"spatial_gap_ms","100",error,sizeof(error)) && c.spatial_gap_ms==100);
+    CHECK(cfg_set(&c,"spatial_gap_ms","60000",error,sizeof(error)) && c.spatial_gap_ms==60000);
+    for(i=0;i<sizeof(bad_gap)/sizeof(bad_gap[0]);++i)
+        CHECK(invalid_set(&c,"spatial_gap_ms",bad_gap[i]));
+    CHECK(cfg_set(&c,"spatial_enabled","0",error,sizeof(error)) && c.spatial_enabled==0);
+    CHECK(cfg_set(&c,"spatial_enabled","1",error,sizeof(error)) && c.spatial_enabled==1);
+    CHECK(invalid_set(&c,"spatial_enabled","2"));
+    CHECK(invalid_set(&c,"spatial_enabled","true"));
+    CHECK(cfg_set(&c,"spatial_adaptive","0",error,sizeof(error)) && c.spatial_adaptive==0);
+    CHECK(cfg_set(&c,"spatial_adaptive","1",error,sizeof(error)) && c.spatial_adaptive==1);
+    CHECK(invalid_set(&c,"spatial_adaptive","2"));
+    CHECK(invalid_set(&c,"spatial_adaptive","true"));
+    saved=c; c.spatial_step_m=NAN;
+    CHECK(!cfg_validate(&c,4,error,sizeof(error))); c=saved;
+    c.spatial_step_m=0.009;
+    CHECK(!cfg_validate(&c,4,error,sizeof(error))); c=saved;
+    c.spatial_gap_ms=99;
+    CHECK(!cfg_validate(&c,4,error,sizeof(error))); c=saved;
+    c.spatial_gap_ms=60001;
+    CHECK(!cfg_validate(&c,4,error,sizeof(error))); c=saved;
+    c.spatial_enabled=2;
+    CHECK(!cfg_validate(&c,4,error,sizeof(error))); c=saved;
+    c.spatial_adaptive=2;
+    CHECK(!cfg_validate(&c,4,error,sizeof(error))); c=saved;
+    (void)snprintf(path,sizeof(path),"tb-spatial-config-%u.ini",process_id());
+    CHECK(invalid_file(path,duplicate,sizeof(duplicate)-1,&c));
+    CHECK(invalid_file(path,duplicate_adaptive,sizeof(duplicate_adaptive)-1,&c));
+    CHECK(write_bytes(path,legacy,sizeof(legacy)-1));
+    CHECK(cfg_load(path,&loaded,4,error,sizeof(error)));
+    CHECK(loaded.spatial_step_m==10.0 && loaded.spatial_gap_ms==2000 && loaded.spatial_enabled==1 && loaded.spatial_adaptive==1);
+    CHECK(cfg_set(&c,"spatial_step_m","2.5",error,sizeof(error)));
+    CHECK(cfg_set(&c,"spatial_gap_ms","1234",error,sizeof(error)));
+    CHECK(cfg_set(&c,"spatial_enabled","0",error,sizeof(error)));
+    CHECK(cfg_set(&c,"spatial_adaptive","0",error,sizeof(error)));
+    CHECK(cfg_save(path,&c,4,error,sizeof(error)));
+    CHECK(cfg_load(path,&loaded,4,error,sizeof(error)));
+    CHECK(loaded.spatial_step_m==2.5 && loaded.spatial_gap_ms==1234 && loaded.spatial_enabled==0 && loaded.spatial_adaptive==0);
+    CHECK(loaded.send_interval_ms==1000);
+    CHECK(!memcmp(&loaded,&c,sizeof(c)));
+    CHECK(remove_utf8(path));
+    return 1;
+}
+
 int main(void)
 {
     (void)setlocale(LC_NUMERIC, "C");
-    if (!check_settings() || !check_redaction() || !check_files() || !check_mavlink_settings() || !check_udp_settings()) return 1;
+    if (!check_settings() || !check_redaction() || !check_files() || !check_mavlink_settings() || !check_udp_settings() || !check_spatial_settings()) return 1;
     printf("PASS %u configuration checks\n", checks);
     return 0;
 }

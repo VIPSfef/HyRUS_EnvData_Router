@@ -287,7 +287,8 @@ static void invalidate_absolute_navigation(mi_input *m, uint64_t stamp, uint64_t
     for (j = 0; j < m->weather_pending_count; ++j) {
         weather_sample *w = &m->weather_pending[j].sample;
         if (w->t_us < stamp) continue;
-        w->has_position = 0; w->position_kind = WEATHER_POSITION_UNKNOWN;
+        w->has_position = w->has_velocity = 0; w->navigation_segment = 0;
+        w->position_kind = WEATHER_POSITION_UNKNOWN;
         w->estimation_age_us = UINT32_MAX; w->pos_error_m = NAN;
         w->quality &= ~MI_QUALITY_ESTGPS; m->weather_pending[j].aligned = 0;
     }
@@ -334,6 +335,7 @@ static void observation(mi_input *m, uint64_t stamp, uint64_t now,
 static void aligned_metadata(tb_sample *s, mi_nav_info *out, const mi_nav_info *a, const mi_nav_info *b)
 {
     mi_nav_info result = *a;
+    if(b) result.velocity_valid=(uint8_t)(a->velocity_valid && b->velocity_valid);
     if (b && (a->position_kind != WEATHER_POSITION_GPS || b->position_kind != WEATHER_POSITION_GPS)) {
         result.position_kind = WEATHER_POSITION_ESTGPS;
         result.have_anchor = 0;
@@ -428,7 +430,6 @@ static void flush_weather(mi_input *m,uint64_t now,int finishing)
     unsigned j=0;
     while(j<m->weather_pending_count) {
         weather_sample *s=&m->weather_pending[j].sample;
-        uint64_t received=m->weather_pending[j].received_ms;
         if(!m->weather_pending[j].aligned) {
             tb_sample aligned; mi_nav_info meta;
             memset(&aligned,0,sizeof(aligned)); memset(&meta,0,sizeof(meta)); aligned.t_us=s->t_us;
@@ -436,6 +437,7 @@ static void flush_weather(mi_input *m,uint64_t now,int finishing)
                 memcpy(s->p,aligned.p,sizeof(s->p)); memcpy(s->v,aligned.v,sizeof(s->v));
                 s->pos_error_m=aligned.pos_error_m; s->has_position=1;
                 s->position_kind=meta.position_kind;
+                s->has_velocity=meta.velocity_valid; s->navigation_segment=meta.segment;
                 s->estimation_age_us=meta.position_kind==WEATHER_POSITION_GPS ? 0 :
                     meta.have_anchor && s->t_us>=meta.anchor_us && s->t_us-meta.anchor_us<UINT32_MAX ?
                     (uint32_t)(s->t_us-meta.anchor_us) : UINT32_MAX;
@@ -443,11 +445,22 @@ static void flush_weather(mi_input *m,uint64_t now,int finishing)
                 m->weather_pending[j].aligned=1;
             }
         }
-        if(finishing || (now>=received && now-received>=200)) {
-            if(!s->has_position) ++m->report.no_navigation;
-            emit_weather(m,s);
-            m->weather_pending[j]=m->weather_pending[--m->weather_pending_count];
-        } else ++j;
+        ++j;
+    }
+    /* Select the oldest event, not the swap-removal order. This keeps paired
+     * metrics and distance integration on the same acquisition timeline.
+     * <=128 points: O(P*N + P^2), no allocation or unbounded sort. */
+    while(m->weather_pending_count) {
+        unsigned best=0;
+        for(j=1;j<m->weather_pending_count;++j)
+            if(m->weather_pending[j].sample.t_us<m->weather_pending[best].sample.t_us ||
+               (m->weather_pending[j].sample.t_us==m->weather_pending[best].sample.t_us &&
+                m->weather_pending[j].sample.seq<m->weather_pending[best].sample.seq)) best=j;
+        if(!finishing && (now<m->weather_pending[best].received_ms ||
+           now-m->weather_pending[best].received_ms<200)) break;
+        if(!m->weather_pending[best].sample.has_position) ++m->report.no_navigation;
+        emit_weather(m,&m->weather_pending[best].sample);
+        m->weather_pending[best]=m->weather_pending[--m->weather_pending_count];
     }
 }
 static void flush_pending(mi_input *m, uint64_t watermark, uint64_t now, int finishing)
@@ -631,6 +644,8 @@ static void global_navigation(mi_input *m, const uint8_t *p, uint64_t now)
     trusted = nav.t_us && gps_fresh_at(m, nav.t_us, now) && estimator_valid(m, nav.t_us, now, 16u | 32u);
     info.position_kind = trusted ? WEATHER_POSITION_GPS : WEATHER_POSITION_ESTGPS;
     info.source = MI_ESTIMATE_EKF; info.segment = m->navigation_segment;
+    info.velocity_valid=(uint8_t)(estimator_status_fresh(m,nav.t_us,now) &&
+        !(m->estimator_flags & (1024u|2048u)) && (m->estimator_flags & 6u)==6u);
     if (trusted && (!m->have_gps_anchor || nav.t_us > m->gps_anchor_us)) {
         m->gps_anchor_us = nav.t_us; m->gps_anchor_received_ms = now; m->have_gps_anchor = 1;
     }
@@ -741,6 +756,7 @@ static void local_navigation(mi_input *m, const uint8_t *p, uint64_t now)
         }
         info.position_kind = WEATHER_POSITION_ESTGPS; info.source = MI_ESTIMATE_VELOCITY;
         info.segment = m->navigation_segment;
+        info.velocity_valid=1;
         info.have_anchor = 1; info.anchor_us = m->gps_anchor_us;
         m->report.position_flags = 0;
         report_navigation(m, &nav, &info, lat, lon, altitude, now);

@@ -1,5 +1,5 @@
 /* Optional loopback diagnostic HTTP server. Fixed storage; no observation files.
- * Parsing is O(header bytes + JSON bytes), nesting <=32, tokens <=8192.
+ * Parsing is O(header bytes + JSON bytes), nesting <=32, tokens <=32768.
  * Each accepted connection has a 5 s total deadline and <=100 ms polls.
  * The single diagnostic connection is deliberately isolated from the router's
  * receive/HTTP worker threads. 204 means fully validated and printed, not disk
@@ -40,8 +40,8 @@ typedef int ts_socket;
 #endif
 
 #define TS_HEADER_CAP 8192u
-#define TS_BODY_CAP (128u*1024u)
-#define TS_TOKEN_CAP 8192u
+#define TS_BODY_CAP (512u*1024u)
+#define TS_TOKEN_CAP 32768u
 #define TS_LOG_CAP 64u
 #define TS_RECORD_CAP 64u
 #define TS_NONE UINT32_MAX
@@ -402,14 +402,77 @@ static int weather_sample_record(const ts_json *j,unsigned sample,int humidity) 
             if(!gps && !estimated && !null_token(j,age)) return 0;
         } else if(age<j->count) return 0;
     }
+    {
+        unsigned valid=field(j,sample,"velocity_valid"),segment=field(j,sample,"navigation_segment");
+        if(valid<j->count && ((j->token[valid].kind!='t' && j->token[valid].kind!='f') ||
+           (j->token[valid].kind=='t' && !known_position))) return 0;
+        if(segment<j->count && (!token_uint(j,segment,&number) || number>UINT32_MAX)) return 0;
+    }
+    return 1;
+}
+static int spatial_record(const ts_json *j,unsigned object,unsigned *count) {
+    unsigned bins=field(j,object,"bins"),adaptive=field(j,object,"adaptive");
+    double target; uint64_t number;
+    *count=0;
+    if(!token_text(j,field(j,object,"schema"),"mavlink_spatial_v1") ||
+       !token_uint(j,field(j,object,"si_registry"),&number) || number!=1 ||
+       !token_double(j,field(j,object,"target_step_m"),&target) || target<=0 ||
+       adaptive>=j->count || (j->token[adaptive].kind!='t' && j->token[adaptive].kind!='f') ||
+       !token_u64_string(j,field(j,object,"gap_us"),&number) || !number ||
+       bins>=j->count || j->token[bins].kind!='[') return 0;
+    for(unsigned b=bins+1;b<j->token[bins].next;b=j->token[b].next) {
+        unsigned stats=field(j,b,"statistics"),rep=field(j,b,"representative");
+        int humidity=token_text(j,field(j,b,"metric"),"humidity");
+        uint64_t n,start,end,stamp;
+        double mean,m2,variance,min,max,width,left,right,first,last,entry,value;
+        if(++*count>144 || (!humidity && !token_text(j,field(j,b,"metric"),"temperature")) ||
+           !token_u64_string(j,field(j,b,"continuity_key"),&number) ||
+           !token_u64_string(j,field(j,b,"path_id"),&number) || !number ||
+           !token_u64_string(j,field(j,b,"bin_index"),&number) ||
+           !token_u64_string(j,field(j,b,"revision"),&number) || !number ||
+           (!token_text(j,field(j,b,"state"),"partial") &&
+            !token_text(j,field(j,b,"state"),"complete") && !token_text(j,field(j,b,"state"),"interrupted")) ||
+           !token_uint(j,field(j,b,"message_id"),&number) || number>UINT32_C(0xffffff) ||
+           !token_uint(j,field(j,b,"sensor_id"),&number) || number>UINT32_MAX ||
+           !token_uint(j,field(j,b,"sensor_instance"),&number) || number>255 ||
+           !token_uint(j,field(j,b,"flags"),&number) || number>UINT32_MAX ||
+           !token_uint(j,field(j,b,"quality"),&number) || number>UINT32_MAX ||
+           !weather_sample_record(j,rep,humidity) ||
+           !token_u64_string(j,field(j,rep,"t_us"),&stamp) ||
+           !token_double(j,field(j,rep,"value"),&value) ||
+           !token_u64_string(j,field(j,b,"t_start_us"),&start) || !start ||
+           !token_u64_string(j,field(j,b,"t_end_us"),&end) || end<start || stamp<start || stamp>end ||
+           !token_double(j,field(j,b,"width_m"),&width) || width<target ||
+           !token_double(j,field(j,b,"interval_start_m"),&left) || left<0 ||
+           !token_double(j,field(j,b,"interval_end_m"),&right) || right<=left ||
+           fabs((right-left)-width)>1e-7*fmax(1.0,width) ||
+           !token_double(j,field(j,b,"observed_start_m"),&first) || first<left-1e-6 ||
+           !token_double(j,field(j,b,"observed_end_m"),&last) || last<first || last>right+1e-6 ||
+           !token_double(j,field(j,b,"entry_step_m"),&entry) || entry<0 ||
+           !token_uint(j,field(j,stats,"n"),&n) || !n || n>UINT32_MAX ||
+           !token_double(j,field(j,stats,"mean"),&mean) ||
+           !token_double(j,field(j,stats,"m2"),&m2) || m2<0 ||
+           !token_double(j,field(j,stats,"min"),&min) || min<0 ||
+           !token_double(j,field(j,stats,"max"),&max) || max<min ||
+           mean<min || mean>max || value<min || value>max || (humidity && max>1) ||
+           (null_token(j,field(j,stats,"variance"))!=(n==1))) return 0;
+        if(n>1 && (!token_double(j,field(j,stats,"variance"),&variance) || variance<0 ||
+           fabs(variance-m2/(double)(n-1))>1e-9*fmax(1.0,variance))) return 0;
+        if(token_text(j,field(j,b,"source_kind"),"GPS")) {
+            if(!token_text(j,field(j,rep,"position_source"),"GPS")) return 0;
+        } else if(!token_text(j,field(j,b,"source_kind"),"ESTGPS") ||
+                  !token_text(j,field(j,rep,"position_source"),"ESTGPS")) return 0;
+    }
     return 1;
 }
 static int weather_body_record(const ts_json *j,unsigned record) {
     unsigned weather=field(j,record,"weather"),source=field(j,record,"source");
-    unsigned measurements=field(j,weather,"measurements"),groups=0;
+    unsigned measurements=field(j,weather,"measurements"),groups=0,spatial_n=0;
+    unsigned spatial=field(j,record,"spatial");
     uint64_t value,total_n,total_raw,total_dropped,sum_n=0,sum_raw=0,sum_dropped=0;
     uint64_t ids[16],messages[16]; unsigned instances[16],metrics[16];
     static const char *const names[]={"temperature","humidity"};
+    if(spatial<j->count && !spatial_record(j,spatial,&spatial_n)) return 0;
     if(!nonempty_string(j,field(j,record,"session")) ||
        !token_uint(j,field(j,record,"generation"),&value) ||
        !token_uint(j,field(j,record,"seq"),&value) ||
@@ -417,7 +480,7 @@ static int weather_body_record(const ts_json *j,unsigned record) {
        !token_uint(j,field(j,source,"compid"),&value) || value>255 ||
        !token_uint(j,field(j,weather,"si_registry"),&value) || value!=1 ||
        !token_u64_string(j,field(j,weather,"host_window_ms"),&value) ||
-       !token_uint(j,field(j,weather,"n"),&total_n) || !total_n || total_n>UINT32_MAX ||
+       !token_uint(j,field(j,weather,"n"),&total_n) || total_n>UINT32_MAX ||
        !token_uint(j,field(j,weather,"raw_n"),&total_raw) || total_raw>128 ||
        !token_uint(j,field(j,weather,"raw_dropped"),&total_dropped) || total_dropped>UINT32_MAX ||
        total_raw+total_dropped!=total_n) return 0;
@@ -476,7 +539,7 @@ static int weather_body_record(const ts_json *j,unsigned record) {
             sum_n+=n; sum_raw+=raw; sum_dropped+=dropped;
         }
     }
-    return groups && sum_n==total_n && sum_raw==total_raw && sum_dropped==total_dropped;
+    return (groups || spatial_n) && sum_n==total_n && sum_raw==total_raw && sum_dropped==total_dropped;
 }
 static int validate_body(const char *body,size_t length,unsigned records[TS_RECORD_CAP],unsigned *count) {
     ts_json *j=&server.json;
@@ -582,6 +645,36 @@ static void print_weather(unsigned record) {
                 for(unsigned k=0;k<3;++k) { (void)token_double(j,item,&p[k]); item=j->token[item].next; }
                 log_line("  %s position ENU=[%.3f,%.3f,%.3f] m",position_label,p[0],p[1],p[2]);
             } else log_line("  acquisition position=unknown");
+        }
+    }
+    {
+        unsigned spatial=field(j,record,"spatial"),bins=field(j,spatial,"bins"),path=field(j,spatial,"path");
+        double target=0,effective=0;
+        if(spatial<j->count) {
+            (void)token_double(j,field(j,spatial,"target_step_m"),&target);
+            (void)token_double(j,field(j,path,"effective_width_m"),&effective);
+            unsigned known=field(j,path,"known");
+            if(known<j->count && j->token[known].kind=='t')
+                log_line("spatial target=%.3gm effective=%.3gm; cumulative revisions replace prior bins",target,effective);
+            else log_line("spatial target=%.3gm effective=unknown (position/velocity unavailable)",target);
+            if(bins<j->count && j->token[bins].next==bins+1) log_line("  no spatial updates (position/velocity unavailable or no new samples)");
+            for(unsigned b=bins+1;bins<j->count && b<j->token[bins].next;b=j->token[b].next) {
+                unsigned stats=field(j,b,"statistics");
+                uint64_t id=0,revision=0,n=0;
+                double mean=0,width=0,variance=0;
+                char var_text[32];
+                (void)token_u64_string(j,field(j,b,"bin_index"),&id);
+                (void)token_u64_string(j,field(j,b,"revision"),&revision);
+                (void)token_uint(j,field(j,stats,"n"),&n);
+                (void)token_double(j,field(j,stats,"mean"),&mean);
+                (void)token_double(j,field(j,b,"width_m"),&width);
+                if(token_double(j,field(j,stats,"variance"),&variance)) (void)snprintf(var_text,sizeof(var_text),"%.6g",variance);
+                else (void)snprintf(var_text,sizeof(var_text),"unknown");
+                log_line("  bin=%" PRIu64 " rev=%" PRIu64 " %s %s width=%.3gm n=%" PRIu64 " mean=%.6g var=%s",
+                    id,revision,token_text(j,field(j,b,"metric"),"humidity") ? "humidity" : "temperature",
+                    token_text(j,field(j,b,"state"),"complete") ? "complete" : token_text(j,field(j,b,"state"),"interrupted") ? "interrupted" : "partial",
+                    width,n,mean,var_text);
+            }
         }
     }
 }

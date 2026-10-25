@@ -346,7 +346,7 @@ def server_case(executable, directory):
             request(json.dumps(invalid_record).encode("utf-8")),
             request(b'{"schema":"wrong","stream":"x","records":[]}'),
             request(encoded, headers={"Content-Length": "NaN"}),
-            request(encoded, headers={"Content-Length": "131073"}),
+            request(encoded, headers={"Content-Length": "524289"}),
             request(encoded, headers={"Transfer-Encoding": "chunked"}),
             request(encoded, path="/wrong"),
             b"POST /ingest HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\n{}",

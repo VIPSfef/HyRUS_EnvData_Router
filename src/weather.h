@@ -37,6 +37,8 @@ typedef struct {
     uint32_t message_id;
     uint32_t estimation_age_us; /* UINT32_MAX: last trusted GPS anchor time unknown */
     uint8_t position_kind; /* WEATHER_POSITION_*; distinct from observation validity */
+    uint8_t has_velocity; /* ESTIMATOR_STATUS validates velocity at this acquisition time. */
+    uint32_t navigation_segment; /* Never integrate across a known-invalid nav interval. */
 } weather_sample;
 
 typedef struct {
@@ -61,6 +63,8 @@ typedef struct {
  * of acquisition timestamps. Its enclosing envelope defines the host clock. */
 void weather_batch_init(weather_batch *batch, uint64_t host_window_ms);
 int weather_sample_valid(const weather_sample *sample);
+/* A standalone actual-sample JSON object, shared by spatial representatives. */
+int weather_sample_json(const weather_sample *sample, char *buf, size_t cap);
 /* O(WEATHER_GROUP_CAPACITY), one fixed sample copy. Invalid samples, group
  * exhaustion, or uint32 counters at their limit reject without mutation.
  * All accepted samples update Welford statistics, even when raw storage is

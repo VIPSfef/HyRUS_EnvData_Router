@@ -16,6 +16,9 @@ typedef struct tb_config {
     double accel_bound_mps2;
     char udp_bind[64];
     unsigned udp_port, udp_enabled;
+    double spatial_step_m;
+    unsigned spatial_gap_ms;
+    int spatial_enabled, spatial_adaptive;
 } tb_config;
 
 /* Numeric parsing/formatting requires the C numeric locale. Errors never echo

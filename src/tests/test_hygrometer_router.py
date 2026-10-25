@@ -26,7 +26,7 @@ from test_test_stream import CaptureServer, record_bytes, request, response_stat
 SCHEMA = "mavlink_weather_v1"
 SAMPLE_KEYS = {"t_us", "position_m", "velocity_mps", "value", "measurement_variance",
                "time_uncertainty_us", "navigation_uncertainty_m", "position_uncertainty_m",
-               "quality", "seq", "position_source", "estimation_age_us"}
+               "quality", "seq", "position_source", "estimation_age_us", "velocity_valid", "navigation_segment"}
 
 
 def values(index):
@@ -101,6 +101,8 @@ def validate_samples(record, mode, expected, actual):
                 assert sample["position_source"] == ("ESTGPS" if known_position else "UNKNOWN"), sample
                 assert bool(sample["quality"] & 0x10000000) == known_position, sample
                 assert sample["estimation_age_us"] is None, sample
+                assert sample["velocity_valid"] is False, sample
+                assert type(sample["navigation_segment"]) is int, sample
                 assert all(sample[key] is None for key in ("measurement_variance", "time_uncertainty_us",
                            "navigation_uncertainty_m", "position_uncertainty_m")), "unknown uncertainty fabricated"
                 if known_time:

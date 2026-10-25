@@ -1,6 +1,6 @@
-# 기술 참조 — mavlink_telemetry_data_router 0.9.0
+# 기술 참조 — mavlink_telemetry_data_router 0.10.0
 
-0.9.0은 호스트 위치 출처·조건부 ESTGPS와 모니터를 개선한다. 네 실행 파일 이름과 공식 SENS_ATMOS wire 규격은 유지하며 이 변경을 위한 Pixhawk 펌웨어 수정은 없다. 처음 실행할 때는 [README](../README.md)를 읽는다. 이 문서의 명령은 저장소 루트 기준이다. 기본 입력은 바이너리 MAVLink이고, CSV는 명시적인 개발용 재생 모드다.
+0.10.0은 온습도 이동 관측의 기본 10m 수평 경로 구간과 적응 폭, 누적 revision 전송을 추가한다. 0.9.0의 위치 출처·조건부 ESTGPS 정책을 유지한다. 네 실행 파일 이름과 공식 SENS_ATMOS wire 규격은 유지하며 이 호스트 변경을 위한 Pixhawk 펌웨어 수정은 없다. 처음 실행할 때는 [README](../README.md)를 읽는다. 이 문서의 명령은 저장소 루트 기준이다. 기본 입력은 바이너리 MAVLink이고, CSV는 명시적인 개발용 재생 모드다.
 
 ## 자동 입력과 채널 선택
 
@@ -54,7 +54,11 @@ UDP를 제외한 설정 포트와 WebSocket에는 연결 후, 자동 검색 포�
 | max_windows | 4, 요청당 최대4묶음 |
 | refresh_ms | 1000, 250–10000 |
 | idle_warn_ms/ack_warn_ms | 2000/5000, 250–3600000. 화면 경고 기준 |
-| summary | 0 원본 포함, 1 원본 생략 |
+| summary | 0 원본 포함, 1 기존 key–value 원본 생략; 온습도 원본에는 적용하지 않음 |
+| spatial_step_m | 10, 0.01–10000m. 목표 수평 경로 구간 폭; TUI34번 |
+| spatial_gap_ms | 2000, 100–60000ms. 공간 경로를 잇는 관측 간격 한도; TUI35번 |
+| spatial_enabled | 1, 0/1. 온습도 공간 구간 집계 사용; TUI36번 |
+| spatial_adaptive | 1, 0/1. 실제 표본 간격에 따라 다음 구간의 폭 적응; TUI37번 |
 
 토큰은 환경변수에 둔다. URL query는 화면에서 숨기지만 설정 파일에는 원문으로 저장된다. URL userinfo와 fragment는 거부한다. Windows timeout은 WinHTTP 단계별이며 Linux 총 HTTP timeout은 connect+2×io로 적용한다. DNS/TLS/OS까지 포함한 하드 실시간 상한을 뜻하지 않는다.
 
@@ -76,7 +80,7 @@ humidity_fraction = Humidity * 0.01
 variance_SI = scale^2 * variance_source
 ```
 
-SENS_ATMOS에는 센서 ID·instance·품질·시각 오차·측정분산이 없다. 수집기의 논리 그룹 `sensor_id=0,sensor_instance=0`은 이 source의 단일 온습도 입력을 식별할 뿐 물리 센서 종류를 증명하지 않는다. source system/component/session과 ENU 원점은 바깥 전송 레코드로 구분한다. 측정시각은 같은 PX4 부팅 시계의 검증·분류된 앞뒤 항법 두 점 사이에서 위치를 보간한다. 0.9.0의 GPS/ESTGPS 분류와 제한은 아래 위치 정책을 따른다. timestamp의 µs 자료형을 근거로 시각 정확도1µs를 가정하지 않는다. 상대 시각 오차와 측정분산은 null이고, 이 때문에 시각 오차까지 합산한 위치 오차 추정도 null일 수 있다. 위치 자체를 보간할 수 없는 경우에도 관측값·시각·통계를 보존하고 위치를 null로 남긴다.
+SENS_ATMOS에는 센서 ID·instance·품질·시각 오차·측정분산이 없다. 수집기의 논리 그룹 `sensor_id=0,sensor_instance=0`은 이 source의 단일 온습도 입력을 식별할 뿐 물리 센서 종류를 증명하지 않는다. source system/component/session과 ENU 원점은 바깥 전송 레코드로 구분한다. 측정시각은 같은 PX4 부팅 시계의 검증·분류된 앞뒤 항법 두 점 사이에서 위치를 보간한다. GPS/ESTGPS 분류와 제한은 아래 위치 정책을 따른다. timestamp의 µs 자료형을 근거로 시각 정확도1µs를 가정하지 않는다. 상대 시각 오차와 측정분산은 null이고, 이 때문에 시각 오차까지 합산한 위치 오차 추정도 null일 수 있다. 위치 자체를 보간할 수 없는 경우에도 관측값·시각·통계를 보존하고 위치를 null로 남긴다.
 
 같은 source가 HYGROMETER_SENSOR와 SENS_ATMOS를 함께 보내면 실제 wire의 message_id를 그룹 키에 포함해 서로 분리한다. 단위가 같다는 이유로 평균·원본을 합치지 않는다. 동일 물리 관측의 중복인지 확인할 식별자는 없으므로 시험 패치는 SENS_ATMOS 하나만 선택한다. 표준 메시지만으로 SENS_ATMOS에 없는 센서 ID를 복원하거나 같은 component의 여러 물리 센서를 자동 분리할 수 없다.
 
@@ -86,7 +90,7 @@ v0.7.0의 HYGROMETER_SENSOR 사설 time/device/uncertainty 확장은 제거했�
 
 `weather.h`의 `WEATHER_SI_REGISTRY=1`은 temperature→K, humidity→비율을 정의한다. 그룹 JSON은 단위 문자열을 매 표본마다 반복하지 않는다. 기존 key–value schema3의 unit_map은 단위 표시이며 값의 SI 변환 설정이 아니다. 일반 압력·내부 온도 등 기존 경로의 단위까지 새 구조와 같다고 가정하지 않는다. 물리 센서 드라이버가 내부 uORB에 발행한 값과 그 관측시각을 PX4 MAVLink stream이 공식 메시지로 보내는 구조이며, 가상 센서 예제는 물리 센서 드라이버를 대체하지 않는다.
 
-그룹 JSON의 구성은 다음과 같다. temperature/humidity 아래 센서 배열을 사용하며 필드 이름을 관측 종류의 별도 키로 등록하지 않는다.
+기존 온습도 원본·전송 시간 요약 JSON은 다음과 같다. `host_window_ms`는 호스트 배치 시간이며 거리 구간 식별자가 아니다. 0.10.0의 공간 구간은 같은 온습도 레코드의 `spatial` 객체에 `mavlink_spatial_v1`으로 전달한다. temperature/humidity 아래 센서 배열을 사용하며 필드 이름을 관측 종류의 별도 키로 등록하지 않는다.
 
 ```text
 weather: {
@@ -106,11 +110,11 @@ weather: {
 
 `position_source`는 `GPS`·`ESTGPS`·`UNKNOWN` 문자열이다. `estimation_age_us`는 마지막 유효 GPS 기준점부터의 boot 시각 경과 µs이며, GPS 표본은 0, 기준점 시각을 모르면 null이다. 유효한 FC EKF 전역 좌표라도 이전 GPS 기준점이 없으면 ESTGPS와 경과 null을 함께 보낼 수 있다. 두 필드는 `representative`와 각 `samples[]`에 추가하며 envelope 이름 `mavlink_weather_v1`은 유지한다. 수신 서버는 추가 필드를 허용하고, 추정 출처·나이를 표본과 함께 보존해야 한다.
 
-`statistics`는 n·평균·표본분산 `M2/(n−1)`·min/max와 `time_known_n`·측정시각 시작/끝을 갖는다. n<2이면 분산은 null이다. 측정시각 범위는 그 시각을 아는 표본만 사용하며 `time_known_n=0`이면 양 끝도 null이다. 시각 미상 표본도 평균·분산 n에는 포함된다. 이 분산은 이동에 따른 실제 공간 변화와 잡음을 모두 포함하며 단일 센서 측정의 불확도와 다르다.
+기존 시간 요약의 `statistics`는 n·평균·표본분산 `M2/(n−1)`·min/max와 `time_known_n`·측정시각 시작/끝을 갖는다. n<2이면 분산은 null이다. 측정시각 범위는 그 시각을 아는 표본만 사용하며 `time_known_n=0`이면 양 끝도 null이다. 시각 미상 표본도 평균·분산 n에는 포함된다. 이 분산은 이동에 따른 실제 공간 변화와 잡음을 모두 포함하며 단일 센서 측정의 불확도와 다르다.
 
 한 온습도 배치의 원본은 최대128개, 그룹은 최대16개다. 원본 한도 초과 표본도 통계에 반영하고 raw_dropped를 기록한다. 그룹 한도 초과와 잘못된 물리량은 거부 수로 집계한다. 상대습도는 0..1, 온도는 0 K 이상, 유효 값·좌표·속도는 유한해야 한다. 미래 항목은 SI 사전 버전과 식별자를 늘려 정의해야 하며 알 수 없는 단위를 추측하지 않는다.
 
-시험 모드 `--test-weather`는 `mavlink_weather_v1` envelope의 `records[]`에 `{seq,generation,session,source,frame,origin_wgs84,time_basis,host_time_basis,clock_model,weather}`를 넣는다. 순번·시각의 64비트 표현 규약은 각 schema를 따른다. 서버는 `(stream, session, seq)`로 중복 제거하고 요청 전체 검사·수락 뒤204로 답해야 한다. 실패·202·응답 단절에서는 동일 순번과 관측을 재전송한다. `--summary`는 기존 key–value 출력에 적용하며 온습도 원본을 생략하지 않는다.
+시험 모드 `--test-weather`는 `mavlink_weather_v1` envelope의 `records[]`에 `{seq,generation,session,source,frame,origin_wgs84,time_basis,host_time_basis,clock_model,weather,spatial?}`를 넣는다. 순번·시각의 64비트 표현 규약은 각 schema를 따른다. 서버는 `(stream, session, seq)`로 중복 제거하고 요청 전체 검사·수락 뒤204로 답해야 한다. 실패·202·응답 단절에서는 동일 순번과 관측을 재전송한다. `--summary`는 기존 key–value 출력에 적용하며 온습도 원본을 생략하지 않는다.
 
 PX4의 정확한 기준 커밋·ASLUAV 포함 빌드·가상 센서 명령은 [support/px4](../support/px4/README.md)에 있다. HYGROMETER_SENSOR는 온도와 상대습도를 재는 hygrometer의 센서 인스턴스를 전달하는 메시지다. 비행제어기 내부 barometer/IMU 온도를 주변 대기 온도로 간주하지 않는다. 표준에 다른 센서 메시지도 있지만 공통적인 측정시각·품질·이동 관측 통계를 모두 제공하는 한 가지 범용 기상 메시지가 되는 것은 아니다.
 
@@ -120,7 +124,60 @@ PX4의 정확한 기준 커밋·ASLUAV 포함 빌드·가상 센서 명령은 [s
 
 공식 근거: [SENS_ATMOS](https://mavlink.io/en/messages/ASLUAV.html#SENS_ATMOS), [HYGROMETER_SENSOR](https://mavlink.io/en/messages/common.html#HYGROMETER_SENSOR), [MAVLink 직렬화와 CRC](https://mavlink.io/en/guide/serialization.html), [SI](https://www.bipm.org/en/publications/si-brochure).
 
-## GPS/ESTGPS 위치 정책 — 0.9.0
+## 10m 수평 경로 구간 — 0.10.0
+
+공간 구간의 목적은 이동 속도가 달라도 비슷한 이동거리 범위의 관측을 비교하는 것이다. 현재 적용 대상은 지원 온습도 관측이며 일반 NAMED_VALUE/CSV의 기존 통계 규약은 바꾸지 않는다. 기존 `mavlink_weather_v1`의 시간 요약과 `schema:3`의 1초 측정시각 창은 부가 자료로 유지한다. 1초는 기본 **요청 주기**, 10m는 기본 **공간 구간 목표 폭**이다. 한 요청에 여러 공간 구간을 넣으며 수신 원본을 초당 한 표본으로 줄이지 않는다. 온습도 원본은 호스트 배치당 최대128개이며 초과 표본도 기존 시간 통계와 ingest의 공간 통계에는 반영하고 `raw_dropped`로 표시한다. 공간 통계가 있다는 이유로 초과 원본까지 보존된 것으로 해석하지 않는다. 공간 레코드·전송 큐도 고정 상한과 손실 계수를 갖는다.
+
+### 경로와 적응 폭
+
+측정시각의 ENU 수평속력 `u[k]=hypot(v_E[k],v_N[k])`로 `s[k+1]=s[k]+(u[k]+u[k+1])*Δt/2`를 계산한다. 이는 수평 경로 길이이며 시작점에서의 직선 거리·3차원 이동거리·누적 고도가 아니다. 위경도 위치 차분의 길이를 매 표본 더하면 정지 위치 잡음만으로 거리가 늘 수 있어 그 방식을 사용하지 않는다. 속도는 유한하다는 사실 외에 해당 측정시각의 유효성이 필요하다. 속도 자체의 잡음도 속력의 양의 편향을 만들 수 있으므로 정지 경로 거리의 절대 정확도를 보증하지 않는다. [거리 잡음 연구](https://pmc.ncbi.nlm.nih.gov/articles/PMC4786863/)
+
+같은 측정시각의 온도·습도와 여러 센서는 하나의 수평 이동 단계를 공유한다. 시계/부팅·입력 소스·원점·항법 연속 구간 또는 위치 출처가 바뀌거나, 위치/속도를 확인할 수 없거나, 관측 간격이 `spatial_gap_ms`를 넘으면 경로 연속성을 끊는다. 역순 표본은 경로에 반영하지 않고 late 진단을 남긴다. 미상 관측은 공간 구간에 억지로 배정하지 않고 기존 원본/시간 요약에 남긴다. ESTGPS의 500ms 속도·상태 유효 조건과 최대 30초 수신기 DR 조건은 별도이며 공간 설정으로 늘리지 않는다.
+
+목표 폭을 `L0=spatial_step_m`, 관측된 표본 간 수평 이동거리를 `d`라고 하면 적응 모드의 새 구간 명목 폭은 `L=max(L0,d)`를 기준으로 한다. 10.01m 간격을 불필요하게20m로 올림하지 않으며 실제 간격25m라면 폭도25m를 기준으로 한다. 폭 변경은 새 구간 경계에서 적용하고 이미 열린 구간의 폭·범위를 도중에 바꾸지 않는다. 모듈은 실제 폭과 명목 구간 범위, 표본이 실제 차지한 경로 범위와 진입 간격을 함께 보존한다. 폭 감소에는 연속된 두 구간 진입의 더 작은 간격 확인을 사용하고, 완료 레코드 큐가 포화하면 적응 모드에서 단일 간격 기준과 기존 폭의 두 배 중 큰 값으로 다음 폭을 넓히는 보호 정책을 사용한다(모듈 폭 상한 이내). 따라서 실제 명목 폭이 단일 간격 공식보다 클 수 있다. `spatial_adaptive=0`은 목표 폭을 유지하되 채우지 못한 간격을 표시한다.
+
+표본이 없는 여러 구간을 건너뛰어도 빈 구간이나 가상의 경계 측정값을 만들지 않는다. 명목상 구간 폭이 일정해도 실제 대표 표본의 위치 간격이 꼭 그 폭과 같지는 않다. 표본 간격 초과와 경로 불연속은 진단으로 남기며 복원된 관측 수로 세지 않는다.
+
+### 통계와 누적 revision
+
+출력은 `mavlink_weather_v1.records[].spatial` 내부의 `schema: "mavlink_spatial_v1"` 객체다. `spatial_enabled=0`이면 이 추가 객체를 보내지 않는다. 구간마다 metric·message_id·sensor_id·sensor_instance·위치 출처를 구분하고 실제 대표 표본 하나와 n·평균·M2·최솟값·최댓값·시각 범위를 유지한다. 대표 표본의 값·시각·위치·품질은 함께 선택하며 평균을 그 표본의 위치에서 잰 값으로 바꾸지 않는다. 표본분산은 n≥2일 때 `M2/(n−1)`, n<2일 때 null이다. 미상 측정·항법 오차는 null이다.
+
+진행 중 구간은 1초 전송 때 닫지 않는다. 새 표본이 있으면 같은 구간의 누적 revision을 보내고, 구간 경계를 넘으면 완료, 연속성을 잃으면 중단 상태로 마감한다. 전송 직전에 새 표본이 없는 진행 구간은 반복 갱신하지 않는다. JSON의 `state`는 `partial`·`complete`·`interrupted`를 구별한다. 누적 경로·구간 식별자는 `src/spatial.h`, 표현은 `src/spatial.c`의 `sp_batch_json`을 따른다.
+
+| 공간 JSON 필드 | 의미 |
+|---|---|
+| `target_step_m`, `adaptive`, `gap_us` | 목표 폭·적응 사용 여부·관측 간격 한도; `gap_us`는 µs 십진 문자열 |
+| `path` | 최신 경로의 known·path_id·bin_index·누적 s_m·effective_width_m |
+| `counters` | 수신/공간 반영/미상/거부/지연/경로/완료/손실/간격 초과/운동 불일치 진단과 flags |
+| `bins[]` | 완료·중단 레코드와 변경된 진행 레코드의 누적 snapshot |
+| `continuity_key`, `path_id`, `bin_index`, `revision` | 정밀도를 보존하는 64비트 십진 문자열 |
+| `metric`, `message_id`, `sensor_id`, `sensor_instance`, `source_kind` | 센서/물리량/위치 출처 그룹; GPS와 ESTGPS를 구별 |
+| `width_m`, `interval_start_m`, `interval_end_m` | 구간의 실제 명목 폭과 경로상 경계(m) |
+| `observed_start_m`, `observed_end_m`, `entry_step_m` | 실제 표본이 차지한 경로 범위와 진입 표본 간 이동거리(m) |
+| `t_start_us`, `t_end_us` | 실제 표본의 부팅 µs 시각 범위, 64비트 십진 문자열 |
+| `statistics` | n·mean·m2·variance·min·max; variance만 n<2에서 null |
+| `representative` | 실제 표본의 값·시각·위치·속도·품질·미상 오차, 기존 온습도 표본 구조 |
+| `flags`, `quality` | 경로 진단과 원본 품질 OR; 센서 정확도의 숫자 순위가 아님 |
+
+서버의 구간 키는 **송신자/세션 + continuity_key + path_id + bin_index + metric/message_id/sensor_id/sensor_instance/source_kind**다. 같은 키에서 가장 큰 revision만 유지하고 낮거나 같은 revision 재전송은 중복으로 처리한다. 누적 n·평균·M2는 새 revision으로 **교체**하며, partial 여러 개와 마지막 complete를 더하면 중복 집계다. 서로 다른 완료 구간을 합칠 때만 n·평균·M2의 결합식을 적용한다. 요청의 batch/seq 재시도 중복 제거와 구간 revision 교체는 각각 필요하다.
+
+진행 구간의 누적 통계는 고정 상태로 유지하고 원본은 기존 배치 계약에 따라 ACK 후 해제한다. 송신 작업자는 snapshot의 불변 사본을 가져가 HTTP 204를 받을 때까지 재시도해야 한다. snapshot을 만들었다는 이유만으로 운송 계층의 확인되지 않은 사본을 버리지 않는다.
+
+### 표본 밀도와 물리 응답의 한계
+
+균일한 속도 `v`, 원본 표본률 `fs`에서 원본 간격은 `Δs≈v/fs`, 목표 폭 L의 기대 표본 수는 `n≈fs*L/v`다. 목표 간격 이하의 실제 표본을 얻으려면 대략 `fs≥v/L`이 필요하지만 이것만으로 공간 기상장을 복원할 수는 없다. 관측이 느린 센서를 수집기에서 복제·보간하여 표본률을 높이지 않는다. 센서 출력 설정 자체를 속도로 자동 변경하지 않으며 가용 원본을 모두 받아 공간 구간 선택/폭을 적응한다. 느리게 이동해 n이 증가해도 자기상관과 실제 시간/공간 변화가 섞이므로 정확도 향상이나 `표준오차=표준편차/√n`를 자동 주장하지 않는다. [NIST 자기상관 평균 불확도](https://www.nist.gov/publications/calculation-uncertainty-mean-autocorrelated-measurements?pub_id=151800), [NIST 독립 반복관측 조건](https://physics.nist.gov/cuu/Uncertainty/typea.html)
+
+SHTC3 공개 데이터시트 v4(2022-12) 표5의 normal 변환은 typ10.8/max12.1ms, low-power 변환은 typ0.7/max0.8ms다. 이 값은 온습도 한 쌍의 변환 시간이며 정격 최대 반복주파수나 대기 응답속도가 아니다. 문서에는 보증 최대 반복 Hz가 별도로 없고 현재 PX4 드라이버의 10Hz는 이 프로젝트 설정이다. 표1의 RH 응답은 τ63%=8s(25°C·기류1m/s), 표2의 온도 응답은 τ63%=<5~30s이며 기판 열전도·실장에 따라 달라진다. [제조사 데이터시트](https://sensirion.com/resource/datasheet/shtc3)
+
+1차 지연 모형 `τ·dy/dt+y=x`와 일정 속도를 가정하면 공간 기억길이는 대략 `vτ`다. 예를 들어 RH τ=8s·속도20m/s에서는 약160m이며 이는 모델에 따른 추정이다. **10m bin은 분류 폭이고, 10m의 독립적인 물리 관측 해상도나 위치 정확도 보증이 아니다.** 알려진 센서 시정수·외함·통풍·복사열 교정 없이 역필터/자동 위치 이동을 적용하지 않는다.
+
+### 계산과 저장공간 계약
+
+경로 한 단계는 O(1), 그룹 집계는 최대16개 고정 그룹 검색 O(16)이며 Welford 평균/M2 갱신은 그룹당 O(1)이다. 이동거리가 커져도 건너뛴 bin마다 반복하거나 표본을 생성하지 않는다. 추가 CPU/s 예산은 `f_time*C_path + f_weather*(C_group+C_statistics) + f_send*(C_snapshot+C_JSON)`으로 구분한다. 여기서 `f_time`은 서로 다른 유효 온습도 측정시각 수, `f_weather`는 실제 온습도 관측 수다. 같은 시각의 온도·습도에 경로를 두 번 더하지 않는다. JSON 생성·전송은 송신 작업자에서 수행하며 측정 경로에서 네트워크를 기다리지 않는다. 이는 OS/I/O·mutex·소켓을 포함한 WCET 보장이 아니다.
+
+현재 헤더의 공간 상태는 최대16개 진행 그룹·128개 완료 레코드와 최대144개 snapshot 레코드로 제한한다. 공간 원본을 별도로 무한 복제하지 않는다. 정지해 진행 구간이 오래 열려도 n·M2·대표 표본 등 고정 상태만 갱신한다. 공간 레코드 초과는 손실 계수로 남기며, raw/큐 용량과 전체 고정 메모리의 최종 수치는 `--sizes`와 해당 버전 검증 기록을 따른다.
+
+## GPS/ESTGPS 위치 정책 — 0.9.0 이후
 
 `GLOBAL_POSITION_INT`는 FC가 융합한 전역 항법 결과이고 `GPS_RAW_INT`는 GPS 센서 상태다. 둘을 같은 GPS 원시 좌표로 취급하지 않는다. [공식 GLOBAL_POSITION_INT](https://mavlink.io/en/messages/common.html#GLOBAL_POSITION_INT), [GPS_RAW_INT](https://mavlink.io/en/messages/common.html#GPS_RAW_INT).
 
@@ -173,7 +230,7 @@ SHTC3용 소프트웨어 모듈의 원본은 `src/px4/shtc3/`에 둔다. sensor_
 
 ## 혼합 관측의 전송 묶음
 
-운용 모드에서 기존 key–value와 새 온습도 묶음이 함께 대기하면 기본1초 요청 주기를 유지하면서 다음 형식으로 완성 묶음을 보낸다. 기본 최대4개이며, 혼합 시 아래의 최소2조각 규칙을 따른다. 각 payload는 원래의 완전한 envelope다. 한 종류만 대기하면 기존 schema3 또는 mavlink_weather_v1을 직접 보낸다.
+운용 모드에서 기존 key–value와 온습도 레코드가 함께 대기하면 기본1초 요청 주기를 유지하면서 `mavlink_router_bundle_v1`으로 묶는다. 공간 집계는 온습도 payload의 `records[].spatial`에 포함되며 별도의 bundle kind가 아니다. 아래 weather payload는 envelope 구조를 줄여 쓴 예이며 0.10.0 서버는 그 안의 추가 공간 객체도 처리해야 한다. 기본 최대4개이며, 혼합 시 아래의 최소2조각 규칙을 따른다. 각 payload는 원래의 완전한 envelope다. 한 종류만 대기하면 기존 schema3 또는 mavlink_weather_v1을 직접 보낸다.
 
 ```json
 {"schema":"mavlink_router_bundle_v1","records":[

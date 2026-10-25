@@ -24,7 +24,7 @@
 typedef char tm_snapshot_under_64k[(sizeof(tm_snapshot)<=65536u) ? 1 : -1];
 
 enum { KEY_NONE=0, KEY_UP=256, KEY_DOWN, KEY_ENTER, KEY_ESCAPE, KEY_BACK, KEY_CLEAR };
-enum { FIELD_COUNT=33 };
+enum { FIELD_COUNT=37 };
 static const char *const fields[FIELD_COUNT]={
     "url","stream","session","token_env","origin_lat","origin_lon","origin_alt",
     "send_interval_ms","connect_timeout_ms","io_timeout_ms","max_windows",
@@ -32,7 +32,8 @@ static const char *const fields[FIELD_COUNT]={
     "input_mode","serial_port","serial_baud","websocket_url","auto_scan","probe_ms",
     "link_timeout_ms","reconnect_ms","target_system","target_component",
     "system_time_uncert_us","accel_bound_mps2","duration_ms","unit_map","origin_auto",
-    "udp_bind","udp_port","udp_enabled"
+    "udp_bind","udp_port","udp_enabled",
+    "spatial_step_m","spatial_gap_ms","spatial_enabled","spatial_adaptive"
 };
 typedef struct {
     int ansi, input_ready, csv_console;
@@ -497,7 +498,18 @@ static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
         write_text(&w," active=%s\n",source_name[0] ? source_name : "none");
         if(s->source_error[0]) write_text(&w,"source error=%.159s\n",s->source_error);
     }
-    if(mav) { render_weather(&w,s,c,r); render_location(&w,s,ansi); }
+    if(mav) {
+        render_weather(&w,s,c,r); render_location(&w,s,ansi);
+        if(c->spatial_enabled) {
+            write_text(&w,"spatial target=%.3gm effective=",c->spatial_step_m);
+            if(s->spatial_known) write_text(&w,"%.3gm path=%.2fm",s->spatial_effective_m,s->spatial_distance_m);
+            else write_text(&w,"unknown (position/velocity needed)");
+            write_text(&w," %s open=%u done=%" PRIu64 "\n",c->spatial_adaptive ? "adaptive" : "fixed",s->spatial_open,s->spatial_completed);
+            if(s->spatial_dropped || s->spatial_flags || s->spatial_undersampled)
+                write_text(&w,"spatial flags=%08" PRIx32 " dropped=%" PRIu64 " unlocated=%" PRIu64 " sparse_steps=%" PRIu64 "\n",
+                    s->spatial_flags,s->spatial_dropped,s->spatial_unknown,s->spatial_undersampled);
+        }
+    }
     if(compact) write_text(&w,"input bytes=%" PRIu64 " accepted=%" PRIu64 " rejected=%" PRIu64 " rate=%.1f/s\n",
             s->input_bytes,s->accepted,s->rejected,r->accepted);
     else write_text(&w,"input bytes=%" PRIu64 " lines=%" PRIu64 " accepted=%" PRIu64 " rejected=%" PRIu64
@@ -652,6 +664,10 @@ static void field_value(const tb_config *c,unsigned field,char *buf,size_t cap,i
     case 30: (void)snprintf(buf,cap,"%s",c->udp_bind); break;
     case 31: (void)snprintf(buf,cap,"%u",c->udp_port); break;
     case 32: (void)snprintf(buf,cap,"%u",c->udp_enabled); break;
+    case 33: (void)snprintf(buf,cap,"%.17g",c->spatial_step_m); break;
+    case 34: (void)snprintf(buf,cap,"%u",c->spatial_gap_ms); break;
+    case 35: (void)snprintf(buf,cap,"%d",c->spatial_enabled); break;
+    case 36: (void)snprintf(buf,cap,"%d",c->spatial_adaptive); break;
     default: if(cap) buf[0]='\0'; break;
     }
 }

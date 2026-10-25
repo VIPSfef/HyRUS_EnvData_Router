@@ -8,6 +8,7 @@
 #include "config.h"
 #include "monitor.h"
 #include "router_input.h"
+#include "spatial.h"
 #include <signal.h>
 #include <stdarg.h>
 #include <ctype.h>
@@ -83,6 +84,8 @@ typedef struct {
     mutex_t mutex;
     tb_batch current, queue[QUEUE_CAP];
     weather_batch weather_current, weather_queue[QUEUE_CAP];
+    sp_state spatial;
+    sp_batch spatial_queue[QUEUE_CAP];
     uint8_t queue_weather[QUEUE_CAP];
     uint64_t weather_last_seal_ms;
     unsigned head, count;
@@ -278,12 +281,13 @@ static void seal(app *a) {
  * A sender interval seals a host collection window; it is NOT sensor time. */
 static void seal_weather(app *a) {
     unsigned slot;
-    if(!a->weather_current.n) return;
+    if(!a->weather_current.n && !a->spatial.completed_n) return;
     if(a->count==QUEUE_CAP) {
         ++a->loss.queue_windows; a->loss.queue_samples+=a->weather_current.n;
     } else {
         slot=(a->head+a->count)%QUEUE_CAP;
         a->weather_queue[slot]=a->weather_current; a->queue_weather[slot]=1;
+        sp_take_snapshot(&a->spatial,&a->spatial_queue[slot]);
         a->queued_at[slot]=now_ms();
         (void)snprintf(a->queue_session[slot],sizeof(a->queue_session[slot]),"%s",a->active_session);
         memcpy(a->queue_origin[slot],a->origin,sizeof(a->origin));
@@ -303,6 +307,8 @@ static void ingest_weather(app *a,const mi_event *e) {
     a->source_system=e->sysid; a->source_component=e->compid;
     if(!a->weather_current.n) weather_batch_init(&a->weather_current,now_ms());
     if(weather_batch_add(&a->weather_current,s)) {
+        if(a->config.spatial_enabled)
+            (void)sp_add(&a->spatial,s,((uint64_t)a->route_generation<<32)|s->navigation_segment,s->has_velocity);
         ++a->diag.accepted; a->diag.last_receipt_ms=now_ms();
         if(a->weather_current.n>a->weather_current.raw_n) ++a->loss.raw_samples;
         /* TUI overview aggregates metric counts only. Wire groups retain each
@@ -415,6 +421,7 @@ static void mavlink_event(void *context,const mi_event *event) {
     }
     lock(&a->mutex);
     if(event->kind==MI_RESET) {
+        sp_break(&a->spatial,SP_FLAG_CONTEXT_CHANGE);
         seal(a); seal_weather(a);
         a->origin_known=!a->config.origin_auto;
         a->metric_n=0; a->have_last=a->have_sealed=0; a->watermark_us=0;
@@ -426,6 +433,7 @@ static void mavlink_event(void *context,const mi_event *event) {
         (void)snprintf(a->active_session,sizeof(a->active_session),"%.28s.%016" PRIx64 ".%u",
                        a->session,a->run_nonce,a->route_generation);
     } else if(event->kind==MI_ORIGIN) {
+        sp_break(&a->spatial,SP_FLAG_CONTEXT_CHANGE);
         memcpy(a->origin,event->origin,sizeof(a->origin)); a->origin_known=1;
     } else if(event->kind==MI_CLOCK) {
         a->raw_clock_boot=event->boot_us; a->raw_clock_utc=event->utc_us; a->raw_clock_uncert=event->uncert_us;
@@ -584,7 +592,7 @@ static int http_open(http *h, const tb_config *config) {
         h->route[n + c.dwExtraInfoLength] = 0;
     }
     h->flags = c.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
-    h->session = WinHttpOpen(L"mavlink_telemetry_data_router/0.8.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    h->session = WinHttpOpen(L"mavlink_telemetry_data_router/0.10.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                             WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!h->session) return 0;
     if (!WinHttpSetTimeouts(h->session, (int)config->connect_timeout_ms,
@@ -760,6 +768,12 @@ static int encode_weather(app *a,unsigned head) {
     n=weather_batch_json(&a->weather_queue[head],wire+used,sizeof(wire)-used);
     if(n<0) return 0;
     used+=(size_t)n;
+    if(a->config.spatial_enabled) {
+        if(!test_append(&used,",\"spatial\":")) return 0;
+        n=sp_batch_json(&a->spatial_queue[head],wire+used,sizeof(wire)-used);
+        if(n<0) return 0;
+        used+=(size_t)n;
+    }
     return test_append(&used,"}]}\n") ? (int)used : 0;
 }
 static int encode(app *a, unsigned head, unsigned n, losses l, const tc_report *report) {
@@ -900,6 +914,15 @@ static void snapshot(void *context, tm_snapshot *out) {
     out->oldest_age_ms = a->count ? now - a->queued_at[a->head] : 0;
     out->last_boot_us = a->live ? a->diag.last_boot_us : (a->have_last ? a->last_t : 0);
     out->have_clock = tc_get_report(&a->clock, &out->clock);
+    out->spatial_known=a->spatial.report.path_known;
+    out->spatial_effective_m=a->spatial.report.effective_width_m;
+    out->spatial_distance_m=a->spatial.report.s_m;
+    out->spatial_open=a->spatial.report.open_n;
+    out->spatial_completed=a->spatial.report.completed_records;
+    out->spatial_unknown=a->spatial.report.unknown_samples;
+    out->spatial_dropped=a->spatial.report.dropped_records;
+    out->spatial_undersampled=a->spatial.report.undersampled_steps;
+    out->spatial_flags=a->spatial.report.flags;
     unlock(&a->mutex);
 }
 #ifdef _WIN32
@@ -944,8 +967,9 @@ static void *sender(void *arg)
         tc_report report;
         if (now < next) { pause_ms((unsigned)(next - now > 100 ? 100 : next - now)); continue; }
         lock(&a->mutex);
+        if(a->eof && a->config.spatial_enabled) sp_break(&a->spatial,SP_FLAG_CONTEXT_CHANGE);
         if (!a->test_mode && a->current.n && (a->eof || (a->live && now>=a->last_seal_ms && now-a->last_seal_ms>=interval))) seal(a);
-        if(a->test_mode!=1 && a->weather_current.n && (a->eof || (now>=a->weather_last_seal_ms && now-a->weather_last_seal_ms>=interval))) seal_weather(a);
+        if(a->test_mode!=1 && (a->weather_current.n || a->spatial.completed_n) && (a->eof || (now>=a->weather_last_seal_ms && now-a->weather_last_seal_ms>=interval))) seal_weather(a);
         head = a->head;
         is_weather=a->count && a->queue_weather[head];
         n = a->count < a->config.max_windows ? a->count : a->config.max_windows;
@@ -1002,6 +1026,7 @@ static void *sender(void *arg)
                 for(released=0;released<n;++released) {
                     unsigned slot=(a->head+released)%QUEUE_CAP;
                     memset(&a->weather_queue[slot],0,sizeof(a->weather_queue[slot]));
+                    memset(&a->spatial_queue[slot],0,sizeof(a->spatial_queue[slot]));
                     memset(&a->queue[slot],0,sizeof(a->queue[slot]));
                     memset(&a->test_queue[slot],0,sizeof(a->test_queue[slot]));
                 }
@@ -1141,6 +1166,14 @@ int main(int argc, char **argv) {
     }
     if (!cfg_validate(&a->config, SEND_WINDOWS, error, sizeof(error))) {
         fprintf(stderr, "Configuration: %s\n", error); return 1;
+    }
+    {
+        sp_options spatial_options;
+        sp_options_default(&spatial_options);
+        spatial_options.step_m=a->config.spatial_step_m;
+        spatial_options.gap_us=(uint64_t)a->config.spatial_gap_ms*1000;
+        spatial_options.adaptive=a->config.spatial_adaptive;
+        sp_init(&a->spatial,&spatial_options);
     }
     a->live=!strcmp(a->config.input_mode,"mavlink");
     if(a->live && !run_nonce(&a->run_nonce)) { fprintf(stderr,"Could not generate unique router run ID\n"); return 1; }
