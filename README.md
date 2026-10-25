@@ -152,7 +152,22 @@ SHTC3 칩은 **3.3 V I²C, 주소0x70**을 사용합니다. 칩 전원 범위는
 
 PX4를 업데이트할 때는 새 체크아웃에서 오버레이의 검사 모드부터 실행하고, 통과한 뒤 적용·빌드합니다. 도구는 자동 git pull/reset이나 강제 패치를 하지 않으며, 기존 드라이버 파일에 다른 수정이 있으면 덮어쓰지 않습니다. 공식 MAVLink XML 정의는 유지하고 ASLUAV를 포함하는 wrapper만 추가합니다.
 
-현재 Pixhawk 6C의 PX4 1.16.0에서 연결만 확인하려면 [제품 ID·CRC 진단 안내](support/px4/pixhawk6c-v1.16-diagnostic/README.md)를 사용합니다. 이 별도 펌웨어는 `shtc3_probe -b 2` 명령을 제공하며, 위 SENS_ATMOS 통합 패치와 구분합니다. 빌드된 파일은 `build/px4-fmu-v6c-v1.16/`에 있습니다. 2026-10-25 승인 후 실물 업로드·쓰기 검증·재부팅을 완료하고 I²C2의 `0x70`에서 제품 ID `0x0887`·CRC `0x5B` 일치를 확인했습니다. 기존 설정 1,177개는 모두 동일했고, 같은 부팅 세션에서 단발 검사 전후 차압계 통신 오류는 0회를 유지했습니다.
+현재 실물 Pixhawk 6C의 PX4 1.16.0에는 [SHTC3 실측 전송 구성](support/px4/pixhawk6c-v1.16-weather/README.md)을 사용합니다. I²C2의 센서 하나를 자동 시작하고, 공식 `SENS_ATMOS`에 측정 명령 시각과 온습도를 담아 USB MAVLink 2로 보냅니다. 제품 ID만 확인하는 [앞선 진단판](support/px4/pixhawk6c-v1.16-diagnostic/README.md)은 별도로 보존합니다.
+
+Windows에서 실제 TCP 21000 시험 서버와 수집기 TUI를 다시 실행하려면 프로젝트 폴더의 **서로 다른 두 터미널**을 사용합니다. 첫 터미널:
+
+```powershell
+& '.\build\windows-x64\tools\mavlink_telemetry_data_router_test_server.exe'
+```
+
+둘째 터미널은 처음 한 번 설정 예제를 복사한 뒤 실행합니다. 기존 설정 파일이 있으면 복사 단계를 생략합니다. TUI의 수정·저장은 이 복사본에 적용됩니다.
+
+```powershell
+Copy-Item '.\config\shtc3-physical.ini.example' '.\build\windows-x64\shtc3-live.ini'
+& '.\build\windows-x64\mavlink_telemetry_data_router_interactive.exe' --config '.\build\windows-x64\shtc3-live.ini' --test-weather
+```
+
+이 시험은 온습도만 1초마다 묶어 보내며 서버가 검증 후 HTTP 204로 확인한 묶음은 메모리에서 해제합니다. 관측값은 파일에 저장하지 않습니다. GPS fix/UTC가 없으면 위치와 UTC는 미상으로 표시합니다. Linux에서는 대응하는 `build/linux-x64/` 실행 파일과 tty 입력을 사용합니다. 일반 운용 서버로 모든 종류의 데이터를 보낼 때는 `--test-weather`를 빼고 그 서버가 지원하는 주소와 스키마를 설정하세요.
 
 ## 시리얼·UDP 자동 선택과 QGC
 

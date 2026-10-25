@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<mavlink>
+  <!-- Include official dialects unchanged; no private message definitions. -->
+  <include>development.xml</include>
+  <include>ASLUAV.xml</include>
+  <messages/>
+</mavlink>

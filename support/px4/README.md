@@ -1,6 +1,6 @@
 # PX4 SHTC3 드라이버·공식 SENS_ATMOS 오버레이
 
-> **현재 Pixhawk 6C의 PX4 1.16.0 연결 진단:** [별도 제품 ID·CRC 진단 구성](pixhawk6c-v1.16-diagnostic/README.md)을 사용하세요. 아래의 기본 통합 구성은 다른 PX4 기준 커밋을 대상으로 하므로 기존 1.16.0 보드에 그대로 섞어 적용하지 않습니다.
+> **현재 실물 Pixhawk 6C의 PX4 1.16.0:** [SHTC3 실측·SENS_ATMOS 송신 구성](pixhawk6c-v1.16-weather/README.md)을 사용하세요. [제품 ID·CRC 전용 진단판](pixhawk6c-v1.16-diagnostic/README.md)은 따로 보존합니다. 아래의 기본 통합 구성은 다른 PX4 기준 커밋을 대상으로 하므로 기존 1.16.0 보드에 섞어 적용하지 않습니다.
 
 이 오버레이는 **SHTC3용 PX4 드라이버**와 **온습도 센서 한 개를 공식 `SENS_ATMOS`로 보내는 경로**를 제공합니다. ASLUAV dialect의 기존 정의를 사용하고 `common.xml`에 사설 필드를 추가하지 않습니다. 가상 센서 시험도 포함합니다. 실물 SHTC3의 제품 ID·CRC 통신은 별도 PX4 1.16.0 진단판에서 확인했으며, 실물 온습도 측정과 서버 전송은 아직 검증하지 않았습니다.
 

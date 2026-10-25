@@ -1,0 +1,19 @@
+# Real SHTC3 test profile. Use --test-weather with the local TCP 21000 test server.
+# This is a saved-settings example; observation data remain in RAM.
+input_mode=mavlink
+serial_port=auto
+serial_baud=115200
+auto_scan=1
+udp_enabled=1
+udp_bind=127.0.0.1
+udp_port=14540
+url=http://127.0.0.1:21000/ingest
+stream=physical-shtc3
+session=auto
+send_interval_ms=1000
+connect_timeout_ms=1000
+io_timeout_ms=1000
+origin_auto=1
+system_time_uncert_us=4294967295
+duration_ms=0
+summary=1
