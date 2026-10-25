@@ -65,7 +65,7 @@ def verify_source(repo, commit, archive):
     return entries
 
 
-def build(repo, output):
+def build(repo, output, runtime_archive, runtime_sha256):
     repo = repo.resolve()
     output = output.resolve()
     if git(repo, "status", "--porcelain").strip():
@@ -74,6 +74,19 @@ def build(repo, output):
         raise RuntimeError("Publish from the main branch")
     commit = git(repo, "rev-parse", "HEAD").decode().strip()
     short = commit[:12]
+    runtime_archive = runtime_archive.resolve()
+    runtime_pin = json.loads(git(repo, "show", commit + ":support/sharing/git-runtime.json").decode("utf-8"))
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", runtime_sha256):
+        raise RuntimeError("The Git runtime SHA256 must contain 64 hexadecimal digits")
+    if runtime_sha256.lower() != runtime_pin["archive"]["sha256"]:
+        raise RuntimeError("Git runtime SHA256 differs from the committed runtime pin")
+    if digest(runtime_archive) != runtime_sha256.lower():
+        raise RuntimeError("Git runtime archive SHA256 check failed")
+    with zipfile.ZipFile(runtime_archive) as runtime:
+        if not {"cmd/git.exe", "LICENSE.txt"}.issubset(runtime.namelist()):
+            raise RuntimeError("The official MinGit Windows archive layout is required")
+        if runtime.testzip() is not None:
+            raise RuntimeError("Git runtime archive CRC check failed")
     names = {
         "bundle": f"mavlink-router-{short}.bundle",
         "source": f"mavlink-router-source-{short}.zip",
@@ -107,13 +120,14 @@ def build(repo, output):
             "source_commit": commit, "source_branch": "main", "short_commit": short,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "bundle": {"file": names["bundle"], "sha256": digest(bundle), "bytes": bundle.stat().st_size},
-            "source_directory": "source",
+            "source_directory": "source", "git_runtime": runtime_pin,
         }
         readme = f"""다른 PC에서 소스와 문서를 가져오는 방법
 
 이 압축 파일은 Git 커밋 {commit}을 기준으로 만들었습니다.
-Git for Windows가 설치된 Windows PC에서 사용하세요. Git 자체는 포함하지 않았습니다.
-Python이나 C 빌드 도구는 이 가져오기 작업에 필요하지 않습니다.
+Windows x64 PC에서 사용하세요. 필요한 Git 실행 도구도 이 ZIP에 포함했습니다.
+Git, Python이나 C 빌드 도구를 별도로 설치하거나 내려받을 필요가 없습니다.
+Windows에 기본으로 들어 있는 PowerShell로 실행합니다.
 
 1. ZIP 전체를 새 전달 폴더에 풀어 주세요. ZIP 안에서 바로 실행하지 않습니다.
 2. Start-Sync.cmd를 두 번 클릭합니다.
@@ -133,7 +147,9 @@ OneDrive의 갱신되는 공유 폴더를 직접 쓰려면 -SharedDirectory로 �
 읽을 문서는 source\\README.md, source\\docs\\COLLABORATION.md에 있습니다.
 서버 개발자는 source\\docs\\SERVER_API.md와 source\\docs\\api\\README.md를 읽어 주세요.
 source 폴더는 이 배포본의 읽기용 소스 사본입니다. 실제 수정은 Git으로 복제한 작업 폴더에서 하세요.
+runtime 폴더는 함께 들어 있는 Git 실행 도구이므로 지우거나 따로 옮기지 마세요.
 파일 목록과 SHA256은 SHA256SUMS.txt에 있습니다.
+Git의 출처와 라이선스 위치는 THIRD-PARTY.txt에서 확인할 수 있습니다.
 
 이 배포물에는 운용 설정, 인증 토큰, 관측 기록이나 실행 중인 장치의 로그를 넣지 않았습니다.
 Git 원격 서버 게시나 OneDrive 클라우드 동기화 완료를 뜻하지는 않습니다.
@@ -149,6 +165,26 @@ Git 원격 서버 게시나 OneDrive 클라우드 동기화 완료를 뜻하지�
                 target.write_bytes(source.read(name))
             for name in ("Sync-MavlinkRouter.ps1", "Start-Sync.cmd"):
                 (package / name).write_bytes(source.read("support/sharing/" + name))
+        with zipfile.ZipFile(runtime_archive) as runtime:
+            runtime_root = (package / "runtime/git").resolve()
+            for info in runtime.infolist():
+                if info.is_dir():
+                    continue
+                target = runtime_root / info.filename
+                if not target.resolve().is_relative_to(runtime_root):
+                    raise RuntimeError("Unsafe path in Git runtime archive")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with runtime.open(info) as incoming, target.open("wb") as outgoing:
+                    shutil.copyfileobj(incoming, outgoing, length=1024 * 1024)
+        provenance = ("This package includes the unmodified official MinGit archive contents.\n"
+                      "Distribution: MinGit " + runtime_pin["version"] + " (Windows x64)\n"
+                      "Archive: " + runtime_pin["archive"]["url"] + "\n"
+                      "Archive SHA256: " + runtime_pin["archive"]["sha256"] + "\n"
+                      "Release: " + runtime_pin["release_url"] + "\n"
+                      "Source: " + runtime_pin["source_url"] + "\n"
+                      "Licenses: runtime/git/LICENSE.txt and all runtime/git/**/licenses files.\n"
+                      "All runtime files and included license notices are preserved.\n")
+        (package / "THIRD-PARTY.txt").write_text(provenance, encoding="utf-8")
         shutil.copyfile(bundle, package / names["bundle"])
         write_json(package / "LATEST.json", manifest)
         (package / "README-FIRST.txt").write_text(readme, encoding="utf-8")
@@ -189,9 +225,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--output-directory", type=Path)
+    parser.add_argument("--git-runtime-archive", type=Path, required=True)
+    parser.add_argument("--git-runtime-sha256", required=True)
     args = parser.parse_args()
     try:
-        output = build(args.repo, args.output_directory or args.repo / "build/sharing")
+        output = build(args.repo, args.output_directory or args.repo / "build/sharing",
+                       args.git_runtime_archive, args.git_runtime_sha256)
     except (OSError, RuntimeError, subprocess.SubprocessError, ValueError, KeyError, zipfile.BadZipFile) as error:
         parser.exit(1, "Handoff creation stopped: " + str(error) + "\n")
     print(output)

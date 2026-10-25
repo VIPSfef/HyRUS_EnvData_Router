@@ -174,6 +174,16 @@ class BundleSyncTests(unittest.TestCase):
         self.assertEqual(git(default_destination, "rev-parse", "HEAD"), self.commit_b)
         self.assertTrue((fake_local / "mavlink-router/bundles").is_dir())
 
+    def test_incomplete_bundled_git_is_not_replaced_by_installed_git(self):
+        # A partially extracted runtime must not silently select a different Git.
+        # This exercises the precedence rule with the real installed Git on PATH.
+        copied_script = self.shared / "Sync-MavlinkRouter.ps1"
+        shutil.copyfile(SCRIPT, copied_script)
+        (self.shared / "runtime/git").mkdir(parents=True)
+        result = self.sync(1, script=copied_script, default_shared=True)
+        self.assertIn("ZIP 전체를 새 폴더에 풀었는지 확인하세요", result.stdout)
+        self.assertFalse(self.destination.exists())
+
     def test_dirty_tracked_file_is_preserved(self):
         self.sync()
         self.publish("b")

@@ -1,15 +1,17 @@
 # 다른 PC에서 가져오기와 개발자 협업
 
-다른 PC에서는 전달받은 ZIP의 압축을 풀고 스크립트 하나를 실행하면 됩니다. 처음에는 소스와 문서, Git 변경 이력을 가져오고, 같은 PC에서 다시 실행하면 새 버전으로 업데이트합니다. Git 서버에 접속할 필요는 없습니다.
+다른 Windows x64 PC에는 공유용 ZIP 하나만 복사하면 됩니다. 압축을 모두 풀고 `Start-Sync.cmd`를 실행하면 처음에는 소스와 문서, Git 변경 이력을 가져옵니다. 나중에 새 ZIP을 받아 같은 방법으로 실행하면 기존 작업 폴더를 업데이트합니다. 필요한 Git도 ZIP에 들어 있으므로 받는 PC에서 별도 설치나 다운로드를 할 필요가 없습니다.
 
 ## ZIP 하나로 처음 가져오기와 업데이트하기
 
 공유용 ZIP의 이름은 `mavlink-router-handoff-커밋번호.zip`이며, 발행 PC의 `build\sharing` 폴더에 있습니다. 실행 파일 배포물이 아니라 소스·문서를 Git으로 가져오는 데 필요한 자료를 한데 모은 파일입니다.
 
-Windows에 **Git for Windows**가 설치되어 있어야 합니다. PowerShell에서 `git --version`을 실행했을 때 버전이 나오면 준비된 것입니다. 받는 PC에는 Git과 Windows PowerShell만 있으면 되며 Python은 필요하지 않습니다. Git 설치 프로그램은 ZIP에 포함하지 않으며, 스크립트가 자동으로 내려받거나 설치하지도 않습니다. Git이 없다면 [공식 다운로드 페이지](https://git-scm.com/install/windows)에서 먼저 설치하세요.
+공유용 ZIP은 **Windows x64용**입니다. Windows에 기본으로 있는 PowerShell 5.1과 ZIP 안의 Git으로 실행합니다. Git이나 Python을 따로 설치하지 않아도 되며, 업데이트할 때 인터넷의 Git 서버에 접속할 필요도 없습니다.
+
+Git은 공식 Git for Windows의 MinGit 배포본을 `runtime\git`에 넣었습니다. 배포본에 포함된 라이선스 문서도 함께 보관합니다. 스크립트는 이 Git을 직접 사용하며, 다른 프로그램을 자동 설치하거나 PC의 PATH를 바꾸지 않습니다. **ZIP 전체를 풀고 `runtime` 폴더를 스크립트 옆에 그대로 두세요.** 스크립트만 복사해서 실행하면 필요한 Git을 찾지 못할 수 있습니다.
 
 1. 전달받은 공유용 ZIP을 `다운로드\mavlink-router-share`처럼 **자료를 전달받을 폴더**에 풉니다. 기존 소스 작업 폴더에 풀지 마세요.
-2. 압축을 푼 폴더 안에 `Start-Sync.cmd`, `Sync-MavlinkRouter.ps1`, `LATEST.json`, `.bundle` 파일이 함께 있는지 확인합니다.
+2. 압축을 푼 폴더 안에 `Start-Sync.cmd`, `Sync-MavlinkRouter.ps1`, `LATEST.json`, `.bundle` 파일과 `runtime` 폴더가 함께 있는지 확인합니다.
 3. **`Start-Sync.cmd`를 두 번 클릭합니다.** 처음 가져오기인지 업데이트인지 스크립트가 알아서 판단합니다. 완료되거나 오류가 나면 창에 결과가 표시되고, 확인할 때까지 창이 유지됩니다.
 
 PowerShell에서 직접 실행하고 싶다면 압축을 푼 폴더에서 아래 명령을 사용해도 됩니다.
@@ -52,7 +54,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Sync-MavlinkRouter.ps1
 
 ## 직접 명령을 실행하는 방법 — 고급 참고
 
-자동 스크립트를 사용한다면 이 절의 명령을 따로 실행할 필요는 없습니다. Git이 어떤 순서로 동작하는지 확인하거나 수동으로 처리하고 싶을 때 참고하세요. 아래 Windows 명령은 **PowerShell** 기준이며, 오류가 나면 다음 단계로 넘어가지 말고 내용을 확인합니다.
+자동 스크립트를 사용한다면 이 절은 건너뛰어도 됩니다. Git이 어떤 순서로 동작하는지 확인하거나 수동으로 처리하고 싶은 개발자를 위한 참고입니다. 아래 예시는 `git` 명령을 사용할 수 있는 개발 PC를 기준으로 합니다. 공유용 ZIP을 실행하는 PC에는 Git을 따로 설치할 필요가 없습니다. Windows 명령은 **PowerShell** 기준이며, 오류가 나면 다음 단계로 넘어가지 말고 내용을 확인합니다.
 
 ### OneDrive로 받은 bundle 준비하기
 
@@ -64,6 +66,7 @@ OneDrive는 bundle을 전달하는 용도로 사용합니다. 실제 작업 폴�
 |---|---|
 | `Start-Sync.cmd` | 두 번 클릭해서 자동 가져오기·업데이트를 시작합니다. |
 | `Sync-MavlinkRouter.ps1` | 처음 가져오기와 이후 업데이트를 한 번에 처리하는 스크립트입니다. |
+| `runtime\git\` | 스크립트가 사용하는 Windows x64 Git과 배포본의 라이선스 문서입니다. 공유용 ZIP 안에 들어 있습니다. |
 | `LATEST.json` | 가장 최근에 공유한 bundle의 이름, 커밋 번호, SHA256을 알려 줍니다. |
 | `mavlink-router-커밋번호.bundle` | 소스·문서와 `main`의 전체 변경 이력을 담습니다. Git으로 가져올 때 사용합니다. |
 | `mavlink-router-source-커밋번호.zip` | 해당 커밋의 소스와 문서를 읽기 편하게 묶은 파일입니다. Git 이력은 들어 있지 않습니다. |
@@ -254,17 +257,23 @@ git push -u origin feature/describe-the-change
 
 ## 새 bundle을 발행하는 사람의 작업
 
-발행 PC에서는 프로젝트 폴더에서 다음 도구를 실행하는 방법을 권장합니다. 소스와 문서를 검토하고 `main`에 커밋한 뒤 실행하세요. 이 발행 도구에는 Python이 필요하지만, ZIP을 받는 PC에는 필요하지 않습니다.
+이 절은 새 배포본을 만드는 사람만 읽으면 됩니다. 발행 PC에는 Git과 Python 3.9 이상이 필요하지만, ZIP을 받는 PC에는 따로 설치할 프로그램이 없습니다. 먼저 소스와 문서를 검토하고 `main`에 커밋하세요.
+
+공식 Git for Windows에서 Windows x64 MinGit ZIP을 준비하고, 발행할 때 사용할 SHA256을 확인합니다. 아래 두 인수는 **발행 PC에 준비한 실제 파일 경로와 확인한 64자리 SHA256**으로 바꿔 실행하세요.
 
 ```powershell
-python support/sharing/package_handoff.py
+python support/sharing/package_handoff.py `
+  --git-runtime-archive 'C:\tools\MinGit-WINDOWS-X64.zip' `
+  --git-runtime-sha256 '확인한_SHA256_64자리'
 ```
 
-이 발행 명령은 Git과 Python 3.9 이상이 있는 원본 개발 PC에서 실행합니다. 받는 PC에는 Python이 필요하지 않습니다.
+발행 도구는 지정한 MinGit ZIP의 해시를 검사한 뒤, 파일과 라이선스 문서를 `runtime\git`에 함께 넣습니다. 받는 사람에게는 **`build\sharing`의 `mavlink-router-handoff-커밋번호.zip` 하나**만 전달하세요. 그 안에 실행 스크립트, Git, 전체 이력이 담긴 bundle, 배포 목록, 안내와 검증용 해시가 들어 있습니다. `source` 아래에는 소스와 문서 전체가 펼쳐져 있어 Git 작업을 하기 전에도 읽을 수 있습니다.
 
-도구는 커밋된 `main`을 기준으로 `build\sharing`에 전체 이력이 담긴 bundle, 단독 소스 ZIP, 공유용 handoff ZIP과 `LATEST.json`을 만듭니다. 받는 사람에게는 **`mavlink-router-handoff-커밋번호.zip` 하나**를 전달하면 됩니다. 이 ZIP의 루트에는 실행 스크립트·bundle·배포 목록·안내·검증용 해시가 있고, `source` 아래에는 소스와 문서 전체가 펼쳐져 있습니다.
+발행 도구가 별도로 만드는 bundle과 소스 ZIP은 개발자용 산출물입니다. 받는 사람에게 따로 복사하도록 요구하지 않습니다.
 
-### 직접 발행하는 방법 — 고급 참고
+### bundle과 소스 ZIP만 직접 만드는 방법 — 고급 참고
+
+아래 명령은 Git을 이미 사용하는 개발자가 bundle과 소스 ZIP만 만들 때 참고하세요. MinGit을 포함한 공유용 ZIP은 만들지 않으므로, **받는 사람에게 파일 하나만 전달하려면 위의 발행 도구를 사용합니다.**
 
 받는 PC의 명령이 최신 파일을 찾으려면 발행자가 `LATEST.json`도 함께 갱신해야 합니다. 소스 변경을 검토하고 `main`에 커밋한 다음, 아래 순서로 묶으세요. 전체 이력을 포함하므로 처음 받는 PC도 같은 bundle을 사용할 수 있습니다.
 

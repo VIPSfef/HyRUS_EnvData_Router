@@ -26,6 +26,9 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $script:GitPath = $null
+$oldGitExecPath = $env:GIT_EXEC_PATH
+$oldGitTemplateDirectory = $env:GIT_TEMPLATE_DIR
+$bundledGitEnvironment = $false
 $destinationLock = $null
 $bundleReadLock = $null
 $temporaryBundle = $null
@@ -109,11 +112,46 @@ try {
     # 이 프로세스에서만 UTF-8을 사용합니다. Git이 돌려주는 한글 경로도 보존합니다.
     [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
     $OutputEncoding = New-Object Text.UTF8Encoding($false)
-    $gitCommand = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($null -eq $gitCommand) {
-        throw 'Git이 설치되어 있지 않거나 PATH에 없습니다. Git for Windows를 설치한 뒤 새 PowerShell 창에서 다시 실행하세요.'
+    $scriptDirectory = $PSScriptRoot
+    if ([string]::IsNullOrWhiteSpace($scriptDirectory)) {
+        $scriptDirectory = Split-Path -Parent $PSCommandPath
     }
-    $script:GitPath = $gitCommand.Source
+    $bundledGitRoot = Join-Path $scriptDirectory 'runtime\git'
+    if (Test-Path -LiteralPath $bundledGitRoot) {
+        # 공식 MinGit 폴더를 그대로 사용합니다. 별도 설치나 PATH 변경은 없습니다.
+        foreach ($relativeExecutable in @('cmd\git.exe', 'ucrt64\bin\git.exe', 'mingw64\bin\git.exe')) {
+            $candidate = Join-Path $bundledGitRoot $relativeExecutable
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                $script:GitPath = [IO.Path]::GetFullPath($candidate)
+                break
+            }
+        }
+        if ($null -eq $script:GitPath) {
+            throw '압축에 포함된 Git 실행 파일이 없습니다. ZIP 전체를 새 폴더에 풀었는지 확인하세요.'
+        }
+        # 다른 Git 설치에서 물려받은 경로가 휴대용 Git의 구성 파일과 섞이지 않도록
+        # 이 실행 동안만 바꾸고, 끝날 때 원래 환경 변수로 되돌립니다.
+        $bundledGitEnvironment = $true
+        $env:GIT_EXEC_PATH = $null
+        $env:GIT_TEMPLATE_DIR = $null
+        foreach ($runtimeName in @('ucrt64', 'mingw64')) {
+            $gitRuntimeRoot = Join-Path $bundledGitRoot $runtimeName
+            if (-not (Test-Path -LiteralPath $gitRuntimeRoot -PathType Container)) { continue }
+            $gitExecPath = Join-Path $gitRuntimeRoot 'libexec\git-core'
+            $gitTemplateDirectory = Join-Path $gitRuntimeRoot 'share\git-core\templates'
+            if (Test-Path -LiteralPath $gitExecPath -PathType Container) { $env:GIT_EXEC_PATH = $gitExecPath }
+            if (Test-Path -LiteralPath $gitTemplateDirectory -PathType Container) { $env:GIT_TEMPLATE_DIR = $gitTemplateDirectory }
+            break
+        }
+    }
+    else {
+        # 소스 저장소에서 직접 실행하는 개발자는 이미 설치한 Git도 쓸 수 있습니다.
+        $gitCommand = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $gitCommand) {
+            throw '사용할 Git을 찾지 못했습니다. 공유 ZIP 전체를 풀고 Start-Sync.cmd를 실행하세요. 소스에서 직접 실행한다면 설치된 Git이 PATH에 있어야 합니다.'
+        }
+        $script:GitPath = $gitCommand.Source
+    }
     # Windows PowerShell 5.1의 -File 실행에서는 매개변수 기본값을 평가할 때
     # $PSScriptRoot가 아직 비어 있을 수 있으므로 본문에서 기본 경로를 정합니다.
     if (-not $PSBoundParameters.ContainsKey('SharedDirectory')) {
@@ -284,6 +322,10 @@ finally {
         Remove-Item -LiteralPath $temporaryBundle -Force -ErrorAction SilentlyContinue
     }
     if ($null -ne $destinationLock) { $destinationLock.Dispose() }
+    if ($bundledGitEnvironment) {
+        $env:GIT_EXEC_PATH = $oldGitExecPath
+        $env:GIT_TEMPLATE_DIR = $oldGitTemplateDirectory
+    }
     [Console]::OutputEncoding = $oldConsoleOutputEncoding
     $OutputEncoding = $oldOutputEncoding
 }

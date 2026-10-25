@@ -1,0 +1,15 @@
+{
+  "format": "mavlink-router-git-runtime/v1",
+  "distribution": "MinGit",
+  "version": "2.56.0.3",
+  "platform": "windows-x64",
+  "archive": {
+    "file": "MinGit-2.56.0.3-64-bit.zip",
+    "sha256": "2e5619966e588fde5f8122c5557cad50c0fbafcaed736689f40ec1dfb1d78ea7",
+    "bytes": 39854943,
+    "url": "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.3/MinGit-2.56.0.3-64-bit.zip"
+  },
+  "release_url": "https://github.com/git-for-windows/git/releases/tag/v2.56.0.windows.3",
+  "source_url": "https://github.com/git-for-windows/git/tree/v2.56.0.windows.3",
+  "licenses": "The official archive and all license files are preserved under runtime/git."
+}

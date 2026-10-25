@@ -2,6 +2,16 @@
 
 검토일: 2026-10-25. 현재 호스트 설계 버전은 0.10.0이다. 서버 API 문서와 공유 검증은 첫 절, 10 m 공간 구간 및 0.9.0 ESTGPS·실제 센서/PX4 검증은 각 버전/날짜의 기록을 따른다. 이전 내용의 수치·PASS는 당시 구현과 실행 범위를 보존한 이력이며 다른 검증으로 옮겨 해석하지 않는다. [현재 사용법](../README.md), [서버 API](SERVER_API.md), [기술 참조](REFERENCE.md)를 따른다.
 
+## 2026-10-25 · 별도 Git 설치가 필요 없는 단일 ZIP
+
+받는 PC에서 Git을 따로 설치해야 했던 제약을 없앴다. 공식 Windows x64 MinGit 2.56.0.3의 전체 배포 파일과 라이선스를 공유용 ZIP의 `runtime/git` 아래에 포함한다. 원본은 Git for Windows의 공식 릴리스이며, 배포 API가 제공한 SHA256 `2e5619966e588fde5f8122c5557cad50c0fbafcaed736689f40ec1dfb1d78ea7`과 다운로드 파일을 대조했다. 버전과 출처는 `support/sharing/git-runtime.json`에 고정하고, 발행 도구는 해당 해시와 다른 파일을 거부한다.
+
+자동 가져오기 스크립트는 함께 들어 있는 Git을 우선 사용한다. 최신 MinGit의 `ucrt64` 배치와 이전 `mingw64` 배치를 모두 확인하며, 내장 Git을 쓸 때는 Git 실행 도구와 템플릿 경로를 해당 프로세스에서만 지정하고 종료 시 되돌린다. 전역 PATH나 시스템 실행 정책을 바꾸지 않는다. 내장 런타임 폴더가 있으나 실행 파일이 빠졌으면 다른 Git으로 조용히 대체하지 않고 압축 전체를 풀었는지 확인하도록 안내한다.
+
+내장 런타임이 불완전할 때의 중단 검사까지 포함해 최종 PowerShell 스크립트의 회귀 검사 14개를 Windows PowerShell 5.1과 PowerShell 7에서 각각 통과했다.
+
+최종 배포본의 검증에서는 설치된 Git을 찾을 수 없도록 PATH를 제한하고, 별도 임시 사용자 홈과 캐시에서 압축을 푼 시작 파일을 실행한다. 최초 복제·재실행·이전 버전 업데이트와 파일별 SHA256을 확인한 결과는 `build/sharing/`의 최종 검증 기록에 남긴다. 받는 사람에게는 내부 발행 파일 대신 완성한 ZIP 하나만 전달한다.
+
 ## 2026-10-25 · 자동 가져오기 스크립트와 한 파일 배포
 
 `support/sharing/Sync-MavlinkRouter.ps1`을 추가했다. 처음에는 전체 이력을 가진 bundle을 복제하고, 이후에는 기존 `main`에서 이어지는 변경만 적용한다. 기본 작업 폴더는 사용자 홈의 `dev/mavlink_telemetry_data_router`이며, 전달 폴더나 캐시와 겹치지 않게 검사한다. `Start-Sync.cmd`는 이 스크립트를 Windows PowerShell에서 실행하고 결과를 확인할 때까지 창을 유지한다. 실행 정책 우회 옵션은 해당 프로세스에만 적용하며 PC 전체 설정을 바꾸지 않는다.
@@ -16,7 +26,7 @@ PowerShell 5.1에서 상속된 모듈 검색 경로에 따라 `Get-FileHash`를 
 
 가져오기 작업의 주된 비용은 bundle 크기 B에 대한 순차 파일 읽기 O(B), 작업 파일 수 N에 따른 Git 상태 검사, 이력 길이 H에 따른 선후 관계 확인이다. 해시 계산은 파일 크기와 무관하게 고정 크기 버퍼를 사용한다. 실제 시간은 디스크와 Git의 처리에 좌우되며, 실시간 수집 루프에서 실행하는 기능이 아니므로 수집기의 처리 주기에는 연산을 추가하지 않는다.
 
-`support/sharing/package_handoff.py`는 커밋된 `main`을 기준으로 bundle, 소스 ZIP과 공유용 ZIP을 만든다. 공유용 ZIP에는 실행할 스크립트와 시작 파일, 배포 목록, bundle, 안내문, 파일별 SHA256 및 `source/` 아래의 전체 소스·문서를 넣는다. 소스 ZIP을 Git blob과 바이트 단위로 대조하고 파일을 완성한 뒤 `LATEST.json`을 바꾼다. 최종 압축 해제본에서 실행한 검증과 크기·해시는 `build/sharing/`의 해당 배포 목록을 따른다. 받는 PC에는 Git for Windows가 필요하며 Git 설치 파일은 포함하지 않는다. Python은 발행할 때만 필요하다.
+`support/sharing/package_handoff.py`는 커밋된 `main`을 기준으로 bundle, 소스 ZIP과 공유용 ZIP을 만든다. 공유용 ZIP에는 실행할 스크립트와 시작 파일, 배포 목록, bundle, 안내문, 파일별 SHA256 및 `source/` 아래의 전체 소스·문서를 넣는다. 소스 ZIP을 Git blob과 바이트 단위로 대조하고 파일을 완성한 뒤 `LATEST.json`을 바꾼다. 최종 압축 해제본에서 실행한 검증과 크기·해시는 `build/sharing/`의 해당 배포 목록을 따른다. 이 최초 배포본은 받는 PC에 설치된 Git을 사용했다. 현재 배포본은 앞 절의 내장 MinGit을 사용하며 Python은 발행할 때만 필요하다.
 
 ## 2026-10-25 · 서버 API 문서와 Git 공유
 
