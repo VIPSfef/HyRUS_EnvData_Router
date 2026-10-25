@@ -64,6 +64,28 @@ static void event(mi_input *m, mi_event_kind kind, uint64_t boot)
     e.origin[2] = m->options.origin_alt;
     m->emit(m->context, &e);
 }
+static void clear_position_state(mi_input *m)
+{
+    m->have_gps_fix = m->have_gps_anchor = m->have_global = 0;
+    m->have_local_velocity = m->estimate_active = m->have_estimator_status = m->have_previous_velocity = 0;
+    m->gps_anchor_us = m->gps_anchor_received_ms = m->gps_fix_boot_us = 0;
+    m->have_gps_fix_clock = 0;
+    m->navigation_segment = 0; m->absolute_invalid_active = 0;
+    m->global_boot_us = m->global_received_ms = 0;
+    m->local_velocity_us = m->local_velocity_received_ms = 0;
+    m->estimate_boot_us = m->estimator_boot_us = m->estimator_received_ms = 0;
+    m->estimator_flags = 0;
+    m->report.gps_fix = m->report.gps_fix_fresh = m->report.have_gps_anchor = 0;
+    m->report.have_navigation = 0;
+    m->report.position_kind = WEATHER_POSITION_UNKNOWN;
+    m->report.estimate_source = MI_ESTIMATE_NONE;
+    m->report.estimation_age_us = UINT32_MAX;
+    m->report.position_flags = MI_ESTGPS_NO_ANCHOR;
+    m->report.navigation_error_m = NAN;
+    m->report.gps_fix_received_ms = m->report.last_fix_boot_us = 0;
+    m->report.navigation_received_ms = m->report.navigation_boot_us = 0;
+    memset(m->report.navigation_v, 0, sizeof(m->report.navigation_v));
+}
 void mi_options_default(mi_options *o)
 {
     if (!o) return;
@@ -81,12 +103,21 @@ void mi_init(mi_input *m, const mi_options *o, mi_emit_fn emit, void *context)
         m->options.accel_bound_mps2 > 1e6) m->options.accel_bound_mps2 = 10.0;
     m->emit = emit; m->context = context; m->epoch = 1;
     m->gps_error_m = NAN;
+    clear_position_state(m);
     m->origin_set = !m->options.origin_auto;
     m->report.selected_system = m->options.target_system;
     m->report.selected_component = m->options.target_component;
 }
 void mi_link_reset(mi_input *m)
-{ if (m) { m->used = 0; m->needed = 0; } }
+{
+    if (m) {
+        m->used = 0; m->needed = 0;
+        m->report.no_navigation += m->pending_count + m->weather_pending_count;
+        m->pending_count = m->weather_pending_count = m->nav_count = 0;
+        m->gps_error_m = NAN; m->gps_accuracy_ms = 0;
+        clear_position_state(m);
+    }
+}
 void mi_get_report(const mi_input *m, mi_report *r)
 { if (m && r) { *r = m->report; r->pending = m->pending_count + m->weather_pending_count; } }
 
@@ -115,6 +146,7 @@ static void reset_clock(mi_input *m)
     m->high_boot_us = m->wrap_ms = m->last_emitted_us = m->last_watermark_us = 0;
     m->last_boot_ms = m->next_seq = m->emitted_seq = 0; m->have_boot = m->have_emitted = 0;
     m->gps_error_m = NAN; m->gps_accuracy_ms = 0;
+    clear_position_state(m);
     m->report.gps_fix = 0;
     m->report.have_navigation = 0;
     m->report.navigation_received_ms = m->report.navigation_boot_us = 0;
@@ -161,7 +193,51 @@ static int boot_usec(mi_input *m, uint64_t stamp, uint64_t *out)
     *out = stamp;
     return 1;
 }
-static void add_nav(mi_input *m, const tb_nav *n)
+static int gps_fresh(const mi_input *m, uint64_t now)
+{
+    return m->have_gps_fix && m->have_gps_fix_clock && m->have_boot &&
+        m->report.gps_fix >= 3 && m->report.gps_fix <= 8 &&
+        now >= m->report.gps_fix_received_ms &&
+        now - m->report.gps_fix_received_ms <= MI_GPS_FIX_FRESH_MS &&
+        (m->gps_fix_boot_us > m->high_boot_us ? m->gps_fix_boot_us - m->high_boot_us <= 1000 :
+         m->high_boot_us - m->gps_fix_boot_us <= MI_GPS_FIX_FRESH_MS * 1000);
+}
+static int gps_fresh_at(const mi_input *m, uint64_t stamp, uint64_t now)
+{
+    return gps_fresh(m, now) &&
+        (m->gps_fix_boot_us > stamp ? m->gps_fix_boot_us - stamp <= 1000 :
+         stamp - m->gps_fix_boot_us <= MI_GPS_FIX_FRESH_MS * 1000);
+}
+static int estimator_status_fresh(const mi_input *m, uint64_t stamp, uint64_t now)
+{
+    /* Status never owns or resets the source clock. Against millisecond nav
+     * time, allow only 1 ms of future timestamp quantization. */
+    if (!m->have_estimator_status || now < m->estimator_received_ms ||
+        now - m->estimator_received_ms > MI_EST_STATUS_FRESH_US / 1000) return 0;
+    if (m->estimator_boot_us > stamp) return m->estimator_boot_us - stamp <= 1000;
+    return stamp - m->estimator_boot_us <= MI_EST_STATUS_FRESH_US;
+}
+static int estimator_valid(const mi_input *m, uint64_t stamp, uint64_t now, uint16_t required)
+{
+    return estimator_status_fresh(m, stamp, now) &&
+        !(m->estimator_flags & (1024u | 2048u | ((required & 6u) == 6u ? 128u : 0u))) &&
+        (m->estimator_flags & required) == required;
+}
+static uint32_t estimation_age(const mi_input *m, uint64_t stamp)
+{
+    uint64_t age;
+    if (!m->have_gps_anchor || stamp < m->gps_anchor_us) return UINT32_MAX;
+    age = stamp - m->gps_anchor_us;
+    return age < UINT32_MAX ? (uint32_t)age : UINT32_MAX;
+}
+static int anchor_in_range(const mi_input *m, uint64_t stamp, uint64_t now)
+{
+    return m->have_gps_anchor && stamp >= m->gps_anchor_us &&
+        stamp - m->gps_anchor_us <= MI_EST_MAX_AGE_US &&
+        now >= m->gps_anchor_received_ms &&
+        now - m->gps_anchor_received_ms <= MI_EST_MAX_AGE_US / 1000;
+}
+static void add_nav(mi_input *m, const tb_nav *n, const mi_nav_info *info)
 {
     unsigned j, slot;
     if (!isfinite(n->p[0]) || !isfinite(n->p[1]) || !isfinite(n->p[2]) ||
@@ -170,17 +246,51 @@ static void add_nav(mi_input *m, const tb_nav *n)
         ++m->report.nav_rejected; return;
     }
     for (j = 0; j < m->nav_count; ++j) {
-        if (m->nav[j].t_us == n->t_us) { m->nav[j] = *n; return; }
+        if (m->nav[j].t_us == n->t_us) {
+            /* A real EKF position wins over receiver-side integration. */
+            if (m->nav_info[j].source == MI_ESTIMATE_EKF && info->source == MI_ESTIMATE_VELOCITY) return;
+            m->nav[j] = *n; m->nav_info[j] = *info; return;
+        }
         if (m->nav[j].t_us > n->t_us) break;
     }
     slot = j;
     if (m->nav_count == MI_NAV_CAP) {
         if (!slot) return;
         memmove(m->nav, m->nav + 1, (MI_NAV_CAP - 1u) * sizeof(m->nav[0]));
+        memmove(m->nav_info, m->nav_info + 1, (MI_NAV_CAP - 1u) * sizeof(m->nav_info[0]));
         --slot; --m->nav_count;
     }
-    for (j = m->nav_count; j > slot; --j) m->nav[j] = m->nav[j - 1];
-    m->nav[slot] = *n; ++m->nav_count;
+    for (j = m->nav_count; j > slot; --j) {
+        m->nav[j] = m->nav[j - 1]; m->nav_info[j] = m->nav_info[j - 1];
+    }
+    m->nav[slot] = *n; m->nav_info[slot] = *info; ++m->nav_count;
+}
+static void invalidate_absolute_navigation(mi_input *m, uint64_t stamp, uint64_t now)
+{
+    unsigned j, out = 0;
+    const int valid_velocity = estimator_valid(m, stamp, now, 2u | 4u);
+    if (!m->absolute_invalid_active) {
+        /* A segment barrier is fixed metadata, not a new coordinate. Keep
+         * valid velocity-derived points during a continuous ABS outage. */
+        if (m->navigation_segment == UINT32_MAX) { m->nav_count = 0; m->navigation_segment = 1; }
+        else ++m->navigation_segment;
+        m->absolute_invalid_active = 1;
+    }
+    for (j = 0; j < m->nav_count; ++j) {
+        if (m->nav[j].t_us >= stamp &&
+            (!valid_velocity || m->nav_info[j].source != MI_ESTIMATE_VELOCITY)) continue;
+        m->nav[out] = m->nav[j]; m->nav_info[out++] = m->nav_info[j];
+    }
+    m->nav_count = out;
+    for (j = 0; j < m->pending_count; ++j)
+        if (m->pending[j].sample.t_us >= stamp) m->pending[j].aligned = 0;
+    for (j = 0; j < m->weather_pending_count; ++j) {
+        weather_sample *w = &m->weather_pending[j].sample;
+        if (w->t_us < stamp) continue;
+        w->has_position = 0; w->position_kind = WEATHER_POSITION_UNKNOWN;
+        w->estimation_age_us = UINT32_MAX; w->pos_error_m = NAN;
+        w->quality &= ~MI_QUALITY_ESTGPS; m->weather_pending[j].aligned = 0;
+    }
 }
 static int name_ok(char *out, const uint8_t *name)
 {
@@ -221,7 +331,25 @@ static void observation(mi_input *m, uint64_t stamp, uint64_t now,
     (void)strcpy(p->sample.key, key); (void)strcpy(p->sample.unit, unit);
     p->sample.value = value;
 }
-static int align_sample(mi_input *m, tb_sample *s)
+static void aligned_metadata(tb_sample *s, mi_nav_info *out, const mi_nav_info *a, const mi_nav_info *b)
+{
+    mi_nav_info result = *a;
+    if (b && (a->position_kind != WEATHER_POSITION_GPS || b->position_kind != WEATHER_POSITION_GPS)) {
+        result.position_kind = WEATHER_POSITION_ESTGPS;
+        result.have_anchor = 0;
+        if (a->have_anchor && a->anchor_us <= s->t_us) { result.have_anchor = 1; result.anchor_us = a->anchor_us; }
+        if (b->have_anchor && b->anchor_us <= s->t_us &&
+            (!result.have_anchor || b->anchor_us < result.anchor_us)) {
+            result.have_anchor = 1; result.anchor_us = b->anchor_us;
+        }
+    }
+    if (result.position_kind == WEATHER_POSITION_ESTGPS) {
+        s->quality |= MI_QUALITY_ESTGPS;
+        s->pos_error_m = NAN; /* Integrating velocity supplies no error bound. */
+    }
+    if (out) *out = result;
+}
+static int align_sample(mi_input *m, tb_sample *s, mi_nav_info *meta)
 {
     unsigned j;
     for (j = 0; j < m->nav_count; ++j) {
@@ -229,12 +357,15 @@ static int align_sample(mi_input *m, tb_sample *s)
             unsigned k;
             for (k = 0; k < 3; ++k) { s->p[k] = m->nav[j].p[k]; s->v[k] = m->nav[j].v[k]; }
             s->pos_error_m = m->nav[j].pos_error_m; s->nav_age_us = 0;
+            aligned_metadata(s, meta, m->nav_info + j, NULL);
             if (!isfinite(s->pos_error_m)) s->quality |= MI_QUALITY_POSITION_UNKNOWN;
             return 1;
         }
         if (j && m->nav[j - 1].t_us < s->t_us && m->nav[j].t_us > s->t_us) {
+            if (m->nav_info[j - 1].segment != m->nav_info[j].segment) return 0;
             if (!tb_align(m->nav + j - 1, m->nav + j, s->t_us,
                           m->options.accel_bound_mps2, s)) return 0;
+            aligned_metadata(s, meta, m->nav_info + j - 1, m->nav_info + j);
             if (!isfinite(s->pos_error_m)) s->quality |= MI_QUALITY_POSITION_UNKNOWN;
             return 1;
         }
@@ -277,6 +408,7 @@ static void weather_observation(mi_input *m,const uint8_t *p,uint32_t id,uint64_
     s.sensor_instance=id==12920 ? p[4] : 0;
     s.measurement_variance=NAN; s.pos_error_m=NAN;
     s.time_uncert_us=UINT32_MAX; s.quality=MI_QUALITY_CLOCK_UNSIGNED;
+    s.estimation_age_us=UINT32_MAX; s.position_kind=WEATHER_POSITION_UNKNOWN;
     if(stamp && boot_usec(m,stamp,&stamp)) { s.has_time=1; s.t_us=stamp; }
     for(metric=WEATHER_TEMPERATURE;metric<=WEATHER_HUMIDITY;++metric) {
         s.metric=(uint8_t)metric;
@@ -298,10 +430,16 @@ static void flush_weather(mi_input *m,uint64_t now,int finishing)
         weather_sample *s=&m->weather_pending[j].sample;
         uint64_t received=m->weather_pending[j].received_ms;
         if(!m->weather_pending[j].aligned) {
-            tb_sample aligned; memset(&aligned,0,sizeof(aligned)); aligned.t_us=s->t_us;
-            if(align_sample(m,&aligned)) {
+            tb_sample aligned; mi_nav_info meta;
+            memset(&aligned,0,sizeof(aligned)); memset(&meta,0,sizeof(meta)); aligned.t_us=s->t_us;
+            if(align_sample(m,&aligned,&meta)) {
                 memcpy(s->p,aligned.p,sizeof(s->p)); memcpy(s->v,aligned.v,sizeof(s->v));
                 s->pos_error_m=aligned.pos_error_m; s->has_position=1;
+                s->position_kind=meta.position_kind;
+                s->estimation_age_us=meta.position_kind==WEATHER_POSITION_GPS ? 0 :
+                    meta.have_anchor && s->t_us>=meta.anchor_us && s->t_us-meta.anchor_us<UINT32_MAX ?
+                    (uint32_t)(s->t_us-meta.anchor_us) : UINT32_MAX;
+                if(meta.position_kind==WEATHER_POSITION_ESTGPS) s->quality|=MI_QUALITY_ESTGPS;
                 m->weather_pending[j].aligned=1;
             }
         }
@@ -320,7 +458,7 @@ static void flush_pending(mi_input *m, uint64_t watermark, uint64_t now, int fin
      * in the pending observation prevents a 32-entry nav ring from erasing
      * already available evidence before emission. No extrapolation is used. */
     for (cache = 0; cache < m->pending_count; ++cache)
-        if (!m->pending[cache].aligned && align_sample(m, &m->pending[cache].sample))
+        if (!m->pending[cache].aligned && align_sample(m, &m->pending[cache].sample, NULL))
             m->pending[cache].aligned = 1;
     /* At most 512 entries. Select-min preserves global event-time ordering,
      * independent of per-key or wire order. O(P^2 + P*N) per complete flush,
@@ -378,10 +516,47 @@ static void flush_pending(mi_input *m, uint64_t watermark, uint64_t now, int fin
     }
     m->report.pending = m->pending_count + m->weather_pending_count;
 }
+static void refresh_navigation(mi_input *m, uint64_t now)
+{
+    m->report.gps_fix_fresh = (uint8_t)gps_fresh(m, now);
+    m->report.have_gps_anchor = m->have_gps_anchor;
+    m->report.last_fix_boot_us = m->gps_anchor_us;
+    if (m->report.position_kind == WEATHER_POSITION_GPS && !m->report.gps_fix_fresh) {
+        m->report.position_kind = WEATHER_POSITION_ESTGPS;
+        m->report.navigation_error_m = NAN;
+        m->report.estimation_age_us = estimation_age(m, m->report.navigation_boot_us);
+    }
+    if (m->report.estimate_source == MI_ESTIMATE_VELOCITY) {
+        if (!anchor_in_range(m, m->high_boot_us, now)) {
+            m->estimate_active = 0;
+            m->report.position_flags |= m->have_gps_anchor ? MI_ESTGPS_EXPIRED : MI_ESTGPS_NO_ANCHOR;
+        }
+        if (!estimator_valid(m, m->estimator_boot_us > m->high_boot_us ? m->estimator_boot_us : m->high_boot_us,
+                             now, 2u | 4u)) {
+            m->estimate_active = 0; m->report.position_flags |= MI_ESTGPS_STATUS_INVALID;
+        }
+        if (!m->have_local_velocity || now < m->local_velocity_received_ms ||
+            now - m->local_velocity_received_ms > MI_EST_VELOCITY_GAP_US / 1000) {
+            m->estimate_active = 0; m->report.position_flags |= MI_ESTGPS_VELOCITY_GAP;
+        }
+        if (!m->estimate_active) {
+            m->report.have_navigation = 0;
+            m->report.position_kind = WEATHER_POSITION_UNKNOWN;
+            m->report.navigation_error_m = NAN;
+        }
+    } else if (m->have_global &&
+               (now < m->global_received_ms || now - m->global_received_ms > MI_GLOBAL_FRESH_MS ||
+                (estimator_status_fresh(m, m->high_boot_us, now) &&
+                 !estimator_valid(m, m->high_boot_us, now, 16u | 32u)))) {
+        m->report.have_navigation = 0;
+        m->report.position_kind = WEATHER_POSITION_UNKNOWN;
+    }
+}
 void mi_tick(mi_input *m, uint64_t now)
 {
     uint64_t watermark;
     if (!m) return;
+    refresh_navigation(m, now);
     watermark = m->high_boot_us > MI_REORDER_US ? m->high_boot_us - MI_REORDER_US : 0;
     flush_weather(m,now,0);
     flush_pending(m, watermark, now, 0);
@@ -390,17 +565,45 @@ void mi_finish(mi_input *m, uint64_t now)
 {
     if (m) { flush_weather(m,now,1); flush_pending(m, m->high_boot_us, now, 1); }
 }
+static void report_navigation(mi_input *m, const tb_nav *nav, const mi_nav_info *info,
+                              double lat, double lon, double altitude, uint64_t now)
+{
+    if (!m->report.navigation_boot_us || nav->t_us >= m->report.navigation_boot_us) {
+        m->report.lat = lat; m->report.lon = lon; m->report.altitude_msl_m = altitude;
+        m->report.have_navigation = 1;
+        m->report.navigation_received_ms = now;
+        m->report.navigation_boot_us = nav->t_us;
+        m->report.position_kind = info->position_kind;
+        m->report.estimate_source = info->source;
+        m->report.estimation_age_us = info->position_kind == WEATHER_POSITION_GPS ? 0 : estimation_age(m, nav->t_us);
+        m->report.navigation_error_m = nav->pos_error_m;
+        memcpy(m->report.navigation_v, nav->v, sizeof(nav->v));
+    }
+}
 static void global_navigation(mi_input *m, const uint8_t *p, uint64_t now)
 {
-    tb_nav nav;
+    tb_nav nav; mi_nav_info info;
     double lat = (double)i32(p + 4) * 1e-7, lon = (double)i32(p + 8) * 1e-7;
     double altitude = (double)i32(p + 12) * .001;
     double rad, sine, scale, meridian, prime, dlon;
-    memset(&nav, 0, sizeof(nav));
+    int trusted;
+    memset(&nav, 0, sizeof(nav)); memset(&info, 0, sizeof(info));
     nav.t_us = boot_ms(m, u32(p));
     if (!isfinite(lat) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
         ++m->report.nav_rejected; return;
     }
+    /* Reject known-invalid absolute data before it can set an automatic
+     * origin. A recovered point may not bridge the invalid interval later. */
+    if (estimator_status_fresh(m, nav.t_us, now) && !estimator_valid(m, nav.t_us, now, 16u | 32u)) {
+        ++m->report.nav_rejected; m->report.position_flags |= MI_ESTGPS_STATUS_INVALID;
+        invalidate_absolute_navigation(m, nav.t_us, now);
+        m->have_global = 0;
+        if (m->report.estimate_source == MI_ESTIMATE_EKF) {
+            m->report.have_navigation = 0; m->report.position_kind = WEATHER_POSITION_UNKNOWN;
+        }
+        return;
+    }
+    m->absolute_invalid_active = 0;
     if (m->options.origin_auto && !m->origin_set) {
         m->options.origin_lat = lat; m->options.origin_lon = lon;
         m->options.origin_alt = altitude; m->origin_set = 1;
@@ -416,27 +619,133 @@ static void global_navigation(mi_input *m, const uint8_t *p, uint64_t now)
     dlon = lon - m->options.origin_lon;
     if (dlon > 180) dlon -= 360;
     if (dlon < -180) dlon += 360;
-    /* Local WGS84 radii projection; altitude is MSL, never relabeled as
-     * ellipsoidal height. Regional approximation, not geoid conversion. */
+    /* Regional WGS84 radii projection. Altitude stays MSL; never call this an
+     * ellipsoidal height or assign the receiver an invented error bound. */
     nav.p[0] = dlon * (MI_PI / 180.0) * prime * cos(rad);
     nav.p[1] = (lat - m->options.origin_lat) * (MI_PI / 180.0) * meridian;
     nav.p[2] = altitude - m->options.origin_alt;
-    nav.v[0] = (float)i16(p + 22) * .01f; /* east */
-    nav.v[1] = (float)i16(p + 20) * .01f; /* north */
-    nav.v[2] = (float)i16(p + 24) * -.01f; /* up */
+    nav.v[0] = (float)i16(p + 22) * .01f;
+    nav.v[1] = (float)i16(p + 20) * .01f;
+    nav.v[2] = (float)i16(p + 24) * -.01f;
     nav.pos_error_m = NAN;
-    if (isfinite(m->gps_error_m) && now >= m->gps_accuracy_ms && now - m->gps_accuracy_ms <= 2000) {
+    trusted = nav.t_us && gps_fresh_at(m, nav.t_us, now) && estimator_valid(m, nav.t_us, now, 16u | 32u);
+    info.position_kind = trusted ? WEATHER_POSITION_GPS : WEATHER_POSITION_ESTGPS;
+    info.source = MI_ESTIMATE_EKF; info.segment = m->navigation_segment;
+    if (trusted && (!m->have_gps_anchor || nav.t_us > m->gps_anchor_us)) {
+        m->gps_anchor_us = nav.t_us; m->gps_anchor_received_ms = now; m->have_gps_anchor = 1;
+    }
+    info.have_anchor = m->have_gps_anchor; info.anchor_us = m->gps_anchor_us;
+    if (trusted && isfinite(m->gps_error_m) && now >= m->gps_accuracy_ms && now - m->gps_accuracy_ms <= 2000) {
         double distance = hypot(nav.p[0], nav.p[1]);
         double projection_error = distance * distance / 6000000.0;
         nav.pos_error_m = (float)((double)m->gps_error_m + projection_error);
     }
-    if(!m->report.have_navigation || nav.t_us>=m->report.navigation_boot_us) {
-        m->report.lat = lat; m->report.lon = lon; m->report.altitude_msl_m = altitude;
-        m->report.have_navigation = 1;
-        m->report.navigation_received_ms = now;
-        m->report.navigation_boot_us = nav.t_us;
+    if (!m->have_global || nav.t_us >= m->global_boot_us) {
+        m->have_global = 1; m->global_boot_us = nav.t_us; m->global_received_ms = now;
+        m->meridian_m = meridian; m->east_radius_m = prime * cos(rad);
+        memcpy(m->estimate_p, nav.p, sizeof(nav.p)); m->estimate_boot_us = nav.t_us;
+        m->estimate_active = (uint8_t)(anchor_in_range(m, nav.t_us, now) &&
+                                      estimator_valid(m, nav.t_us, now, 2u | 4u));
+        /* GPI may arrive after a newer LOCAL_POSITION_NED. If the last two
+         * validated velocities bracket its timestamp, reconstruct only that
+         * measured interval. Do not extrapolate a missing earlier velocity. */
+        if (m->estimate_active && m->have_local_velocity && m->local_velocity_us > nav.t_us) {
+            if (m->have_previous_velocity && m->previous_velocity_us <= nav.t_us &&
+                m->local_velocity_us - m->previous_velocity_us <= MI_EST_VELOCITY_GAP_US &&
+                now >= m->previous_velocity_received_ms &&
+                now - m->previous_velocity_received_ms <= MI_EST_VELOCITY_GAP_US / 1000 &&
+                estimator_valid(m, m->local_velocity_us, now, 2u | 4u)) {
+                const double fraction = (double)(nav.t_us - m->previous_velocity_us) /
+                                        (double)(m->local_velocity_us - m->previous_velocity_us);
+                const double dt = (double)(m->local_velocity_us - nav.t_us) * 1e-6;
+                unsigned k;
+                for (k = 0; k < 3; ++k) {
+                    const double initial_v = m->previous_velocity[k] +
+                        fraction * ((double)m->local_velocity[k] - m->previous_velocity[k]);
+                    m->estimate_p[k] += .5 * (initial_v + m->local_velocity[k]) * dt;
+                }
+                m->estimate_boot_us = m->local_velocity_us;
+            } else m->estimate_active = 0;
+        }
+        m->report.position_flags = m->have_gps_anchor ? 0 : MI_ESTGPS_NO_ANCHOR;
+        if (!estimator_valid(m, nav.t_us, now, 16u | 32u)) m->report.position_flags |= MI_ESTGPS_STATUS_INVALID;
     }
-    add_nav(m, &nav);
+    report_navigation(m, &nav, &info, lat, lon, altitude, now);
+    add_nav(m, &nav, &info);
+}
+static void local_navigation(mi_input *m, const uint8_t *p, uint64_t now)
+{
+    const uint64_t stamp = boot_ms(m, u32(p));
+    float velocity[3]; unsigned j;
+    velocity[0] = f32(p + 20); /* east = LOCAL_POSITION_NED.vy */
+    velocity[1] = f32(p + 16); /* north = vx */
+    velocity[2] = -f32(p + 24); /* up = -vz */
+    if (!estimator_valid(m, stamp, now, 2u | 4u)) {
+        m->have_local_velocity = m->have_previous_velocity = m->estimate_active = 0;
+        m->report.position_flags |= MI_ESTGPS_STATUS_INVALID; return;
+    }
+    if (!isfinite(velocity[0]) || !isfinite(velocity[1]) || !isfinite(velocity[2]) ||
+        hypot(hypot((double)velocity[0], velocity[1]), velocity[2]) > MI_EST_VELOCITY_MAX_MPS) {
+        m->have_local_velocity = m->have_previous_velocity = m->estimate_active = 0;
+        m->report.position_flags |= MI_ESTGPS_VELOCITY_INVALID;
+        ++m->report.nav_rejected; return;
+    }
+    /* Duplicate/reordered velocity cannot move an already integrated solution
+     * or extend freshness. A missing interval cannot be filled with zero speed. */
+    if (m->have_local_velocity && stamp <= m->local_velocity_us) return;
+    if (m->estimate_active && stamp > m->estimate_boot_us) {
+        if (!m->have_local_velocity || m->local_velocity_us > m->estimate_boot_us ||
+            stamp - m->local_velocity_us > MI_EST_VELOCITY_GAP_US ||
+            now < m->local_velocity_received_ms || now - m->local_velocity_received_ms > MI_EST_VELOCITY_GAP_US / 1000) {
+            m->estimate_active = 0; m->report.position_flags |= MI_ESTGPS_VELOCITY_GAP;
+        } else {
+            const double fraction = (double)(m->estimate_boot_us - m->local_velocity_us) /
+                                    (double)(stamp - m->local_velocity_us);
+            const double dt = (double)(stamp - m->estimate_boot_us) * 1e-6;
+            for (j = 0; j < 3; ++j) {
+                const double initial_v = m->local_velocity[j] + fraction * ((double)velocity[j] - m->local_velocity[j]);
+                m->estimate_p[j] += .5 * (initial_v + velocity[j]) * dt;
+            }
+            m->estimate_boot_us = stamp;
+        }
+    }
+    if (m->have_local_velocity) {
+        memcpy(m->previous_velocity, m->local_velocity, sizeof(m->local_velocity));
+        m->previous_velocity_us = m->local_velocity_us;
+        m->previous_velocity_received_ms = m->local_velocity_received_ms;
+        m->have_previous_velocity = 1;
+    }
+    memcpy(m->local_velocity, velocity, sizeof(velocity));
+    m->local_velocity_us = stamp; m->local_velocity_received_ms = now; m->have_local_velocity = 1;
+    if (!m->have_gps_anchor) { m->report.position_flags |= MI_ESTGPS_NO_ANCHOR; return; }
+    if (!anchor_in_range(m, stamp, now)) {
+        m->estimate_active = 0; m->report.position_flags |= MI_ESTGPS_EXPIRED; return;
+    }
+    if (!m->estimate_active || stamp != m->estimate_boot_us) return;
+    /* Prefer a fresh GLOBAL_POSITION_INT position. Continue the accumulator in
+     * the background, but do not publish its displacement on top of EKF data. */
+    if (m->have_global && now >= m->global_received_ms && now - m->global_received_ms <= MI_GLOBAL_FRESH_MS) return;
+    if (!isfinite(m->east_radius_m) || fabs(m->east_radius_m) < 1.0 || !(m->meridian_m > 0)) {
+        m->estimate_active = 0; m->report.position_flags |= MI_ESTGPS_VELOCITY_INVALID; return;
+    }
+    {
+        tb_nav nav; mi_nav_info info; double lat, lon, altitude;
+        memset(&nav, 0, sizeof(nav)); memset(&info, 0, sizeof(info)); nav.t_us = stamp;
+        memcpy(nav.p, m->estimate_p, sizeof(nav.p)); memcpy(nav.v, velocity, sizeof(nav.v)); nav.pos_error_m = NAN;
+        lat = m->options.origin_lat + nav.p[1] / m->meridian_m * (180.0 / MI_PI);
+        lon = m->options.origin_lon + nav.p[0] / m->east_radius_m * (180.0 / MI_PI);
+        lon = fmod(lon + 180.0, 360.0); if (lon < 0) lon += 360.0; lon -= 180.0;
+        altitude = m->options.origin_alt + nav.p[2];
+        if (!isfinite(lat) || fabs(lat) > 90 || !isfinite(lon) || !isfinite(altitude)) {
+            m->estimate_active = 0; ++m->report.nav_rejected; return;
+        }
+        info.position_kind = WEATHER_POSITION_ESTGPS; info.source = MI_ESTIMATE_VELOCITY;
+        info.segment = m->navigation_segment;
+        info.have_anchor = 1; info.anchor_us = m->gps_anchor_us;
+        m->report.position_flags = 0;
+        report_navigation(m, &nav, &info, lat, lon, altitude, now);
+        add_nav(m, &nav, &info);
+    }
 }
 static void packet(mi_input *m, uint32_t id, const uint8_t *p, uint8_t sysid,
                    uint8_t compid, uint8_t sequence, uint64_t now)
@@ -488,19 +797,49 @@ static void packet(mi_input *m, uint32_t id, const uint8_t *p, uint8_t sysid,
         }
     } else if (id == 24) {
         uint32_t hacc = u32(p + 34), vacc = u32(p + 38);
-        m->report.gps_fix = p[28];
+        const uint64_t gps_stamp = u64(p);
+        m->report.gps_fix = p[28]; m->have_gps_fix = 1;
+        m->report.gps_fix_received_ms = now;
+        m->have_gps_fix_clock = gps_stamp && gps_stamp < MI_UNIX_MIN_US;
+        if (m->have_gps_fix_clock && m->have_boot &&
+            ((gps_stamp > m->high_boot_us && gps_stamp - m->high_boot_us > MI_GPS_FIX_FRESH_MS * 1000) ||
+             (gps_stamp <= m->high_boot_us && m->high_boot_us - gps_stamp > MI_GPS_FIX_FRESH_MS * 1000)))
+            m->have_gps_fix_clock = 0;
+        m->gps_fix_boot_us = m->have_gps_fix_clock ? gps_stamp : 0;
         /* Report coordinates and their boot/receipt times belong to the same
          * GLOBAL_POSITION_INT sample. Raw GPS here supplies fix/accuracy only. */
-        if (p[28] >= 3 && hacc && vacc && hacc != UINT32_MAX && vacc != UINT32_MAX) {
+        if (p[28] >= 3 && p[28] <= 8 && hacc && vacc && hacc != UINT32_MAX && vacc != UINT32_MAX) {
             m->gps_error_m = (float)(hypot((double)hacc, (double)vacc) * .001);
             m->gps_accuracy_ms = now;
         } else m->gps_error_m = NAN;
     } else if (id == 33) global_navigation(m, p, now);
-    else if (id == 32) {
-        /* LOCAL_POSITION_NED is estimator-local. Its origin is not guaranteed
-         * to equal the configured geodetic origin; do not mix it with GPS ENU.
-         * Timestamp still provides a boot clock watermark. */
-        (void)boot_ms(m, u32(p));
+    else if (id == 32) local_navigation(m, p, now);
+    else if (id == 230) {
+        const uint64_t time_us = u64(p);
+        int clock_compatible = time_us && time_us < MI_UNIX_MIN_US;
+        /* Delayed or future status must never call boot_usec/reset_clock:
+         * only navigation/measurement clock owners define a source epoch. */
+        if (clock_compatible && m->have_boot &&
+            ((time_us > m->high_boot_us && time_us - m->high_boot_us > MI_EST_STATUS_FRESH_US) ||
+             (time_us <= m->high_boot_us && m->high_boot_us - time_us > MI_EST_STATUS_FRESH_US)))
+            clock_compatible = 0;
+        if (!clock_compatible) {
+            if (time_us >= MI_UNIX_MIN_US) ++m->report.no_clock;
+            else ++m->report.nav_rejected;
+        } else {
+            if (m->have_estimator_status && m->have_boot &&
+                ((m->estimator_boot_us > m->high_boot_us && m->estimator_boot_us - m->high_boot_us > MI_EST_STATUS_FRESH_US) ||
+                 (m->estimator_boot_us <= m->high_boot_us && m->high_boot_us - m->estimator_boot_us > MI_EST_STATUS_FRESH_US)))
+                m->have_estimator_status = 0;
+            if (!m->have_estimator_status || time_us >= m->estimator_boot_us) {
+                m->estimator_boot_us = time_us; m->estimator_received_ms = now;
+                m->estimator_flags = u16(p + 40); m->have_estimator_status = 1;
+                if ((m->estimator_flags & (128u | 1024u | 2048u)) || (m->estimator_flags & 6u) != 6u) {
+                    m->estimate_active = m->have_local_velocity = m->have_previous_velocity = 0;
+                    m->report.position_flags |= MI_ESTGPS_STATUS_INVALID;
+                }
+            }
+        }
     } else if (id == 251 || id == 252) {
         char name[TB_KEY_BYTES];
         stamp = boot_ms(m, u32(p));

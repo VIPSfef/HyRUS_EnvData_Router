@@ -12,6 +12,8 @@
 
 static mi_input input;
 static mi_event samples[4096];
+static weather_sample weather_samples[128];
+static unsigned weather_count;
 static uint64_t sample_count, clock_count, reset_count, watermark_count, origin_count;
 static uint64_t previous_time, final_watermark;
 static double observed_origin[3];
@@ -53,6 +55,9 @@ static void on_event(void *context, const mi_event *e)
         previous_time=e->sample.t_us;
         if(sample_count<sizeof(samples)/sizeof(samples[0])) samples[sample_count]=*e;
         ++sample_count;
+    } else if(e->kind==MI_WEATHER_SAMPLE) {
+        if(weather_count<sizeof(weather_samples)/sizeof(weather_samples[0])) weather_samples[weather_count]=e->weather;
+        ++weather_count;
     } else if(e->kind==MI_CLOCK) ++clock_count;
     else if(e->kind==MI_RESET) { ++reset_count; previous_time=0; }
     else if(e->kind==MI_WATERMARK) { ++watermark_count; final_watermark=e->boot_us; }
@@ -64,7 +69,7 @@ static void initialize(void)
     mi_options_default(&o); o.origin_lat=37; o.origin_lon=127; o.origin_alt=100;
     mi_init(&input,&o,on_event,NULL);
     seq=0; sample_count=clock_count=reset_count=watermark_count=0;
-    previous_time=final_watermark=origin_count=0;
+    previous_time=final_watermark=origin_count=0; weather_count=0;
     memset(observed_origin,0,sizeof(observed_origin));
 }
 static void feed(uint32_t id, const uint8_t *p, size_t n, uint8_t extra,
@@ -78,18 +83,47 @@ static void heartbeat(uint8_t sysid, uint8_t compid, uint8_t type, uint8_t autop
     uint8_t p[9]={0}; p[4]=type; p[5]=autopilot; p[6]=128; p[7]=4; p[8]=3;
     feed(0,p,sizeof(p),50,sysid,compid,100);
 }
-static void navigation(uint32_t t, int32_t lat_delta, uint8_t sysid)
+static void navigation_at(uint32_t t, int32_t lat_delta, uint8_t sysid, uint64_t now)
 {
     uint8_t p[28]={0};
     put32(p,t); put32(p+4,(uint32_t)(370000000+lat_delta)); put32(p+8,1270000000);
     put32(p+12,100000); put16(p+20,1000); put16(p+22,2000); put16(p+24,(uint16_t)-300);
-    feed(33,p,sizeof(p),104,sysid,1,t);
+    feed(33,p,sizeof(p),104,sysid,1,now);
 }
+static void navigation(uint32_t t, int32_t lat_delta, uint8_t sysid)
+{ navigation_at(t,lat_delta,sysid,t); }
 static void named(uint32_t t, const char *key, float value, uint8_t compid)
 {
     uint8_t p[18]={0}; size_t n=strlen(key); if(n>10)n=10;
     put32(p,t); putfloat(p+4,value); memcpy(p+8,key,n);
     feed(251,p,sizeof(p),170,1,compid,t);
+}
+static void estimator(uint32_t t, uint16_t flags, uint64_t now)
+{
+    uint8_t p[42]={0}; put64(p,(uint64_t)t*1000); put16(p+40,flags);
+    feed(230,p,sizeof(p),163,1,1,now);
+}
+static void gps(uint8_t fix, uint64_t now)
+{
+    uint8_t p[52]={0}; put64(p,input.high_boot_us); p[28]=fix;
+    put32(p+34,2000); put32(p+38,3000); feed(24,p,sizeof(p),24,1,1,now);
+}
+static void local_velocity(uint32_t t, float north, float east, float down, uint64_t now)
+{
+    uint8_t p[28]={0}; put32(p,t);
+    putfloat(p+4,1000000); putfloat(p+8,-1000000); putfloat(p+12,5000); /* deliberately unrelated local origin */
+    putfloat(p+16,north); putfloat(p+20,east); putfloat(p+24,down);
+    feed(32,p,sizeof(p),185,1,1,now);
+}
+static void atmospheric(uint64_t stamp, uint64_t now)
+{
+    uint8_t p[16]={0}; put64(p,stamp); putfloat(p+8,20); putfloat(p+12,50);
+    feed(8009,p,sizeof(p),144,1,1,now);
+}
+static void trusted_anchor(uint32_t t, float north, float east, float down)
+{
+    initialize(); heartbeat(1,1,2,12);
+    estimator(t,54,t); local_velocity(t,north,east,down,t); gps(3,t); navigation(t,0,1);
 }
 static int check_discovery_and_fragmentation(void)
 {
@@ -161,7 +195,8 @@ static int check_navigation_and_named_data(void)
     heartbeat(2,1,2,12); navigation(9000,0,2); CHECK(input.report.boot_us<9000000);
     named(1350,"bad key",2,1); CHECK(input.report.invalid_value==1);
     named(1351,"nan",NAN,1); CHECK(input.report.invalid_value==2);
-    put64(p,UINT64_C(1800000000000000)); p[28]=3; put32(p+34,2000); put32(p+38,3000);
+    put64(p,1400000); p[28]=3; put32(p+34,2000); put32(p+38,3000);
+    estimator(1400,54,1400);
     feed(24,p,sizeof(p),24,1,1,1400); CHECK(input.report.gps_fix==3);
     navigation(1400,4000,1); named(1450,"temperature",20,1); navigation(1500,5000,1);
     mi_finish(&input,1500); CHECK(sample_count==3 && isfinite(samples[2].sample.pos_error_m));
@@ -271,6 +306,264 @@ static int check_automatic_origin(void)
     CHECK(sample_count==2 && samples[1].sample.p[1]>11 && samples[1].sample.p[1]<12);
     return 1;
 }
+static int check_estgps_trapezoid_and_weather(void)
+{
+    trusted_anchor(1000,0,0,0);
+    CHECK(input.report.have_gps_anchor && input.report.gps_fix_fresh);
+    CHECK(input.report.position_kind==WEATHER_POSITION_GPS && input.report.estimation_age_us==0);
+    CHECK(input.report.last_fix_boot_us==1000000 && isfinite(input.report.navigation_error_m));
+    gps(1,1100);
+    local_velocity(1200,2,4,-1,1200);
+    local_velocity(1400,4,8,-2,1400);
+    local_velocity(1600,6,12,-3,1600);
+    CHECK(input.report.have_navigation && input.report.position_kind==WEATHER_POSITION_ESTGPS);
+    CHECK(input.report.estimate_source==MI_ESTIMATE_VELOCITY && input.report.estimation_age_us==600000);
+    CHECK(isnan(input.report.navigation_error_m));
+    CHECK(fabs(input.estimate_p[0]-3.6)<1e-12 && fabs(input.estimate_p[1]-1.8)<1e-12);
+    CHECK(fabs(input.estimate_p[2]-.9)<1e-12 && input.report.altitude_msl_m>100.89);
+    CHECK(input.report.lat>37 && input.report.lon>127);
+    local_velocity(1600,100,100,100,1601); /* same boot timestamp cannot integrate twice */
+    CHECK(fabs(input.estimate_p[0]-3.6)<1e-12);
+    atmospheric(1600000,1602); local_velocity(1800,6,12,-3,1802); mi_finish(&input,1803);
+    CHECK(weather_count==2 && weather_samples[0].has_position && weather_samples[1].has_position);
+    CHECK(weather_samples[0].position_kind==WEATHER_POSITION_ESTGPS && weather_samples[0].estimation_age_us==600000);
+    CHECK((weather_samples[0].quality&MI_QUALITY_ESTGPS) && isnan(weather_samples[0].pos_error_m));
+    CHECK(fabs(weather_samples[0].p[0]-3.6)<1e-12 && weather_samples[0].t_us==1600000);
+    CHECK(weather_samples[0].t_us==weather_samples[1].t_us && weather_samples[1].position_kind==WEATHER_POSITION_ESTGPS);
+    CHECK(fabs(weather_samples[0].value-293.15)<1e-12 && weather_samples[1].value==.5);
+    estimator(2000,54,2000); gps(3,2000); navigation(2000,1000,1);
+    CHECK(input.report.position_kind==WEATHER_POSITION_GPS && input.report.estimation_age_us==0);
+    CHECK(input.report.estimate_source==MI_ESTIMATE_EKF && input.report.last_fix_boot_us==2000000);
+    CHECK(fabs(input.estimate_p[0])<1e-12 && input.estimate_p[1]>11 && input.estimate_p[1]<12);
+    atmospheric(2000000,2000); mi_finish(&input,2001);
+    CHECK(weather_count==4 && weather_samples[2].position_kind==WEATHER_POSITION_GPS);
+    CHECK(weather_samples[2].estimation_age_us==0 && !(weather_samples[2].quality&MI_QUALITY_ESTGPS));
+    return 1;
+}
+static int check_estgps_ekf_preference_and_partial_anchor(void)
+{
+    trusted_anchor(1000,0,0,0); gps(1,1100);
+    local_velocity(1200,2,4,-1,1200); navigation(1250,1000,1);
+    CHECK(input.report.position_kind==WEATHER_POSITION_ESTGPS && input.report.estimate_source==MI_ESTIMATE_EKF);
+    CHECK(input.report.estimation_age_us==250000 && fabs(input.report.lat-37.0001)<1e-12);
+    CHECK(isnan(input.report.navigation_error_m));
+    local_velocity(1400,4,8,-2,1400);
+    CHECK(input.report.estimate_source==MI_ESTIMATE_EKF && input.report.navigation_boot_us==1250000);
+    CHECK(input.estimate_p[1]>11.5 && input.estimate_p[1]<12); /* only 1250..1400 integrated */
+    /* No synthetic local x/y/z was copied into the global ENU frame. */
+    CHECK(fabs(input.estimate_p[0])<2 && fabs(input.estimate_p[2])<1);
+    local_velocity(1600,6,12,-3,1600); local_velocity(1800,8,16,-4,1800);
+    CHECK(input.report.estimate_source==MI_ESTIMATE_VELOCITY && input.report.navigation_boot_us==1800000);
+    mi_tick(&input,5000); CHECK(!input.report.have_navigation);
+    navigation(1300,2000,1); /* Reordered EKF data cannot resurrect an older displayed position. */
+    CHECK(!input.report.have_navigation && input.report.navigation_boot_us==1800000);
+    return 1;
+}
+static int check_estgps_missing_evidence(void)
+{
+    unsigned j;
+    initialize(); heartbeat(1,1,2,12); estimator(1000,6,1000);
+    for(j=0;j<5;++j) local_velocity(1000+j*200,5,10,-1,1000+j*200);
+    CHECK(!input.report.have_navigation && !input.report.have_gps_anchor);
+    CHECK(input.report.position_flags&MI_ESTGPS_NO_ANCHOR);
+    /* GPS fix without absolute estimator position validity cannot anchor. */
+    gps(3,1800); navigation(1800,0,1);
+    CHECK(!input.report.have_gps_anchor && !input.report.have_navigation && input.report.position_kind==WEATHER_POSITION_UNKNOWN);
+    CHECK(input.report.estimation_age_us==UINT32_MAX && isnan(input.report.navigation_error_m));
+    local_velocity(2000,5,10,-1,2000); local_velocity(2200,5,10,-1,2200); local_velocity(2400,5,10,-1,2400);
+    CHECK(!input.report.have_navigation && input.report.estimate_source!=MI_ESTIMATE_VELOCITY);
+    /* No estimator status at all: a legacy EKF position remains explicitly
+     * estimated, but neither a GPS anchor nor receiver-side integration exists. */
+    initialize(); heartbeat(1,1,2,12); gps(3,1000); navigation(1000,0,1);
+    local_velocity(1200,1,2,3,1200); local_velocity(1600,1,2,3,1600);
+    CHECK(!input.report.have_gps_anchor && !input.report.have_navigation);
+    CHECK(input.report.position_flags&MI_ESTGPS_STATUS_INVALID);
+    /* Existing anchor without any later ground velocity cannot move itself. */
+    trusted_anchor(1000,0,0,0); gps(1,1100); mi_tick(&input,1600);
+    CHECK(!input.report.have_navigation && input.report.estimate_source==MI_ESTIMATE_EKF);
+    CHECK(input.estimate_p[0]==0 && input.estimate_p[1]==0);
+    return 1;
+}
+static int check_estgps_validity_and_gaps(void)
+{
+    const uint16_t bad_flags[]={52,50,182,1078,2102}; unsigned j;
+    for(j=0;j<sizeof(bad_flags)/sizeof(bad_flags[0]);++j) {
+        trusted_anchor(1000,1,2,-3); gps(1,1100); estimator(1200,bad_flags[j],1200);
+        local_velocity(1200,1,2,-3,1200); local_velocity(1600,1,2,-3,1600);
+        CHECK(!input.report.have_navigation && !input.estimate_active);
+        CHECK(input.report.position_flags&MI_ESTGPS_STATUS_INVALID);
+    }
+    trusted_anchor(1000,1,2,-3); gps(1,1100);
+    local_velocity(1200,1,NAN,-3,1200); local_velocity(1600,1,2,-3,1600);
+    CHECK(!input.report.have_navigation && !input.estimate_active);
+    CHECK(input.report.position_flags&MI_ESTGPS_VELOCITY_INVALID);
+    trusted_anchor(1000,1,2,-3); gps(1,1100);
+    local_velocity(1200,0,501,0,1200); CHECK(!input.estimate_active);
+    trusted_anchor(1000,1,2,-3); gps(1,1100);
+    local_velocity(1200,1,2,-3,1200); local_velocity(1800,1,2,-3,1800); local_velocity(2000,1,2,-3,2000);
+    CHECK(!input.report.have_navigation && !input.estimate_active);
+    CHECK(input.report.position_flags&MI_ESTGPS_VELOCITY_GAP);
+    /* Host freshness is required independently of short source intervals. */
+    trusted_anchor(1000,1,2,-3); gps(1,1100);
+    estimator(1200,54,1800); local_velocity(1200,1,2,-3,1800);
+    CHECK(!input.estimate_active && (input.report.position_flags&MI_ESTGPS_VELOCITY_GAP));
+    /* A stale validity status is not made fresh by receiving new velocities. */
+    trusted_anchor(1000,1,2,-3); gps(1,1100);
+    for(j=1;j<=11;++j) local_velocity(1000+j*200,1,2,-3,1000+j*200);
+    CHECK(!input.report.have_navigation && (input.report.position_flags&MI_ESTGPS_STATUS_INVALID));
+    /* Raw fix 255/9 are unknown future enums, not proof of a GPS fix. */
+    trusted_anchor(1000,0,0,0); gps(255,1100); CHECK(!input.report.gps_fix_fresh);
+    gps(9,1101); CHECK(!input.report.gps_fix_fresh);
+    for(j=3;j<=8;++j) { gps((uint8_t)j,1102+j); CHECK(input.report.gps_fix_fresh); }
+    mi_tick(&input,3110); CHECK(input.report.gps_fix_fresh);
+    mi_tick(&input,3111); CHECK(!input.report.gps_fix_fresh);
+    return 1;
+}
+static int check_estgps_expiry_and_resets(void)
+{
+    unsigned j;
+    trusted_anchor(1000,1,2,-.5f); gps(1,1100);
+    for(j=1;j<=150;++j) {
+        uint32_t t=1000+j*200;
+        if(j%5==0) estimator(t,6,t);
+        local_velocity(t,1,2,-.5f,t);
+    }
+    CHECK(input.report.have_navigation && input.report.position_kind==WEATHER_POSITION_ESTGPS);
+    CHECK(input.report.estimation_age_us==30000000 && input.report.navigation_boot_us==31000000);
+    CHECK(fabs(input.estimate_p[0]-60)<1e-10 && fabs(input.estimate_p[1]-30)<1e-10);
+    local_velocity(31200,1,2,-.5f,31200);
+    CHECK(!input.report.have_navigation && (input.report.position_flags&MI_ESTGPS_EXPIRED));
+    trusted_anchor(1000,1,2,3); gps(1,1100); estimator(1200,6,32001); local_velocity(1200,1,2,3,32001);
+    CHECK(!input.report.have_navigation && (input.report.position_flags&MI_ESTGPS_EXPIRED));
+    trusted_anchor(10000,1,2,3); local_velocity(1000,1,2,3,1000);
+    CHECK(reset_count==1 && !input.report.have_gps_anchor && !input.report.have_navigation);
+    CHECK(input.options.origin_lat==37 && input.options.origin_lon==127);
+    trusted_anchor(1000,1,2,3); mi_finish(&input,1001); mi_link_reset(&input);
+    CHECK(!input.report.have_gps_anchor && !input.report.have_navigation && input.nav_count==0);
+    CHECK(input.report.position_kind==WEATHER_POSITION_UNKNOWN && input.report.estimation_age_us==UINT32_MAX);
+    CHECK(input.options.origin_lat==37 && input.options.origin_lon==127 && input.report.selected_system==1);
+    estimator(1200,54,1200); local_velocity(1200,1,2,3,1200); local_velocity(1600,1,2,3,1600);
+    CHECK(!input.report.have_navigation && !input.report.have_gps_anchor);
+    return 1;
+}
+static int check_estgps_status_is_not_clock_owner(void)
+{
+    uint32_t epoch;
+    trusted_anchor(100000,1,2,-3); atmospheric(100000000,100000); named(100000,"keep",1,1);
+    epoch=input.epoch;
+    CHECK(input.weather_pending_count==2 && input.pending_count==1);
+    estimator(90000,0,100001); /* 10 s delayed status cannot reset the live 100 s source. */
+    CHECK(input.epoch==epoch && reset_count==0 && input.report.reboots==0);
+    CHECK(input.have_gps_anchor && input.gps_anchor_us==100000000 && input.nav_count==1);
+    CHECK(input.estimator_boot_us==100000000 && input.estimator_flags==54);
+    CHECK(input.weather_pending_count==2 && input.pending_count==1);
+    estimator(110000,0,100002); estimator(99900,0,100003);
+    CHECK(input.epoch==epoch && input.estimator_boot_us==100000000 && input.estimator_flags==54);
+    CHECK(input.weather_pending_count==2 && input.pending_count==1);
+    {
+        uint8_t p[42]={0}; put64(p,UINT64_C(1800000000000000));
+        feed(230,p,sizeof(p),163,1,1,100004);
+        CHECK(input.report.no_clock==1 && input.report.reboots==0 && input.have_gps_anchor);
+    }
+    initialize(); heartbeat(1,1,2,12); estimator(100000,54,1000);
+    CHECK(!input.have_boot); /* Status cannot establish even the initial source clock. */
+    navigation(1000,0,1); estimator(1000,54,1001); gps(3,1002); navigation_at(1100,0,1,1100);
+    CHECK(input.estimator_boot_us==1000000 && input.report.have_gps_anchor && input.report.reboots==0);
+    return 1;
+}
+static int check_estgps_stale_and_known_invalid_global(void)
+{
+    const uint16_t bad_flags[]={6,22,38,1078,2102}; unsigned j;
+    trusted_anchor(1000,0,0,0); gps(3,1600);
+    CHECK(input.report.gps_fix_fresh && !input.report.have_navigation);
+    CHECK(input.report.position_kind==WEATHER_POSITION_UNKNOWN && input.report.navigation_boot_us==1000000);
+    trusted_anchor(1000,0,0,0); estimator(1200,182,1200); gps(3,1200); navigation(1200,0,1);
+    CHECK(input.report.have_navigation && input.report.position_kind==WEATHER_POSITION_GPS && input.have_gps_anchor);
+    CHECK(!input.estimate_active); /* at-rest absolute position is valid; router DR is forbidden */
+    for(j=0;j<sizeof(bad_flags)/sizeof(bad_flags[0]);++j) {
+        trusted_anchor(1000,0,0,0); estimator(1200,bad_flags[j],1200); navigation(1200,1000,1);
+        CHECK(!input.report.have_navigation && input.report.position_kind==WEATHER_POSITION_UNKNOWN);
+        CHECK(input.nav_count==1 && input.report.nav_rejected==1);
+        CHECK(input.report.position_flags&MI_ESTGPS_STATUS_INVALID);
+        atmospheric(1200000,1200); mi_finish(&input,1201);
+        CHECK(weather_count==2 && !weather_samples[0].has_position && !weather_samples[1].has_position);
+        CHECK(weather_samples[0].position_kind==WEATHER_POSITION_UNKNOWN && weather_samples[0].estimation_age_us==UINT32_MAX);
+    }
+    return 1;
+}
+static int check_estgps_local_before_delayed_global(void)
+{
+    trusted_anchor(100000,0,0,0);
+    local_velocity(100050,2,4,0,100050);
+    navigation_at(100000,0,1,100060); /* timestamp is bracketed by the last two LOCAL velocities */
+    CHECK(input.estimate_active && input.estimate_boot_us==100050000);
+    CHECK(fabs(input.estimate_p[0]-.1)<1e-12 && fabs(input.estimate_p[1]-.05)<1e-12);
+    local_velocity(100150,6,12,0,100150);
+    CHECK(input.estimate_active && fabs(input.estimate_p[0]-.9)<1e-12 && fabs(input.estimate_p[1]-.45)<1e-12);
+    gps(1,100200); local_velocity(100350,6,12,0,100350);
+    local_velocity(100550,6,12,0,100550); local_velocity(100750,6,12,0,100750);
+    CHECK(input.report.have_navigation && input.report.estimate_source==MI_ESTIMATE_VELOCITY);
+    CHECK(fabs(input.estimate_p[0]-8.1)<1e-11 && fabs(input.estimate_p[1]-4.05)<1e-11);
+    return 1;
+}
+static int check_estgps_raw_gps_source_clock(void)
+{
+    uint8_t p[52]={0}; uint32_t epoch;
+    trusted_anchor(100000,0,0,0); epoch=input.epoch;
+    p[28]=3; put32(p+34,2000); put32(p+38,3000);
+    put64(p,90000000); feed(24,p,sizeof(p),24,1,1,100010);
+    CHECK(!input.report.gps_fix_fresh && input.report.gps_fix==3 && input.have_gps_anchor);
+    estimator(100100,54,100100); navigation(100100,1000,1);
+    CHECK(input.report.position_kind==WEATHER_POSITION_ESTGPS && input.gps_anchor_us==100000000);
+    CHECK(input.report.reboots==0 && input.epoch==epoch);
+    put64(p,UINT64_C(1800000000000000)); feed(24,p,sizeof(p),24,1,1,100110);
+    navigation(100200,1000,1);
+    CHECK(!input.report.gps_fix_fresh && input.gps_anchor_us==100000000 && input.report.position_kind==WEATHER_POSITION_ESTGPS);
+    put64(p,0); feed(24,p,sizeof(p),24,1,1,100210);
+    CHECK(!input.report.gps_fix_fresh && !input.have_gps_fix_clock);
+    put64(p,110000000); feed(24,p,sizeof(p),24,1,1,100220);
+    CHECK(!input.report.gps_fix_fresh && !input.have_gps_fix_clock && input.report.reboots==0);
+    put64(p,100300000); feed(24,p,sizeof(p),24,1,1,100290);
+    navigation(100300,1000,1);
+    CHECK(input.report.gps_fix_fresh && input.report.position_kind==WEATHER_POSITION_GPS);
+    CHECK(input.gps_anchor_us==100300000 && input.report.estimation_age_us==0);
+    /* A raw fix may not alter the source boot clock or reset its session. */
+    CHECK(input.high_boot_us==100300000 && input.epoch==epoch && input.report.reboots==0);
+    return 1;
+}
+static int check_estgps_invalid_interval_and_origin(void)
+{
+    uint8_t p[28]={0}; mi_options o;
+    trusted_anchor(1000,0,0,0);
+    estimator(1100,6,1100); navigation(1100,1000,1);
+    atmospheric(1125000,1125);
+    estimator(1200,54,1200); gps(3,1200); navigation(1200,2000,1);
+    CHECK(input.nav_count==2 && input.nav[1].t_us-input.nav[0].t_us==TB_MAX_NAV_AGE_US);
+    CHECK(input.nav_info[0].segment!=input.nav_info[1].segment);
+    mi_tick(&input,1325);
+    CHECK(weather_count==2 && !weather_samples[0].has_position && !weather_samples[1].has_position);
+    CHECK(weather_samples[0].position_kind==WEATHER_POSITION_UNKNOWN && weather_samples[0].estimation_age_us==UINT32_MAX);
+    /* Repeated ABS-invalid GPI must not erase valid ground-velocity history.
+     * Both bracketing points were produced during the same invalid interval. */
+    trusted_anchor(1000,1,2,0); gps(1,1100);
+    estimator(1200,6,1200); local_velocity(1200,1,2,0,1200); navigation(1200,1000,1);
+    local_velocity(1400,1,2,0,1400); atmospheric(1500000,1500);
+    estimator(1600,6,1600); navigation(1600,2000,1); local_velocity(1600,1,2,0,1600);
+    mi_tick(&input,1700);
+    CHECK(weather_count==2 && weather_samples[0].has_position && weather_samples[1].has_position);
+    CHECK(weather_samples[0].position_kind==WEATHER_POSITION_ESTGPS && isnan(weather_samples[0].pos_error_m));
+    CHECK(fabs(weather_samples[0].p[0]-1.0)<1e-12 && fabs(weather_samples[0].p[1]-.5)<1e-12);
+    initialize(); mi_options_default(&o); o.origin_auto=1; mi_init(&input,&o,on_event,NULL);
+    heartbeat(1,1,2,12); estimator(1100,6,1100); put32(p,1100);
+    feed(33,p,sizeof(p),104,1,1,1100); /* invalid startup GPI contains 0,0 */
+    CHECK(!input.origin_set && origin_count==0 && !input.report.have_navigation);
+    estimator(1200,54,1200); gps(3,1200); navigation(1200,0,1);
+    CHECK(input.origin_set && origin_count==1 && observed_origin[0]==37 && observed_origin[1]==127);
+    CHECK(input.options.origin_lat==37 && input.options.origin_lon==127);
+    CHECK(input.report.position_kind==WEATHER_POSITION_GPS && input.nav_count==1);
+    CHECK(input.nav[0].p[0]==0 && input.nav[0].p[1]==0 && input.nav[0].p[2]==0);
+    return 1;
+}
 static double seconds(void)
 {
 #ifdef _WIN32
@@ -294,13 +587,34 @@ static int benchmark(void)
        (unsigned long long)input.report.pending_overflow,(unsigned long long)input.report.no_navigation);
     return sample_count==100000 && !input.report.pending_overflow && !input.report.no_navigation && !failures;
 }
+static int benchmark_estgps(void)
+{
+    unsigned j; double start, elapsed;
+    trusted_anchor(1000,1,2,-.5f); start=seconds();
+    for(j=1;j<=100000;++j) {
+        uint32_t t=1000+j*20;
+        if(j%50==0) estimator(t,54,t);
+        if(j%100==0) { gps(3,t); navigation(t,0,1); }
+        local_velocity(t,1,2,-.5f,t);
+    }
+    elapsed=seconds()-start;
+    printf("{\"scenario\":\"ESTGPS_50Hz_LOCAL_velocity\",\"velocity_packets\":100000,\"seconds\":%.9g,\"us_per_velocity_packet\":%.9g,\"decoder_bytes\":%zu,\"nav_rejected\":%llu}\n",
+        elapsed,elapsed*10,sizeof(input),(unsigned long long)input.report.nav_rejected);
+    return input.report.have_gps_anchor && !input.report.nav_rejected && !failures;
+}
 int main(int argc, char **argv)
 {
+    if(argc==2 && !strcmp(argv[1],"--bench-estgps")) return benchmark_estgps()?0:1;
     if(argc==2 && !strcmp(argv[1],"--bench")) return benchmark()?0:1;
     if(argc!=1) return 2;
     if(!check_discovery_and_fragmentation() || !check_parser_recovery() ||
        !check_navigation_and_named_data() || !check_finish_and_missing_nav() || !check_watermark_boundary() ||
        !check_clocks_and_wrap() || !check_environment_and_future_fields() ||
-       !check_bounded_memory() || !check_high_rate_navigation() || !check_automatic_origin() || failures) return 1;
+       !check_bounded_memory() || !check_high_rate_navigation() || !check_automatic_origin() ||
+       !check_estgps_trapezoid_and_weather() || !check_estgps_ekf_preference_and_partial_anchor() ||
+       !check_estgps_missing_evidence() || !check_estgps_validity_and_gaps() || !check_estgps_expiry_and_resets() ||
+       !check_estgps_status_is_not_clock_owner() || !check_estgps_stale_and_known_invalid_global() ||
+       !check_estgps_local_before_delayed_global() || !check_estgps_raw_gps_source_clock() ||
+       !check_estgps_invalid_interval_and_origin() || failures) return 1;
     printf("PASS %u MAVLink wire checks\n",checks); return 0;
 }

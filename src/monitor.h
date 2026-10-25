@@ -7,6 +7,9 @@
 #include "time_sync.h"
 
 #define TM_MAX_DEVICES 32u
+/* Explicit location provenance; zero-initialized snapshots remain unknown. */
+enum { TM_POSITION_UNKNOWN=0, TM_POSITION_GPS=1, TM_POSITION_ESTGPS=2,
+       TM_POSITION_NO_ANCHOR=3 };
 typedef struct {
     uint8_t sysid, compid, type, autopilot, base_mode, system_status, have_heartbeat;
     uint32_t custom_mode;
@@ -14,7 +17,7 @@ typedef struct {
 } tm_device;
 typedef struct {
     char key[TB_KEY_BYTES], unit[TB_UNIT_BYTES];
-    uint64_t observations, t_us;
+    uint64_t observations, t_us, last_receipt_ms;
     uint32_t seq;
     double value;
     int have_value;
@@ -51,9 +54,17 @@ typedef struct {
     uint64_t no_clock, wrong_clock_component, invalid_value, late_observation;
     unsigned device_n, pending_observations, selected_system, selected_component, gps_fix;
     tm_device devices[TM_MAX_DEVICES];
+    /* Display metadata only. Estimated locations must never masquerade as GPS.
+     * Populate explicit known flags; zero is a valid coordinate/age/error value.
+     * Invalid or absent flags render unknown, never (0,0) by default. */
+    unsigned position_kind;
+    int have_geodetic, have_fix_age, have_position_error;
+    double latitude_deg, longitude_deg, altitude_msl_m, estimated_error_m;
+    uint64_t last_fix_age_ms;
 } tm_snapshot;
 
-/* Root owns thread synchronization; snapshot returns a bounded consistent copy.
+/* tm_snapshot stays below 64 KiB (enforced in monitor.c).
+ * Root owns thread synchronization; snapshot returns a bounded consistent copy.
  * Active configuration is immutable. Private draft saves apply on restart.
  * UDP bind/port/enabled are editable source settings with the same save rules.
  * Keyboard is CONIN$ or /dev/tty. With CSV console stdin, editing is disabled;

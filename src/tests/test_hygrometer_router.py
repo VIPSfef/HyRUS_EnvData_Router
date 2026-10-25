@@ -26,7 +26,7 @@ from test_test_stream import CaptureServer, record_bytes, request, response_stat
 SCHEMA = "mavlink_weather_v1"
 SAMPLE_KEYS = {"t_us", "position_m", "velocity_mps", "value", "measurement_variance",
                "time_uncertainty_us", "navigation_uncertainty_m", "position_uncertainty_m",
-               "quality", "seq"}
+               "quality", "seq", "position_source", "estimation_age_us"}
 
 
 def values(index):
@@ -96,6 +96,11 @@ def validate_samples(record, mode, expected, actual):
                 assert stats["t_start_us"] is None and stats["t_end_us"] is None, group
             for sample in samples:
                 assert set(sample) == SAMPLE_KEYS, sample
+                # This fixture supplies fused position but no GPS fix/status.
+                # It is never promoted to a trusted GPS anchor.
+                assert sample["position_source"] == ("ESTGPS" if known_position else "UNKNOWN"), sample
+                assert bool(sample["quality"] & 0x10000000) == known_position, sample
+                assert sample["estimation_age_us"] is None, sample
                 assert all(sample[key] is None for key in ("measurement_variance", "time_uncertainty_us",
                            "navigation_uncertainty_m", "position_uncertainty_m")), "unknown uncertainty fabricated"
                 if known_time:
@@ -322,6 +327,11 @@ def server_case(executable, directory, example):
             lambda item: item.update(time_basis="receive_time"),
             lambda item: item["weather"]["measurements"]["humidity"][0]["representative"].update(value=65.0),
             lambda item: item["weather"]["measurements"]["temperature"][0]["statistics"].update(n=0),
+            lambda item: item["weather"]["measurements"]["temperature"][0]["representative"].update(position_source="invented"),
+            lambda item: item["weather"]["measurements"]["temperature"][0]["representative"].update(position_source="GPS", estimation_age_us=0),
+            lambda item: item["weather"]["measurements"]["temperature"][0]["representative"].update(estimation_age_us=-1),
+            lambda item: item["weather"]["measurements"]["temperature"][0]["representative"].update(estimation_age_us=4294967295),
+            lambda item: item["weather"]["measurements"]["temperature"][0]["representative"].pop("position_source"),
         ):
             payload = deepcopy(valid); mutate(payload["records"][0]); invalid.append(json.dumps(payload).encode("utf-8"))
         for body in invalid + [b"\0" + encoded, b'{"schema":"mavlink_weather_v1","records":[]}']:

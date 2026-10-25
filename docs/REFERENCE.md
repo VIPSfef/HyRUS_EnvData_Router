@@ -1,6 +1,6 @@
-# 기술 참조 — mavlink_telemetry_data_router 0.8.0
+# 기술 참조 — mavlink_telemetry_data_router 0.9.0
 
-처음 실행할 때는 [README](../README.md)를 읽는다. 이 문서의 명령은 저장소 루트 기준이다. 기본 입력은 바이너리 MAVLink이고, CSV는 명시적인 개발용 재생 모드다.
+0.9.0은 호스트 위치 출처·조건부 ESTGPS와 모니터를 개선한다. 네 실행 파일 이름과 공식 SENS_ATMOS wire 규격은 유지하며 이 변경을 위한 Pixhawk 펌웨어 수정은 없다. 처음 실행할 때는 [README](../README.md)를 읽는다. 이 문서의 명령은 저장소 루트 기준이다. 기본 입력은 바이너리 MAVLink이고, CSV는 명시적인 개발용 재생 모드다.
 
 ## 자동 입력과 채널 선택
 
@@ -76,7 +76,7 @@ humidity_fraction = Humidity * 0.01
 variance_SI = scale^2 * variance_source
 ```
 
-SENS_ATMOS에는 센서 ID·instance·품질·시각 오차·측정분산이 없다. 수집기의 논리 그룹 `sensor_id=0,sensor_instance=0`은 이 source의 단일 온습도 입력을 식별할 뿐 물리 센서 종류를 증명하지 않는다. source system/component/session과 ENU 원점은 바깥 전송 레코드로 구분한다. 측정시각은 같은 PX4 부팅 시계의 실제 앞뒤 항법 두 점 사이에서만 위치를 보간한다. timestamp의 µs 자료형을 근거로 시각 정확도1µs를 가정하지 않는다. 상대 시각 오차와 측정분산은 null이고, 이 때문에 시각 오차까지 합산한 위치 오차 추정도 null일 수 있다. 위치 자체를 보간할 수 없는 경우에도 관측값·시각·통계를 보존하고 위치를 null로 남긴다.
+SENS_ATMOS에는 센서 ID·instance·품질·시각 오차·측정분산이 없다. 수집기의 논리 그룹 `sensor_id=0,sensor_instance=0`은 이 source의 단일 온습도 입력을 식별할 뿐 물리 센서 종류를 증명하지 않는다. source system/component/session과 ENU 원점은 바깥 전송 레코드로 구분한다. 측정시각은 같은 PX4 부팅 시계의 검증·분류된 앞뒤 항법 두 점 사이에서 위치를 보간한다. 0.9.0의 GPS/ESTGPS 분류와 제한은 아래 위치 정책을 따른다. timestamp의 µs 자료형을 근거로 시각 정확도1µs를 가정하지 않는다. 상대 시각 오차와 측정분산은 null이고, 이 때문에 시각 오차까지 합산한 위치 오차 추정도 null일 수 있다. 위치 자체를 보간할 수 없는 경우에도 관측값·시각·통계를 보존하고 위치를 null로 남긴다.
 
 같은 source가 HYGROMETER_SENSOR와 SENS_ATMOS를 함께 보내면 실제 wire의 message_id를 그룹 키에 포함해 서로 분리한다. 단위가 같다는 이유로 평균·원본을 합치지 않는다. 동일 물리 관측의 중복인지 확인할 식별자는 없으므로 시험 패치는 SENS_ATMOS 하나만 선택한다. 표준 메시지만으로 SENS_ATMOS에 없는 센서 ID를 복원하거나 같은 component의 여러 물리 센서를 자동 분리할 수 없다.
 
@@ -100,9 +100,11 @@ weather: {
 }
 ```
 
-`representative`와 `samples[]`는 `t_us`(decimal string/null), `position_m`·`velocity_mps`(ENU/null), `value`(SI), `measurement_variance`(SI²/null), `time_uncertainty_us`, `navigation_uncertainty_m`, `position_uncertainty_m`, `quality`, `seq`를 갖는다. 표본의 측정 불확도는 알 수 없으면 null이며 패킷의 해상도를 측정 정확도로 바꾸지 않는다. `position_uncertainty_m`은 알려진 항법 오차와 `|v|·time_uncertainty_us/1e6`의 합인 현재 속도 기반 추정이며 교정된 절대상한이 아니다.
+`representative`와 `samples[]`는 `t_us`(decimal string/null), `position_m`·`velocity_mps`(ENU/null), `value`(SI), `measurement_variance`(SI²/null), `time_uncertainty_us`, `navigation_uncertainty_m`, `position_uncertainty_m`, `quality`, `seq`, `position_source`, `estimation_age_us`를 갖는다. 표본의 측정 불확도는 알 수 없으면 null이며 패킷의 해상도를 측정 정확도로 바꾸지 않는다. `position_uncertainty_m`은 알려진 항법 오차와 `|v|·time_uncertainty_us/1e6`의 합인 현재 속도 기반 추정이며 교정된 절대상한이 아니다.
 
-대표 표본은 알려진 측정시각·위치, 알려진 위치 오차 추정, 그 크기, 알려진 측정분산, 그 크기, 알려진 시각 오차와 그 크기, 결정적인 표본 순서 순으로 선택한다. 원본 표본의 값·시각·위치를 함께 유지하며 통계 평균을 대표 좌표에서의 측정값처럼 사용하지 않는다. quality의 `0x08000000`은 측정시각 미상, `0x04000000`은 측정 위치 미상이다. 기존 미인증 시계 플래그 등 다른 비트도 보존한다. 품질 비트의 숫자 크기를 센서 정확도 순위로 해석하지 않는다.
+대표 표본은 알려진 측정시각·위치를 우선하고, 위치가 있는 표본끼리는 GPS를 ESTGPS보다 우선한다. 이후 알려진 위치 오차 추정, 그 크기, 알려진 측정분산, 그 크기, 알려진 시각 오차와 그 크기, 결정적인 표본 순서로 선택한다. 원본 표본의 값·시각·위치를 함께 유지하며 통계 평균을 대표 좌표에서의 측정값처럼 사용하지 않는다. quality의 `0x08000000`은 측정시각 미상, `0x04000000`은 측정 위치 미상, `0x10000000`은 ESTGPS 추정 위치다. 기존 미인증 시계 플래그 등 다른 비트도 보존한다. 품질 비트의 숫자 크기를 센서 정확도 순위로 해석하지 않는다.
+
+`position_source`는 `GPS`·`ESTGPS`·`UNKNOWN` 문자열이다. `estimation_age_us`는 마지막 유효 GPS 기준점부터의 boot 시각 경과 µs이며, GPS 표본은 0, 기준점 시각을 모르면 null이다. 유효한 FC EKF 전역 좌표라도 이전 GPS 기준점이 없으면 ESTGPS와 경과 null을 함께 보낼 수 있다. 두 필드는 `representative`와 각 `samples[]`에 추가하며 envelope 이름 `mavlink_weather_v1`은 유지한다. 수신 서버는 추가 필드를 허용하고, 추정 출처·나이를 표본과 함께 보존해야 한다.
 
 `statistics`는 n·평균·표본분산 `M2/(n−1)`·min/max와 `time_known_n`·측정시각 시작/끝을 갖는다. n<2이면 분산은 null이다. 측정시각 범위는 그 시각을 아는 표본만 사용하며 `time_known_n=0`이면 양 끝도 null이다. 시각 미상 표본도 평균·분산 n에는 포함된다. 이 분산은 이동에 따른 실제 공간 변화와 잡음을 모두 포함하며 단일 센서 측정의 불확도와 다르다.
 
@@ -118,15 +120,38 @@ PX4의 정확한 기준 커밋·ASLUAV 포함 빌드·가상 센서 명령은 [s
 
 공식 근거: [SENS_ATMOS](https://mavlink.io/en/messages/ASLUAV.html#SENS_ATMOS), [HYGROMETER_SENSOR](https://mavlink.io/en/messages/common.html#HYGROMETER_SENSOR), [MAVLink 직렬화와 CRC](https://mavlink.io/en/guide/serialization.html), [SI](https://www.bipm.org/en/publications/si-brochure).
 
+## GPS/ESTGPS 위치 정책 — 0.9.0
+
+`GLOBAL_POSITION_INT`는 FC가 융합한 전역 항법 결과이고 `GPS_RAW_INT`는 GPS 센서 상태다. 둘을 같은 GPS 원시 좌표로 취급하지 않는다. [공식 GLOBAL_POSITION_INT](https://mavlink.io/en/messages/common.html#GLOBAL_POSITION_INT), [GPS_RAW_INT](https://mavlink.io/en/messages/common.html#GPS_RAW_INT).
+
+1. 수신기 host 시각과 원천 boot 시각 양쪽에서 최근 2초 안의 `GPS_RAW_INT` fix 3..8 및 검증 가능한 GPS source 시각을 요구한다. 여기에 최근 2초의 `ESTIMATOR_STATUS` 절대 수평/수직 위치 비트 `16|32`가 모두 유효하면 GPI를 `GPS`로 분류한다.
+2. GPS 확인 없는 FC 전역 항법은 `ESTGPS`다. 최근 status가 절대 위치 비트 `16|32`를 명시적으로 부정하거나 glitch/accel 오류를 알리면 거부한다. status가 없거나 오래된 경우에도 기존 EKF 전역 입력은 ESTGPS로 보존하지만, 이는 위치 상태를 검증했다는 뜻이 아니며 오차는 미상이다. FC가 계속 수락 가능한 GPI를 주는 동안 수신기가 별도 속도 변위를 더하지 않는다. GPI 최근성은 500 ms로 검사하며, 유효한 새 GPI가 계속 들어오는 경로에 수신기 DR의 30초 만료를 적용하지 않는다.
+3. GPI가 끊긴 경우에만 마지막 유효 GPS 기준점부터 `LOCAL_POSITION_NED` 지상 속도를 NED→ENU `(vy,vx,-vz)`로 바꾸어 적분한다. 기준점 없는 local x/y/z를 전역 좌표로 간주하지 않고, heading/yaw × airspeed를 사용하지 않는다.
+
+수신기 DR의 한 단계는 `p[k+1] = p[k] + (v[k]+v[k+1])/2 * Δt`인 3축 사다리꼴 적분이다. 속도 표본의 source/host 간격이 500 ms를 넘거나 역전·중복·비유한 값·속력 500 m/s 초과면 그 구간을 적분하지 않는다. `ESTIMATOR_STATUS`는 host와 source 양쪽에서 2초 이내여야 하고 수평/수직 속도 비트 `2|4`가 모두 필요하다. 기준 GPS로부터 source/host 경과가 30초를 넘으면 중단한다. 늦거나 시계와 맞지 않는 GPS/status는 기준 boot 시계나 세션을 재설정하는 용도로 사용하지 않는다. ms 항법 시각과의 최대 1 ms 미래 양자화 허용은 실제 시각 정확도 보증이 아니다.
+
+| ESTIMATOR_STATUS 비트 | 이 구현의 처리 |
+|---|---|
+| `2`, `4` 수평·수직 속도 | 수신기 속도 적분에 모두 필요 |
+| `16`, `32` 절대 수평·수직 위치 | GPS 분류에 모두 필요; 최근 status가 이를 부정하면 FC 전역 위치도 거부 |
+| `128` CONST_POS_MODE | 정상 정지 GPS/GPI는 허용하지만 수신기 속도 적분은 금지 |
+| `1024` GPS_GLITCH, `2048` ACCEL_ERROR | 해당 상태의 위치/속도 추정을 거부 |
+
+이는 수집기의 보수적인 수락 정책이다. 공식 비트 의미는 [ESTIMATOR_STATUS_FLAGS](https://mavlink.io/en/messages/common.html#ESTIMATOR_STATUS_FLAGS)를 따른다. 수신기 적분이 멈췄을 때 새 GPS 기준점·유효한 FC GPI와 연속 속도 조건 없이 누락 구간을 0 속도로 메우거나 이전 적분을 임의 재개하지 않는다.
+
+항법 ring은 최대 32개이며 GPS/ESTGPS 출처와 앵커 시각을 병렬 고정 배열로 보관한다. 보간에 추정 항법이 하나라도 포함되면 결과도 ESTGPS다. 원본 온습도는 위치가 없어도 보존한다. 위치 출처 미상은 UNKNOWN, 위치/속도/오차/경과는 해당 필드의 null 규칙을 따른다. 수신기 적분 오차를 시간만으로 수치화하지 않으며 알려진 항법/시간 오차가 없으면 `navigation_uncertainty_m`·`position_uncertainty_m`은 null이다. 경과 30초 이내라는 조건은 정확도 상한이 아니다.
+
+TUI의 `NO_ANCHOR`는 사용할 전역 항법과 이전 유효 GPS 기준점이 모두 없는 상태다. JSON `position_source`의 새 종류가 아니라 `UNKNOWN`·좌표 null에 대한 진단 표시다. `last_fix_age`는 마지막 유효 GPS의 source boot 경과이고, 알 수 없으면 unknown이다. 실내 fix 0 상태에 임의 원점/0 좌표를 만들지 않는다.
+
 ## 키–값, 위치와 시각
 
 NAMED_VALUE_FLOAT/INT의 이름을 key로 사용하며 새 키는 자동 등록한다. 표준 wire value는 float32/int32이며 NAMED_VALUE_* 이름은 wire 규격상 최대10바이트다. 단위는 메시지에 없어 unit_map을 쓰며 미지정은 unknown이다. 키 최대31자 `[A-Za-z_][A-Za-z0-9_.-]*`, 단위 최대15자 ASCII 규약, 활성 소스당 기본 최대16키를 사용한다. 같은 키의 단위는 한 실행 설정에서 고정한다.
 
 SCALED_PRESSURE/2/3 및 HIGHRES_IMU의 유효 압력·온도 필드도 처리한다. HIGHRES_IMU의 서로 다른 instance는 키를 구분한다. 알 수 없는 메시지·서명 검증 없는 signed 프레임은 수와 사유를 표시하고 넘어간다. 새로운 값 이름은 코드 변경이 필요 없지만, 정의가 없는 새 wire 메시지를 자동 해독하지는 않는다.
 
-GLOBAL_POSITION_INT의 boot-ms와 위치/속도를 사용한다. NED 속도는 ENU `(vy,vx,-vz)`로 바꾼다. 위치는 지정 또는 첫 유효 WGS84 위·경도 원점의 지역 반경 투영이고 고도는 MSL 차이다. 이는 지역 근사이며 geoid 변환이 아니다. 원점 불명인 LOCAL_POSITION_NED 좌표를 같은 좌표계라고 가정하지 않는다.
+GLOBAL_POSITION_INT의 boot-ms와 위치/속도를 위 정책에 따라 GPS/ESTGPS로 분류해 사용한다. NED 속도는 ENU `(vy,vx,-vz)`로 바꾼다. 위치는 지정 또는 첫 유효 WGS84 위·경도 원점의 지역 반경 투영이고 고도는 MSL 차이다. 이는 지역 근사이며 geoid 변환이 아니다. 원점 불명인 LOCAL_POSITION_NED 좌표를 같은 좌표계라고 가정하지 않는다.
 
-실제 양쪽 항법이 있을 때만 선형 보간하고 최대200ms 간격을 허용한다. `A*Δt²/8` 항은 가속도 가정 A가 실제 상한일 때만 상한이다. 항법이 없어 연결할 수 없는 관측은 보류 후 no_navigation으로 집계한다. 고속 NAV 이력에서 밀려나도 이미 계산한 실제 보간 결과는 관측에 보존한다.
+같은 세션의 검증·분류된 양쪽 항법이 있을 때만 선형 보간하고 최대200ms 간격을 허용한다. 추정 출처는 보간 후에도 유지한다. `A*Δt²/8` 항은 가속도 가정 A가 실제 상한일 때만 상한이다. 항법이 없어 연결할 수 없는 관측은 보류 후 no_navigation으로 집계한다. 고속 NAV 이력에서 밀려나도 이미 계산한 실제 보간 결과는 관측에 보존한다.
 
 센서 boot-ms 양자화의 상대 오차는1000µs로 둔다. GPS_RAW_INT의 유효 h_acc/v_acc가 없으면 위치오차는 미상이다. HDOP를 미터 오차로 오인하지 않는다. 미상은 raw와 통계에 null이며 position_error_n이 오차를 알 수 있는 유효 값의 수다.
 
@@ -212,7 +237,7 @@ seq는 키별 중계 관측 순번이며 MAVLink 공용8bit헤더 순번이 아�
 
 `seq`는 실행 내 전역 증가 정수다. 재연결·기체 재부팅은 `source_generation`과 `session`으로 구분한다. `heartbeat.received_monotonic_ms`와 위치의 같은 이름 필드는 **수집기 호스트의 단조 시계**이며 GPS UTC가 아니다. `position.boot_ms`는 해당 GLOBAL_POSITION_INT의 원천 부팅 경과시각이다. 위·경도는 deg, 고도는 MSL m다. GPS_RAW_INT의 다른 좌표로 GLOBAL_POSITION_INT 위치를 바꾸면서 이전 boot/수신시각을 붙이지 않는다.
 
-좌표는 해당 입력·부팅 구간의 최신 실제 항법이다. `coordinate_age_ms`는 이 레코드의 수집 시각과 항법 수신시각의 차이다. 하트비트의 측정 위치라고 보간하거나 센서 동시 측정이라고 주장하지 않는다. 항법이 없거나 그 수신 후 `link_timeout_ms` 이상 지났다면 `position`과 `coordinate_age_ms`는 모두 null이다. 소스 시계가 초기화된 뒤에는 새 하트비트를 받아야 새 구간의 시험 레코드를 만든다.
+좌표는 해당 입력·부팅 구간의 최신 수락 항법이며 위 GPS/ESTGPS 정책을 따른다. `coordinate_age_ms`는 이 레코드의 수집 시각과 항법 수신시각의 차이다. 하트비트의 측정 위치라고 보간하거나 센서 동시 측정이라고 주장하지 않는다. 항법이 없거나 위 항법 유효성/500ms 최근성 기준 또는 `link_timeout_ms`를 벗어나면 `position`과 `coordinate_age_ms`는 모두 null이다. 소스 시계가 초기화된 뒤에는 새 하트비트를 받아야 새 구간의 시험 레코드를 만든다.
 
 선택한 기기가 식별되고 새 하트비트가 있을 때만, `send_interval_ms`당 최대 한 레코드를 넣는다. 이미 보낸 하트비트를 새 레코드로 반복하지 않는다. 원본 관측·커스텀 키·통계는 시험 JSON에 넣지 않는다. RAM 큐 8개·요청당 최대 4개를 사용하고 HTTP 204 전에는 레코드와 순번·좌표 나이를 보존해 재시도한다. 서버는 `(session,seq)`로 재전송을 구분할 수 있다.
 

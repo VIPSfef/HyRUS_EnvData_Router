@@ -314,11 +314,12 @@ static void ingest_weather(app *a,const mi_event *e) {
             (void)strcpy(key->key,s->metric==WEATHER_TEMPERATURE ? "hyg_temperature" : "hyg_humidity");
             (void)strcpy(key->unit,s->metric==WEATHER_TEMPERATURE ? "K" : "1");
             ++key->observations; key->t_us=s->has_time ? s->t_us : 0;
-            key->seq=s->seq; key->value=s->value; key->have_value=1;
+            key->seq=s->seq; key->value=s->value; key->have_value=1; key->last_receipt_ms=now_ms();
         }
         if(s->has_position) {
             a->diag.have_position=1; memcpy(a->diag.p,s->p,sizeof(s->p)); memcpy(a->diag.v,s->v,sizeof(s->v));
             a->diag.time_uncert_us=s->time_uncert_us; a->diag.pos_error_m=s->pos_error_m;
+            a->diag.nav_age_us=UINT32_MAX;
         }
     } else ++a->loss.rejected;
     unlock(&a->mutex);
@@ -497,6 +498,27 @@ static void input_status(void *context,const ri_report *report) {
     a->diag.selected_system=report->mav.selected_system;
     a->diag.selected_component=report->mav.selected_component;
     a->diag.gps_fix=report->mav.gps_fix;
+    {
+        const mi_report *nav=&report->mav;
+        uint64_t at=now_ms();
+        int fresh=nav->have_navigation && !strcmp(report->status,"LOCKED") &&
+            at>=nav->navigation_received_ms && at-nav->navigation_received_ms<=a->config.link_timeout_ms;
+        a->diag.last_boot_us=nav->boot_us;
+        a->diag.have_geodetic=fresh && nav->position_kind!=WEATHER_POSITION_UNKNOWN &&
+            isfinite(nav->lat) && fabs(nav->lat)<=90 && isfinite(nav->lon) && fabs(nav->lon)<=180 &&
+            isfinite(nav->altitude_msl_m);
+        a->diag.position_kind=a->diag.have_geodetic ?
+            (nav->position_kind==WEATHER_POSITION_GPS ? TM_POSITION_GPS : TM_POSITION_ESTGPS) :
+            (nav->have_gps_anchor ? TM_POSITION_UNKNOWN : TM_POSITION_NO_ANCHOR);
+        a->diag.latitude_deg=nav->lat; a->diag.longitude_deg=nav->lon;
+        a->diag.altitude_msl_m=nav->altitude_msl_m;
+        a->diag.have_fix_age=nav->have_gps_anchor && nav->boot_us>=nav->last_fix_boot_us;
+        a->diag.last_fix_age_ms=a->diag.have_fix_age ? (nav->boot_us-nav->last_fix_boot_us)/1000 : 0;
+        a->diag.have_position_error=a->diag.have_geodetic && isfinite(nav->navigation_error_m) && nav->navigation_error_m>=0;
+        a->diag.estimated_error_m=a->diag.have_position_error ? nav->navigation_error_m : NAN;
+        if(!a->diag.have_geodetic) a->diag.have_position=0;
+    }
+
     a->diag.device_n=report->mav.devices<TM_MAX_DEVICES ? report->mav.devices : TM_MAX_DEVICES;
     for(i=0;i<a->diag.device_n;++i) {
         const mi_device *d=&report->mav.device[i]; tm_device *out=&a->diag.devices[i];
@@ -876,7 +898,7 @@ static void snapshot(void *context, tm_snapshot *out) {
     out->current_window_us = a->current.n ? a->current.window_us : 0;
     out->raw_capacity = TB_CAPACITY; out->send_capacity = SEND_WINDOWS;
     out->oldest_age_ms = a->count ? now - a->queued_at[a->head] : 0;
-    out->last_boot_us = a->have_last ? a->last_t : 0;
+    out->last_boot_us = a->live ? a->diag.last_boot_us : (a->have_last ? a->last_t : 0);
     out->have_clock = tc_get_report(&a->clock, &out->clock);
     unlock(&a->mutex);
 }

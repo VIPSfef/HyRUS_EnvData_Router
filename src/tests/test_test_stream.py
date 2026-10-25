@@ -163,10 +163,10 @@ def validate_records(server, port, require_position, retry, mode, expected_posit
         positions = [item for item in records if item["position"] is not None]
         assert len(positions) >= 2, records
         if mode == "coordinates":
-            assert any(item["coordinate_age_ms"] >= 500 for item in positions), positions
-            # The validity interval must span more than one 1Hz capture tick.
-            # A 500..1000ms age band can be skipped solely by capture phase.
-            assert all(item["coordinate_age_ms"] < 2500 for item in positions), positions
+            # The source-specific 500ms navigation expiry is stricter than the
+            # transport's 2500ms heartbeat timeout. Continuing heartbeats must
+            # not keep a stopped position stream valid.
+            assert all(item["coordinate_age_ms"] <= 500 for item in positions), positions
             assert records[-1]["position"] is None and records[-1]["coordinate_age_ms"] is None, records
         elif mode == "reboot":
             assert len({item["session"] for item in records}) == 2, records

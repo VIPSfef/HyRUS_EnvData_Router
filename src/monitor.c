@@ -21,6 +21,8 @@
 #include <unistd.h>
 #endif
 
+typedef char tm_snapshot_under_64k[(sizeof(tm_snapshot)<=65536u) ? 1 : -1];
+
 enum { KEY_NONE=0, KEY_UP=256, KEY_DOWN, KEY_ENTER, KEY_ESCAPE, KEY_BACK, KEY_CLEAR };
 enum { FIELD_COUNT=33 };
 static const char *const fields[FIELD_COUNT]={
@@ -125,8 +127,10 @@ static void restore_signal(int signal_number)
     int saved_errno=errno;
     if(restore_terminal.saved_mode)
         (void)tcsetattr(restore_terminal.fd,TCSANOW,&restore_terminal.saved);
-    if(restore_terminal.ansi)
-        (void)write(STDERR_FILENO,"\033[0m\033[?25h",10);
+    if(restore_terminal.ansi) {
+        ssize_t written=write(STDERR_FILENO,"\033[0m\033[?25h",10);
+        (void)written; /* Best effort; keep this signal path async-signal-safe. */
+    }
     if(signal_number==SIGINT) (void)sigaction(SIGINT,&restore_int,NULL);
     else (void)sigaction(SIGTERM,&restore_term,NULL);
     (void)raise(signal_number);
@@ -174,7 +178,10 @@ unavailable:
     restore_uninstall(t);
     t->cleanup_mask=0;
     if(t->saved_mode) (void)tcsetattr(t->fd,TCSANOW,&t->saved);
-    if(t->ansi) (void)write(STDERR_FILENO,"\033[0m\033[?25h",10);
+    if(t->ansi) {
+        ssize_t written=write(STDERR_FILENO,"\033[0m\033[?25h",10);
+        (void)written;
+    }
     t->ansi=0; t->input_ready=0;
 }
 #endif
@@ -252,7 +259,7 @@ static unsigned terminal_columns(void)
 #endif
     return 80;
 }
-typedef struct { FILE *out; unsigned columns, used, lines; } writer;
+typedef struct { FILE *out; unsigned columns, used, lines, max_lines; } writer;
 /* One bounded line at a time, never a full screen allocation. Console lines
  * are clipped before the last column so long keys/URLs cannot wrap the frame. */
 static void write_text(writer *w,const char *fmt,...)
@@ -260,8 +267,10 @@ static void write_text(writer *w,const char *fmt,...)
     char text[2304];
     const unsigned char *p;
     va_list ap;
+    if(w->max_lines && w->lines>=w->max_lines) return;
     va_start(ap,fmt); (void)vsnprintf(text,sizeof(text),fmt,ap); va_end(ap);
     for(p=(const unsigned char *)text;*p;++p) {
+        if(w->max_lines && w->lines>=w->max_lines) break;
         if(*p=='\n') { (void)fputc('\n',w->out); w->used=0; ++w->lines; }
         else {
             if(!w->columns || w->used+1<w->columns) (void)fputc(*p,w->out);
@@ -377,13 +386,78 @@ static const char *device_autopilot(unsigned autopilot)
     default: return "other";
     }
 }
+/* Fixed 16-key search in the monitor thread; weather values stay in SI. */
+static const tm_key *weather_key(const tm_snapshot *s,const char *name,const char *unit,unsigned *index)
+{
+    unsigned i;
+    for(i=0;i<s->key_n && i<TB_MAX_KEYS;++i)
+        if(!strncmp(s->keys[i].key,name,TB_KEY_BYTES) && !strncmp(s->keys[i].unit,unit,TB_UNIT_BYTES)) {
+            *index=i; return &s->keys[i];
+        }
+    return NULL;
+}
+static void receipt_age(const tm_snapshot *s,const tm_key *key,char out[32])
+{
+    if(key && key->last_receipt_ms && s->now_ms>=key->last_receipt_ms)
+        (void)snprintf(out,32,"%" PRIu64,elapsed(s->now_ms,key->last_receipt_ms));
+    else (void)snprintf(out,32,"unknown");
+}
+static void render_weather(writer *w,const tm_snapshot *s,const tb_config *c,const rates *r)
+{
+    unsigned ti=0,hi=0;
+    const tm_key *temperature=weather_key(s,"hyg_temperature","K",&ti);
+    const tm_key *humidity=weather_key(s,"hyg_humidity","1",&hi);
+    char t_age[32],h_age[32];
+    int have_t=temperature && temperature->have_value && isfinite(temperature->value) && temperature->value>=0;
+    int have_h=humidity && humidity->have_value && isfinite(humidity->value) && humidity->value>=0 && humidity->value<=1;
+    int stale=(have_t && temperature->last_receipt_ms && elapsed(s->now_ms,temperature->last_receipt_ms)>=c->idle_warn_ms) ||
+              (have_h && humidity->last_receipt_ms && elapsed(s->now_ms,humidity->last_receipt_ms)>=c->idle_warn_ms);
+    write_text(w,"weather%s T=",stale ? " STALE" : "");
+    if(have_t) write_text(w,"%.2fK (%.2fC)",temperature->value,temperature->value-273.15);
+    else write_text(w,"unknown");
+    write_text(w," RH=");
+    if(have_h) write_text(w,"%.4f (%.2f%%)",humidity->value,humidity->value*100);
+    else write_text(w,"unknown");
+    write_text(w,"\n");
+    receipt_age(s,temperature,t_age); receipt_age(s,humidity,h_age);
+    write_text(w,"weather Hz=%.1f/%.1f age=%s/%sms boot=",temperature ? r->key[ti] : 0,humidity ? r->key[hi] : 0,t_age,h_age);
+    if(have_t && have_h && temperature->t_us && temperature->t_us==humidity->t_us)
+        write_text(w,"%" PRIu64 "us\n",temperature->t_us);
+    else if(have_t && have_h && temperature->t_us && humidity->t_us)
+        write_text(w,"%" PRIu64 "/%" PRIu64 "us\n",temperature->t_us,humidity->t_us);
+    else write_text(w,"unknown\n");
+}
+static void render_location(writer *w,const tm_snapshot *s,int ansi)
+{
+    const char *kind="UNKNOWN";
+    int valid=s->have_geodetic && isfinite(s->latitude_deg) && isfinite(s->longitude_deg) &&
+        isfinite(s->altitude_msl_m) && s->latitude_deg>=-90 && s->latitude_deg<=90 &&
+        s->longitude_deg>=-180 && s->longitude_deg<=180;
+    if(s->position_kind==TM_POSITION_NO_ANCHOR) { kind="NO_ANCHOR"; valid=0; }
+    else if(valid && s->position_kind==TM_POSITION_GPS) kind="GPS";
+    else if(valid && s->position_kind==TM_POSITION_ESTGPS) kind="ESTGPS";
+    else valid=0;
+    write_text(w,"position=");
+    if(ansi) fputs(valid && s->position_kind==TM_POSITION_GPS ? "\033[32m" : "\033[33m",w->out);
+    write_text(w,"%s",kind);
+    if(ansi) fputs("\033[0m",w->out);
+    write_text(w," fix=%u last_fix_age=",s->gps_fix);
+    if(s->have_fix_age) write_text(w,"%" PRIu64 "ms",s->last_fix_age_ms);
+    else write_text(w,"unknown");
+    write_text(w," error=");
+    if(valid && s->have_position_error && isfinite(s->estimated_error_m) && s->estimated_error_m>=0)
+        write_text(w,"%.3gm\n",s->estimated_error_m);
+    else write_text(w,"unknown\n");
+    if(valid) write_text(w,"geo lat=%.7f lon=%.7f alt_msl=%.2fm\n",s->latitude_deg,s->longitude_deg,s->altitude_msl_m);
+}
 static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
                             const rates *r,unsigned first,unsigned max_keys,unsigned columns,int show_devices,int ansi)
 {
-    writer w={out,columns,0,0};
+    writer w={out,columns,0,0,0};
     char endpoint[2048], source_name[256];
     int mav=strcmp(c->input_mode,"csv")!=0;
     int compact=mav && columns;
+    if(columns) { unsigned rows=terminal_rows(); w.max_lines=rows>2 ? rows-2 : 1; }
     unsigned i,last,n=s->key_n<TB_MAX_KEYS ? s->key_n : TB_MAX_KEYS;
     uint64_t idle=elapsed(s->now_ms,s->last_receipt_ms ? s->last_receipt_ms : s->started_ms);
     uint64_t ack_age=elapsed(s->now_ms,s->last_success_ms ? s->last_success_ms : s->started_ms);
@@ -403,14 +477,14 @@ static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
             status(s),s->test_mode ? "TEST-HTTP" : s->dry_run ? "DRY" : "HTTP",(double)elapsed(s->now_ms,s->started_ms)/1000,
             mav ? (s->test_mode==2 ? "MAVLink-test-weather" : s->test_mode==1 ? "MAVLink-test-HB+position" : "MAVLink") : "normalized-CSV");
     write_text(&w,"ACTIVE endpoint=%s\n",endpoint);
-    if(mav && c->origin_auto)
+    if(!compact && mav && c->origin_auto)
         write_text(&w,"ACTIVE stream=%.64s session=%.64s origin=auto(GLOBAL_POSITION_INT/MSL)\n",c->stream,c->session);
-    else write_text(&w,"ACTIVE stream=%.64s session=%.64s origin=(%.7g,%.7g,%.7g)\n",
+    else if(!compact) write_text(&w,"ACTIVE stream=%.64s session=%.64s origin=(%.7g,%.7g,%.7g)\n",
             c->stream,c->session,c->origin[0],c->origin[1],c->origin[2]);
     write_text(&w,"ACTIVE interval=%ums connect=%ums io=%ums max_windows=%u summary=%d\n",
             c->send_interval_ms,c->connect_timeout_ms,c->io_timeout_ms,c->max_windows,c->summary);
     if(mav) {
-        write_text(&w,"ACTIVE UDP enabled=%u bind=%.63s:%u (receive-only)\n",
+        if(!compact) write_text(&w,"ACTIVE UDP enabled=%u bind=%.63s:%u (receive-only)\n",
                 c->udp_enabled,c->udp_bind,c->udp_port);
         /* Colour is terminal-only and does not consume the bounded text width.
          * LOCKED is published only after valid MAVLink and device identity;
@@ -423,6 +497,7 @@ static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
         write_text(&w," active=%s\n",source_name[0] ? source_name : "none");
         if(s->source_error[0]) write_text(&w,"source error=%.159s\n",s->source_error);
     }
+    if(mav) { render_weather(&w,s,c,r); render_location(&w,s,ansi); }
     if(compact) write_text(&w,"input bytes=%" PRIu64 " accepted=%" PRIu64 " rejected=%" PRIu64 " rate=%.1f/s\n",
             s->input_bytes,s->accepted,s->rejected,r->accepted);
     else write_text(&w,"input bytes=%" PRIu64 " lines=%" PRIu64 " accepted=%" PRIu64 " rejected=%" PRIu64
@@ -481,9 +556,16 @@ static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
     if(s->have_position && isfinite(s->p[0]) && isfinite(s->p[1]) && isfinite(s->p[2])) {
         write_text(&w,"ENU p=(%.3f,%.3f,%.3f)m v=(%.2f,%.2f,%.2f)m/s\n",
                 s->p[0],s->p[1],s->p[2],(double)s->v[0],(double)s->v[1],(double)s->v[2]);
-        write_text(&w,"alignment relative_uncert=%uus nav_age=%uus pos_error=%.3gm\n",
-                (unsigned)s->time_uncert_us,(unsigned)s->nav_age_us,(double)s->pos_error_m);
-    } else write_text(&w,"ENU position=n/a alignment=n/a\n");
+        write_text(&w,"alignment relative_uncert=");
+        if(s->time_uncert_us!=UINT32_MAX) write_text(&w,"%uus",(unsigned)s->time_uncert_us);
+        else write_text(&w,"unknown");
+        write_text(&w," nav_age=");
+        if(s->nav_age_us!=UINT32_MAX) write_text(&w,"%uus",(unsigned)s->nav_age_us);
+        else write_text(&w,"unknown");
+        write_text(&w," pos_error=");
+        if(isfinite(s->pos_error_m) && s->pos_error_m>=0) write_text(&w,"%.3gm\n",(double)s->pos_error_m);
+        else write_text(&w,"unknown\n");
+    } else if(!compact) write_text(&w,"ENU position=n/a alignment=n/a\n");
     if(!compact && (s->have_position || s->utc_us)) {
         write_text(&w,"last_observation_UTC=");
         if(s->utc_us) write_text(&w,"%" PRIu64 "us absolute_uncert=%uus\n",s->utc_us,(unsigned)s->utc_uncert_us);
@@ -575,7 +657,7 @@ static void field_value(const tb_config *c,unsigned field,char *buf,size_t cap,i
 }
 static void render_editor(FILE *out,const editor *e,unsigned rows,unsigned columns)
 {
-    writer w={out,columns,0,0};
+    writer w={out,columns,0,0,0};
     unsigned i,first;
     unsigned visible=rows>10 ? rows-10 : 1;
     char value[2048];
@@ -659,7 +741,7 @@ static void draw(terminal *t,const tm_snapshot *s,const tb_config *c,const rates
         render_snapshot(stderr,s,c,r,(unsigned)(e->show_devices ? e->device_scroll : e->scroll),
                         t->ansi ? visible : TB_MAX_KEYS,columns,e->show_devices,t->ansi);
         if(t->ansi) {
-            writer w={stderr,columns,0,0};
+            writer w={stderr,columns,0,0,0};
             write_text(&w,"%s\n",t->input_ready ? "e: settings | d: devices | k: values | Up/Down scroll | q does not stop" :
                 t->csv_console ? "Editing requires piped CSV input; keyboard belongs to CSV stdin." :
                 "Keyboard unavailable; monitoring continues until input stops.");

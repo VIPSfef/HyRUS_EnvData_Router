@@ -390,6 +390,18 @@ static int weather_sample_record(const ts_json *j,unsigned sample,int humidity) 
     if(!known_time && !null_token(j,tu)) return 0;
     if(((quality&UINT32_C(0x08000000))!=0)==known_time ||
        ((quality&UINT32_C(0x04000000))!=0)==known_position) return 0;
+    {
+        unsigned source=field(j,sample,"position_source"),age=field(j,sample,"estimation_age_us");
+        if(source<j->count) {
+            int gps=token_text(j,source,"GPS"),estimated=token_text(j,source,"ESTGPS");
+            if(!gps && !estimated && !token_text(j,source,"UNKNOWN")) return 0;
+            if((gps || estimated) && !known_position) return 0;
+            if(((quality&UINT32_C(0x10000000))!=0)!=estimated) return 0;
+            if(!null_token(j,age) && (!token_uint(j,age,&number) || number>=UINT32_MAX)) return 0;
+            if(gps && (null_token(j,age) || number!=0)) return 0;
+            if(!gps && !estimated && !null_token(j,age)) return 0;
+        } else if(age<j->count) return 0;
+    }
     return 1;
 }
 static int weather_body_record(const ts_json *j,unsigned record) {
@@ -539,6 +551,8 @@ static void print_weather(unsigned record) {
         for(unsigned group=array+1;group<j->token[array].next;group=j->token[group].next) {
             unsigned rep=field(j,group,"representative"),stats=field(j,group,"statistics");
             unsigned position=field(j,rep,"position_m");
+            unsigned provenance=field(j,rep,"position_source");
+            const char *position_label=token_text(j,provenance,"ESTGPS") ? "ESTGPS" : token_text(j,provenance,"GPS") ? "GPS" : "UNKNOWN";
             uint64_t id=0,message_id=0,instance=0,n=0,raw=0,dropped=0,t=0,uncertainty=0,quality=0;
             double value=0,mean=0,variance=0; char variance_text[32],uncertainty_text[32];
             int have_t=token_u64_string(j,field(j,rep,"t_us"),&t);
@@ -566,7 +580,7 @@ static void print_weather(unsigned record) {
             if(!null_token(j,position)) {
                 double p[3]={0,0,0}; unsigned item=position+1;
                 for(unsigned k=0;k<3;++k) { (void)token_double(j,item,&p[k]); item=j->token[item].next; }
-                log_line("  position ENU=[%.3f,%.3f,%.3f] m",p[0],p[1],p[2]);
+                log_line("  %s position ENU=[%.3f,%.3f,%.3f] m",position_label,p[0],p[1],p[2]);
             } else log_line("  acquisition position=unknown");
         }
     }

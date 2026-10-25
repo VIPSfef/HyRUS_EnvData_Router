@@ -103,6 +103,11 @@ def validate(records, arrival_times, client_stderr, server_stderr, position="any
                 q = sample["quality"]
                 known_time = sample["t_us"] is not None
                 known_position = sample["position_m"] is not None
+                provenance = sample["position_source"]
+                require(provenance in ("GPS", "ESTGPS", "UNKNOWN"), "invalid_position_source")
+                require(bool(q & 0x10000000) == (provenance == "ESTGPS"), "estgps_quality_mismatch")
+                if not known_position:
+                    require(provenance == "UNKNOWN" and sample["estimation_age_us"] is None, "position_provenance_fabricated")
                 require(bool(q & TIME_UNKNOWN) == (not known_time), "time_quality_mismatch")
                 require(bool(q & POSITION_UNKNOWN) == (not known_position), "position_quality_mismatch")
                 require(known_time, "physical_sens_atmos_time_missing")
@@ -137,7 +142,7 @@ def validate(records, arrival_times, client_stderr, server_stderr, position="any
     for pair in pairs.values():
         require(set(pair) == {"temperature", "humidity"}, "temperature_humidity_time_pair_missing")
         a, b = pair["temperature"], pair["humidity"]
-        for name in ("position_m", "velocity_mps", "time_uncertainty_us", "navigation_uncertainty_m", "position_uncertainty_m", "quality"):
+        for name in ("position_m", "velocity_mps", "time_uncertainty_us", "navigation_uncertainty_m", "position_uncertainty_m", "quality", "position_source", "estimation_age_us"):
             require(a[name] == b[name], "paired_metadata_mismatch")
         complete += 1
     require(complete > 0, "no_time_pairs")

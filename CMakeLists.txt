@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(mavlink_telemetry_data_router VERSION 0.8.0 LANGUAGES C)
+project(mavlink_telemetry_data_router VERSION 0.9.0 LANGUAGES C)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
   message(FATAL_ERROR "Use an out-of-source build: cmake --preset windows-x64 or linux-x64")

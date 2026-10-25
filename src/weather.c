@@ -16,6 +16,8 @@ int weather_sample_valid(const weather_sample *s) {
         !isfinite(s->value) || s->value < 0.0 || s->value > FLT_MAX ||
         (s->metric == WEATHER_HUMIDITY && s->value > 1.0) ||
         s->has_time > 1 || s->has_position > 1 ||
+        s->position_kind > WEATHER_POSITION_ESTGPS ||
+        (!s->has_position && s->position_kind != WEATHER_POSITION_UNKNOWN) ||
         (s->has_position && !s->has_time) || !uncertainty_valid(s->measurement_variance)) return 0;
     if (s->has_position) {
         if (!uncertainty_valid(s->pos_error_m)) return 0;
@@ -44,6 +46,7 @@ static int sample_cmp(const weather_sample *a, const weather_sample *b) {
             if (a->p[i] > b->p[i]) return 1;
         }
     }
+    CMP_FIELD(position_kind); CMP_FIELD(estimation_age_us);
     CMP_FIELD(quality); CMP_FIELD(time_uncert_us);
 #undef CMP_FIELD
     return 0;
@@ -61,6 +64,11 @@ static int representative_better(const weather_sample *a, const weather_sample *
     double ea, eb;
     int ka = a->has_time && a->has_position, kb = b->has_time && b->has_position;
     if (ka != kb) return ka > kb;
+    if (a->has_position && b->has_position && a->position_kind != b->position_kind) {
+        unsigned pa=a->position_kind==WEATHER_POSITION_GPS ? 2u : a->position_kind==WEATHER_POSITION_ESTGPS ? 1u : 0u;
+        unsigned pb=b->position_kind==WEATHER_POSITION_GPS ? 2u : b->position_kind==WEATHER_POSITION_ESTGPS ? 1u : 0u;
+        return pa>pb;
+    }
     if (a->has_time != b->has_time) return a->has_time > b->has_time;
     ea = positioning_estimate(a); eb = positioning_estimate(b);
     ka = isfinite(ea); kb = isfinite(eb);
@@ -90,7 +98,10 @@ int weather_batch_add(weather_batch *b, const weather_sample *input) {
     }
     if (i == b->group_n && b->group_n == WEATHER_GROUP_CAPACITY) return 0;
     s = *input;
-    s.quality &= ~(WEATHER_QUALITY_TIME_UNKNOWN | WEATHER_QUALITY_POSITION_UNKNOWN);
+    s.quality &= ~(WEATHER_QUALITY_TIME_UNKNOWN | WEATHER_QUALITY_POSITION_UNKNOWN | WEATHER_QUALITY_POSITION_ESTIMATED);
+    if (!s.has_position) s.estimation_age_us=UINT32_MAX;
+    if (s.position_kind==WEATHER_POSITION_GPS) s.estimation_age_us=0;
+    if (s.position_kind==WEATHER_POSITION_ESTGPS) s.quality |= WEATHER_QUALITY_POSITION_ESTIMATED;
     if (!s.has_time) s.quality |= WEATHER_QUALITY_TIME_UNKNOWN;
     if (!s.has_position) s.quality |= WEATHER_QUALITY_POSITION_UNKNOWN;
     g = &b->group[i];
@@ -196,7 +207,14 @@ static void sample_json(writer *w, const weather_sample *s) {
     if (s->has_time && s->time_uncert_us != UINT32_MAX) put(w, "%" PRIu32, s->time_uncert_us); else put(w, "null");
     put(w, ",\"navigation_uncertainty_m\":"); number(w, s->has_position ? s->pos_error_m : NAN);
     put(w, ",\"position_uncertainty_m\":"); number(w, positioning_estimate(s));
-    put(w, ",\"quality\":%" PRIu32 ",\"seq\":%" PRIu32 "}", s->quality, s->seq);
+    put(w, ",\"quality\":%" PRIu32 ",\"seq\":%" PRIu32, s->quality, s->seq);
+    put(w, ",\"position_source\":\"%s\",\"estimation_age_us\":",
+        s->has_position && s->position_kind==WEATHER_POSITION_GPS ? "GPS" :
+        s->has_position && s->position_kind==WEATHER_POSITION_ESTGPS ? "ESTGPS" : "UNKNOWN");
+    if(s->has_position && s->position_kind!=WEATHER_POSITION_UNKNOWN && s->estimation_age_us!=UINT32_MAX)
+        put(w,"%" PRIu32,s->estimation_age_us);
+    else put(w,"null");
+    put(w,"}");
 }
 
 int weather_batch_json(const weather_batch *b, char *buf, size_t cap) {

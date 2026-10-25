@@ -9,8 +9,10 @@
 #define WEATHER_SI_REGISTRY 1u
 #define WEATHER_QUALITY_TIME_UNKNOWN UINT32_C(0x08000000)
 #define WEATHER_QUALITY_POSITION_UNKNOWN UINT32_C(0x04000000)
+#define WEATHER_QUALITY_POSITION_ESTIMATED UINT32_C(0x10000000)
 
 enum { WEATHER_TEMPERATURE = 1, WEATHER_HUMIDITY = 2 };
+enum { WEATHER_POSITION_UNKNOWN = 0, WEATHER_POSITION_GPS = 1, WEATHER_POSITION_ESTGPS = 2 };
 
 /* SI registry 1: temperature is kelvin, relative humidity is a fraction [0,1].
  * t_us is the sensor acquisition time on the Pixhawk boot clock, NOT reception
@@ -24,6 +26,7 @@ enum { WEATHER_TEMPERATURE = 1, WEATHER_HUMIDITY = 2 };
  * message_id identifies the actual wire protocol (8009 SENS_ATMOS, 12920
  * HYGROMETER_SENSOR); 0 is unknown metadata for API callers. It is not a
  * hardware identifier. Different wire protocols always form separate groups.
+ * ESTGPS is an estimate, not a GPS fix. Unknown error remains NaN.
  * seq breaks ties; choose increasing, unique sequence numbers at the source. */
 typedef struct {
     uint64_t t_us;
@@ -32,6 +35,8 @@ typedef struct {
     float v[3], pos_error_m;
     uint8_t metric, sensor_instance, has_time, has_position;
     uint32_t message_id;
+    uint32_t estimation_age_us; /* UINT32_MAX: last trusted GPS anchor time unknown */
+    uint8_t position_kind; /* WEATHER_POSITION_*; distinct from observation validity */
 } weather_sample;
 
 typedef struct {

@@ -1,6 +1,47 @@
-# 검토 기록 — mavlink_telemetry_data_router v0.8.0
+# 검토 기록 — mavlink_telemetry_data_router v0.9.0
 
-검토일: 2026-10-21. v0.8.0은 공식 ASLUAV SENS_ATMOS 단일 온습도 입력으로 전환하고 HYGROMETER_SENSOR의 사설 시각 확장을 제거한다. 최신 변경과 검증은 문서 끝의0.8.0 절을 따른다. 아래0.7.0 및 이전 내용은 당시 구현과 시험의 역사이며 현재 사용 규격을 뜻하지 않는다. [현재 사용법](../README.md), [출력/통신 규약](REFERENCE.md)을 따른다.
+검토일: 2026-10-25. 현재 호스트 버전은 0.9.0이다. 최신 ESTGPS·화면 변경은 바로 아래 절, 실제 센서/PX4 통합 검증은 문서 끝의 2026-10-25 기록을 따른다. 0.8.0과 이전 내용은 당시 구현·검증 범위를 보존한 이력이다. [현재 사용법](../README.md), [출력/통신 규약](REFERENCE.md)을 따른다.
+
+## 0.9.0 · 위치 출처와 실시간 모니터
+
+호스트 수집기만 변경하며 Windows/Linux headless·interactive 네 실행 파일 이름을 유지한다. 이미 설치한 실물 SHTC3/SENS_ATMOS 펌웨어는 이 변경을 위해 다시 빌드하거나 업로드하지 않는다. 관측·좌표·화면 프레임은 메모리에만 유지하고 서버의 HTTP 204 이후 해당 큐를 해제하는 계약은 그대로다.
+
+### 구현·정책 범위
+
+- GPI는 FC EKF 전역 좌표다. 최근 GPS source 시각과 fix 및 유효한 절대 위치 상태 `16|32`가 함께 있어야 GPS로 분류하고, GPS 확인 없는 FC GPI는 ESTGPS로 보존한다. 최근 status가 절대 위치를 부정하거나 오류를 알리면 거부하며, status 없음/노후 입력의 ESTGPS는 상태 확인·오차 미상임을 구분한다.
+- 최근 FC GPI를 우선하며 그 출력이 끊긴 경우만 마지막 유효 GPS 기준점에서 LOCAL_POSITION_NED 지상 N/E/D 속도를 사다리꼴 적분한다. heading/yaw × airspeed 경로는 없다.
+- GPS/status 최근성 2초, 수신기 적분 속도 간격 500ms, 수신기 DR 최대 30초를 적용한다. 비트 `2|4`가 모두 필요하고 CONST128·GPS glitch1024·accel error2048은 수신기 DR을 막는다. 정상 정지 GPS/GPI의 CONST128은 허용한다. 계속 유효한 FC GPI에는 DR의 30초 제한을 적용하지 않는다.
+- 지연 GPS/status가 기존 boot 시계나 세션을 파괴하지 않도록 검사한다. 전역 기준이 없으면 좌표를 만들지 않고, 오차 계산 근거가 없으면 null을 유지한다.
+- 온습도 표본과 대표값에 position_source·estimation_age_us를 추가하고 ESTGPS 품질 비트0x10000000을 보존한다. 측정시각 미상0x08000000·위치 미상0x04000000과 구분한다. 위치가 있는 대표 표본끼리는 GPS를 ESTGPS보다 우선한다.
+
+### 모니터 검증·메모리·추가 연산량
+
+온도 K/°C·상대습도 비율/%와 수신률·센서별 age·boot 시각을 기기/값 목록 위에 고정했다. 위치 줄은 GPS/ESTGPS/NO_ANCHOR/UNKNOWN과 마지막 GPS source 경과·오차를 명시한다. 좌표 known flag가 없거나 NaN/범위 오류면 좌표를 출력하지 않는다. UINT32_MAX 시각 오차와 NaN 위치 오차도 큰 정수/nan 대신 unknown으로 표시한다.
+
+Windows Clang과 Linux GCC에서 실제 monitor.c를 포함한 독립 C99 엄격 경고 빌드(-Wall/-Wextra/-Wpedantic/-Werror)를 수행했다. 각 OS에서 UNKNOWN·GPS·ESTGPS·NO_ANCHOR·잘못된 좌표·오래된 센서·값 없음의 7조건 × plain/70열/110열, 총 21개 합성 표시 조건을 확인했다. 24행 기준 본문22행·열폭 미만을 지켰다. NO_ANCHOR에 0 좌표와 known flag를 고의로 넣어도 geodetic 좌표 행은 나오지 않았다. 별도로 미상 오차의 unknown 표시를 합성 검사했다. 이는 전체 앱·실물 ESTGPS 정확도의 검증을 대신하지 않는다.
+
+진단 snapshot은 Windows 3,168→3,352B(+184B), Linux 최종3,360B다. 최신 수신시각을 넣은 tm_key는 88→96B이며 snapshot의 최대16개 key에128B가 추가되고 위치 표시 메타데이터56B가 더해진다. monitor의 current/previous 두 사본은 Windows6,704B·Linux6,720B다. snapshot이64KiB를 넘으면 컴파일을 거부한다. 이는 앱의 전체 고정 메모리나 OS/HTTP/스택/RSS 상한이 아니다.
+
+새 온습도 요약 검색은 refresh당 최대 `2×16×(32+16)=1,536`바이트 비교와 상수 개수의 산술·snprintf다. snapshot 4Hz 복사는 Windows기준13,408B/s로 기존12,672B/s보다736B/s 증가한다. 수신 루프에서 정렬·출력·파일/네트워크 작업을 하지 않으며 모니터는 기존 별도 스레드를 사용한다. 새 작업 풀·표본당 할당은 없다.
+
+위치 추가 작업의 예산은 `f_nav*C_classify + f_velocity*C_trapezoid(3 axes) + f_ui*C_location_render`로 구분한다. 유효성/상태 판정과 한 속도 적분 단계는 O(1), 기존 항법 이력·보류 스캔은 고정 nav32/pending512 상한에 따른다. 직렬/OS·mutex·terminal·HTTP 지연을 포함한 WCET와 실물 위치 오차는 이 연산량만으로 보장하지 않는다. 전체 호스트 고정 저장공간은 최종 실행 파일의 --sizes로 확인한다.
+
+### 실물과 합성 시험의 구분
+
+현재 실물 GPS fix0·전역 위치/GPS 기준점 없음 조건에서는 NO_ANCHOR가 정답이다. 이 상태에서도 SHTC3 온습도 관측과 서버 전송은 유지되며 위치·UTC·미상 불확도는 null이다. 문서 끝의 실물 SHTC3→TCP21000 통과 결과와 위 합성 ESTGPS 표시 검사를 구분한다. 이번 실내 상태가 이동 적분 정확도·실외 GPS 전환·장시간 항법 안정성을 실증한 것은 아니다.
+
+최종 0.9.0 코어는 Windows/Linux 각각 MAVLink wire 검사416개·온습도 검사1,209개를 통과했다. 지연/미래/epoch GPS와 status, 정지 CONST128, 만료 GPI, LOCAL先/GLOBAL後 도착, 무효 구간을 가로지르는 보간 차단, 잘못된 첫 GPI의 원점 오염 방지를 포함한다. 무효 ABS 구간의 경계를 고정 구간 번호로 관리해 해당 경계를 넘는 보간을 막으며, 같은 구간 안의 유효 LOCAL DR 이력은 유지한다.
+
+최종 전체 CTest는 Windows12/12·Linux13/13 통과했다. 양 OS의 별도 monitor/config 통합 검사도 통과했고 Linux PTY에서 설정 저장·재시작 적용·Ctrl+C 터미널 복원을 확인했다. native GCC의 강화된 반환값 검사에 맞게 터미널 복구 write의 결과를 명시적으로 받도록 보완했다. Windows PE32+ x64 두 개와 Linux ELF64 x86-64 두 개를 다시 빌드했으며 OS별 배포 묶음의 두 앱과 Linux 실행 권한도 확인했다.
+
+MinSizeRel 실행 파일의 고정 저장공간 합계는 Windows3,525,060B·Linux3,525,068B이고 입력 decoder 하나는96,920B다. weather_sample은88→96B, group은168→176B, batch는13,984→15,136B다. 최종 MinSizeRel에서 MAVLink 파싱을 포함한 속도 패킷10만 개의 평균은 Windows1.173µs·Linux2.188µs였다. 같은 평균을50Hz에 적용하면 각0.059/0.109ms CPU/s 수준이나, OS·장치·스케줄링 차이와 최악 실행시간을 보장하지 않는다. 별도 O2 측정과 직접 성능 비교하지 않는다.
+
+최종 Windows headless→실제 C TCP21000 서버의12초 실물 재검사에서12요청·12 HTTP204·거부0, 원본248개·동일시각124쌍, ACK 후pending0을 확인했다. 독립 평균·n-1 분산과 새 위치 출처/품질 비트의 일관성을 대조했다. 기준 위치가 없으므로248개 모두 position_source=UNKNOWN·추정경과null이며 좌표를 만들지 않았다. 최소 요청 간격1,000ms, 확인된 중복0이었다. 실제 interactive와 C 서버를 별도 보이는120×30 창으로 실행해 온습도·LOCKED·NO_ANCHOR와 서버 수신/204를 확인했으며 두 창은 계속 실행한다. 관측값·화면은 RAM에서만 검사했고 파일에는 설정·PID와 이 검증 요약만 남긴다.
+
+---
+
+## 이전 버전 검토 이력
+
 
 ## 0.6.1 변경 범위
 

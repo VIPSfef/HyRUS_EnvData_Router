@@ -233,6 +233,32 @@ static int serialization(void) {
     CHECK(weather_batch_json(&b, json, sizeof(json)) > 0 && strstr(json, "\"t_us\":\"18446744073709551615\""));
     return 1;
 }
+static int position_provenance(void) {
+    weather_batch b;
+    weather_sample s=sample(WEATHER_TEMPERATURE,1,1,300);
+    weather_batch_init(&b,0);
+    s.position_kind=WEATHER_POSITION_ESTGPS; s.estimation_age_us=2000000;
+    CHECK(weather_batch_add(&b,&s));
+    CHECK(b.raw[0].quality & WEATHER_QUALITY_POSITION_ESTIMATED);
+    CHECK(b.raw[0].estimation_age_us==2000000);
+    s.position_kind=WEATHER_POSITION_GPS; s.estimation_age_us=1234; ++s.seq; ++s.t_us;
+    CHECK(weather_batch_add(&b,&s));
+    CHECK(b.group[0].representative.position_kind==WEATHER_POSITION_GPS);
+    CHECK(b.raw[1].estimation_age_us==0);
+    CHECK(!(b.raw[1].quality & WEATHER_QUALITY_POSITION_ESTIMATED));
+    weather_batch_prepare(&b);
+    CHECK(weather_batch_json(&b,json,sizeof(json))>0);
+    CHECK(strstr(json,"\"position_source\":\"ESTGPS\",\"estimation_age_us\":2000000"));
+    CHECK(strstr(json,"\"position_source\":\"GPS\",\"estimation_age_us\":0"));
+    s.has_position=0; CHECK(!weather_sample_valid(&s));
+    s.position_kind=WEATHER_POSITION_UNKNOWN; ++s.seq; ++s.t_us;
+    CHECK(weather_batch_add(&b,&s));
+    CHECK(b.raw[2].estimation_age_us==UINT32_MAX);
+    weather_batch_prepare(&b); CHECK(weather_batch_json(&b,json,sizeof(json))>0);
+    CHECK(strstr(json,"\"position_source\":\"UNKNOWN\",\"estimation_age_us\":null"));
+    s.position_kind=3; CHECK(!weather_sample_valid(&s));
+    return 1;
+}
 static int cost(void) {
     weather_batch b;
     weather_sample s = sample(WEATHER_TEMPERATURE, 1, 1, 300);
@@ -247,7 +273,7 @@ static int cost(void) {
     return 1;
 }
 int main(void) {
-    if (!grouping() || !protocol_identity() || !missing_time() || !representative() || !storage_and_numerics() || !limits() || !serialization() || !cost()) return 1;
+    if (!grouping() || !protocol_identity() || !missing_time() || !representative() || !storage_and_numerics() || !limits() || !serialization() || !position_provenance() || !cost()) return 1;
     printf("weather: %u checks passed\n", checks);
     return 0;
 }
