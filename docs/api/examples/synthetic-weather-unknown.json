@@ -1,0 +1,135 @@
+{
+  "schema": "mavlink_weather_v1",
+  "stream": "synthetic",
+  "records": [
+    {
+      "seq": 1,
+      "generation": 1,
+      "session": "synthetic.fixture",
+      "source": {
+        "sysid": 1,
+        "compid": 1
+      },
+      "frame": "ENU",
+      "origin_wgs84": null,
+      "time_basis": "pixhawk_boot_us",
+      "host_time_basis": "collector_monotonic_ms",
+      "clock_model": null,
+      "weather": {
+        "si_registry": 1,
+        "host_window_ms": "1234",
+        "n": 2,
+        "raw_n": 2,
+        "raw_dropped": 0,
+        "measurements": {
+          "temperature": [
+            {
+              "message_id": 12920,
+              "sensor_id": 0,
+              "sensor_instance": 0,
+              "representative": {
+                "t_us": null,
+                "position_m": null,
+                "velocity_mps": null,
+                "value": 293.15,
+                "measurement_variance": null,
+                "time_uncertainty_us": null,
+                "navigation_uncertainty_m": null,
+                "position_uncertainty_m": null,
+                "quality": 738197504,
+                "seq": 1,
+                "position_source": "UNKNOWN",
+                "estimation_age_us": null,
+                "velocity_valid": false,
+                "navigation_segment": 0
+              },
+              "statistics": {
+                "n": 1,
+                "mean": 293.15,
+                "variance": null,
+                "min": 293.15,
+                "max": 293.15,
+                "time_known_n": 0,
+                "t_start_us": null,
+                "t_end_us": null
+              },
+              "raw_n": 1,
+              "raw_dropped": 0,
+              "samples": [
+                {
+                  "t_us": null,
+                  "position_m": null,
+                  "velocity_mps": null,
+                  "value": 293.15,
+                  "measurement_variance": null,
+                  "time_uncertainty_us": null,
+                  "navigation_uncertainty_m": null,
+                  "position_uncertainty_m": null,
+                  "quality": 738197504,
+                  "seq": 1,
+                  "position_source": "UNKNOWN",
+                  "estimation_age_us": null,
+                  "velocity_valid": false,
+                  "navigation_segment": 0
+                }
+              ]
+            }
+          ],
+          "humidity": [
+            {
+              "message_id": 12920,
+              "sensor_id": 0,
+              "sensor_instance": 0,
+              "representative": {
+                "t_us": null,
+                "position_m": null,
+                "velocity_mps": null,
+                "value": 0.5,
+                "measurement_variance": null,
+                "time_uncertainty_us": null,
+                "navigation_uncertainty_m": null,
+                "position_uncertainty_m": null,
+                "quality": 738197504,
+                "seq": 2,
+                "position_source": "UNKNOWN",
+                "estimation_age_us": null,
+                "velocity_valid": false,
+                "navigation_segment": 0
+              },
+              "statistics": {
+                "n": 1,
+                "mean": 0.5,
+                "variance": null,
+                "min": 0.5,
+                "max": 0.5,
+                "time_known_n": 0,
+                "t_start_us": null,
+                "t_end_us": null
+              },
+              "raw_n": 1,
+              "raw_dropped": 0,
+              "samples": [
+                {
+                  "t_us": null,
+                  "position_m": null,
+                  "velocity_mps": null,
+                  "value": 0.5,
+                  "measurement_variance": null,
+                  "time_uncertainty_us": null,
+                  "navigation_uncertainty_m": null,
+                  "position_uncertainty_m": null,
+                  "quality": 738197504,
+                  "seq": 2,
+                  "position_source": "UNKNOWN",
+                  "estimation_age_us": null,
+                  "velocity_valid": false,
+                  "navigation_segment": 0
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

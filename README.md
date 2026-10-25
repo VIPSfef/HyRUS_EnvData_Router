@@ -319,6 +319,9 @@ Linux에서는 `windows`를 `linux`로 바꿉니다. 일반 프리셋으로 다�
 
 ## 상세 자료와 검증 범위
 
+- [서버 개발자용 API](docs/SERVER_API.md): HTTP204·데이터 규격·중복 제거·거리 구간 revision·저장 절차
+- [OpenAPI·JSON Schema·합성 예제](docs/api/README.md): 서버 구현·구조 검사에 사용할 기계 판독 규격
+- [개발자 공유·다른 PC 업데이트](docs/COLLABORATION.md): private GitLab/GitHub, OneDrive Git bundle 사용법
 - [기술 참조](docs/REFERENCE.md): 전체 설정·좌표/시각·출력 규약·교차 빌드·CSV 재생
 - [검토·검증 기록](docs/REVIEW.md): 실제 시험과 계산량·메모리·한계
 

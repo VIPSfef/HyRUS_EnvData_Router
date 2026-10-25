@@ -1,0 +1,2291 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:uaslaboratory:mavlink-telemetry-data-router:0.10.0:ingestion",
+  "title": "mavlink_telemetry_data_router0.10.0 ingestion (default compiled capacities)",
+  "$comment": "Derived from sender/weather/spatial/telemetry/time_sync sources. Unknown object properties allowed. Arithmetic, cross-record consistency, dedup/upsert, physical accuracy and durability require application checks.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/TelemetryV3"
+    },
+    {
+      "$ref": "#/$defs/WeatherEnvelope"
+    },
+    {
+      "$ref": "#/$defs/BundleEnvelope"
+    },
+    {
+      "$ref": "#/$defs/HeartbeatEnvelope"
+    },
+    {
+      "$ref": "#/$defs/CsvV2"
+    }
+  ],
+  "$defs": {
+    "U64String": {
+      "type": "string",
+      "pattern": "^(?:0|(?:[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]{1}|1844674407370955161[0-4]|18446744073709551615))$",
+      "description": "Canonical uint64 decimal string; parse losslessly."
+    },
+    "PositiveU64String": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/U64String"
+        },
+        {
+          "not": {
+            "const": "0"
+          }
+        }
+      ]
+    },
+    "I64String": {
+      "type": "string",
+      "pattern": "^(?:0|(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-6]|9223372036854775807)|-(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7]|9223372036854775808))$"
+    },
+    "U64Number": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615,
+      "description": "Existing numeric uint64 wire field: use a lossless JSON integer parser above2^53-1. Do not rewrite as a string."
+    },
+    "U32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "U8": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "Nonnegative": {
+      "type": "number",
+      "minimum": 0
+    },
+    "UncertaintyUs": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967294
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "Token": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+    },
+    "Key": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,30}$"
+    },
+    "Unit": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_./%*^+\\-]{1,15}$",
+      "description": "General key/value display unit. unit_map does not convert values to SI."
+    },
+    "Vector3": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        }
+      ],
+      "items": false,
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "Origin": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90
+        },
+        {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180
+        },
+        {
+          "type": "number"
+        }
+      ],
+      "items": false,
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "Latitude deg, longitude deg, altitude MSL m; no geoid conversion."
+    },
+    "ClockModel": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "anchors": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16
+            },
+            "oldest_boot_us": {
+              "$ref": "#/$defs/U64String"
+            },
+            "last_boot_us": {
+              "$ref": "#/$defs/U64String"
+            },
+            "last_utc_us": {
+              "$ref": "#/$defs/U64String"
+            },
+            "offset_us": {
+              "$ref": "#/$defs/I64String"
+            },
+            "drift_ppm": {
+              "type": "number",
+              "minimum": -500,
+              "maximum": 500
+            },
+            "residual_std_us": {
+              "type": "number",
+              "minimum": 0
+            },
+            "max_residual_us": {
+              "type": "number",
+              "minimum": 0
+            },
+            "anchor_uncert_max_us": {
+              "$ref": "#/$defs/U32"
+            },
+            "rtt_mean_us": {
+              "type": "number",
+              "minimum": 0
+            },
+            "rtt_max_us": {
+              "$ref": "#/$defs/U32"
+            }
+          },
+          "required": [
+            "anchors",
+            "oldest_boot_us",
+            "last_boot_us",
+            "last_utc_us",
+            "offset_us",
+            "drift_ppm",
+            "residual_std_us",
+            "max_residual_us",
+            "anchor_uncert_max_us",
+            "rtt_mean_us",
+            "rtt_max_us"
+          ],
+          "additionalProperties": true,
+          "description": "Frozen engineering clock diagnostics; no confidence interval or certified accuracy."
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "RawClockAnchor": {
+      "type": "object",
+      "properties": {
+        "boot_us": {
+          "$ref": "#/$defs/U64String"
+        },
+        "utc_us": {
+          "$ref": "#/$defs/PositiveU64String"
+        },
+        "uncert_us": {
+          "$ref": "#/$defs/UncertaintyUs"
+        }
+      },
+      "required": [
+        "boot_us",
+        "utc_us",
+        "uncert_us"
+      ],
+      "additionalProperties": true
+    },
+    "Source": {
+      "type": "object",
+      "properties": {
+        "sysid": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 255
+        },
+        "compid": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        }
+      },
+      "required": [
+        "sysid",
+        "compid"
+      ],
+      "additionalProperties": true
+    },
+    "TelemetrySource": {
+      "type": "object",
+      "properties": {
+        "sysid": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 255
+        },
+        "compid": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "epoch": {
+          "$ref": "#/$defs/U32"
+        },
+        "altitude_datum": {
+          "const": "MSL"
+        }
+      },
+      "required": [
+        "sysid",
+        "compid",
+        "epoch",
+        "altitude_datum"
+      ],
+      "additionalProperties": true
+    },
+    "WeatherSample": {
+      "type": "object",
+      "properties": {
+        "t_us": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/U64String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "position_m": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Vector3"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "velocity_mps": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Vector3"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3.4028234663852886e+38
+        },
+        "measurement_variance": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time_uncertainty_us": {
+          "$ref": "#/$defs/UncertaintyUs"
+        },
+        "navigation_uncertainty_m": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "position_uncertainty_m": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "quality": {
+          "$ref": "#/$defs/U32"
+        },
+        "seq": {
+          "$ref": "#/$defs/U32"
+        },
+        "position_source": {
+          "enum": [
+            "GPS",
+            "ESTGPS",
+            "UNKNOWN"
+          ]
+        },
+        "estimation_age_us": {
+          "$ref": "#/$defs/UncertaintyUs"
+        },
+        "velocity_valid": {
+          "type": "boolean"
+        },
+        "navigation_segment": {
+          "$ref": "#/$defs/U32"
+        }
+      },
+      "required": [
+        "t_us",
+        "position_m",
+        "velocity_mps",
+        "value",
+        "measurement_variance",
+        "time_uncertainty_us",
+        "navigation_uncertainty_m",
+        "position_uncertainty_m",
+        "quality",
+        "seq",
+        "position_source",
+        "estimation_age_us",
+        "velocity_valid",
+        "navigation_segment"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "t_us": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "t_us"
+            ]
+          },
+          "then": {
+            "properties": {
+              "position_m": {
+                "type": "null"
+              },
+              "velocity_mps": {
+                "type": "null"
+              },
+              "time_uncertainty_us": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "position_m": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "position_m"
+            ]
+          },
+          "then": {
+            "properties": {
+              "velocity_mps": {
+                "type": "null"
+              },
+              "position_source": {
+                "const": "UNKNOWN"
+              },
+              "estimation_age_us": {
+                "type": "null"
+              },
+              "navigation_uncertainty_m": {
+                "type": "null"
+              },
+              "position_uncertainty_m": {
+                "type": "null"
+              },
+              "velocity_valid": {
+                "const": false
+              },
+              "navigation_segment": {
+                "const": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "velocity_mps": {
+                "$ref": "#/$defs/Vector3"
+              },
+              "t_us": {
+                "$ref": "#/$defs/U64String"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "position_source": {
+                "const": "GPS"
+              }
+            },
+            "required": [
+              "position_source"
+            ]
+          },
+          "then": {
+            "properties": {
+              "position_m": {
+                "$ref": "#/$defs/Vector3"
+              },
+              "t_us": {
+                "$ref": "#/$defs/U64String"
+              },
+              "estimation_age_us": {
+                "const": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "position_source": {
+                "const": "ESTGPS"
+              }
+            },
+            "required": [
+              "position_source"
+            ]
+          },
+          "then": {
+            "properties": {
+              "position_m": {
+                "$ref": "#/$defs/Vector3"
+              },
+              "t_us": {
+                "$ref": "#/$defs/U64String"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "position_source": {
+                "const": "UNKNOWN"
+              }
+            },
+            "required": [
+              "position_source"
+            ]
+          },
+          "then": {
+            "properties": {
+              "estimation_age_us": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "description": "Value units are temperature K or relative-humidity fraction, selected by enclosing metric. Null means unknown; velocity_valid requires acquisition-time evidence."
+    },
+    "HumiditySample": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/WeatherSample"
+        },
+        {
+          "properties": {
+            "value": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        }
+      ]
+    },
+    "WeatherStats": {
+      "type": "object",
+      "properties": {
+        "n": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "mean": {
+          "type": "number",
+          "minimum": 0
+        },
+        "variance": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "min": {
+          "type": "number",
+          "minimum": 0
+        },
+        "max": {
+          "type": "number",
+          "minimum": 0
+        },
+        "time_known_n": {
+          "$ref": "#/$defs/U32"
+        },
+        "t_start_us": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/U64String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "t_end_us": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/U64String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "n",
+        "mean",
+        "variance",
+        "min",
+        "max",
+        "time_known_n",
+        "t_start_us",
+        "t_end_us"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "n": {
+                "const": 1
+              }
+            },
+            "required": [
+              "n"
+            ]
+          },
+          "then": {
+            "properties": {
+              "variance": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "variance": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "time_known_n": {
+                "const": 0
+              }
+            },
+            "required": [
+              "time_known_n"
+            ]
+          },
+          "then": {
+            "properties": {
+              "t_start_us": {
+                "type": "null"
+              },
+              "t_end_us": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "t_start_us": {
+                "$ref": "#/$defs/U64String"
+              },
+              "t_end_us": {
+                "$ref": "#/$defs/U64String"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "HumidityStats": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/WeatherStats"
+        },
+        {
+          "properties": {
+            "mean": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "min": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "max": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        }
+      ]
+    },
+    "TemperatureGroup": {
+      "type": "object",
+      "properties": {
+        "message_id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777215
+        },
+        "sensor_id": {
+          "$ref": "#/$defs/U32"
+        },
+        "sensor_instance": {
+          "$ref": "#/$defs/U8"
+        },
+        "representative": {
+          "$ref": "#/$defs/WeatherSample"
+        },
+        "statistics": {
+          "$ref": "#/$defs/WeatherStats"
+        },
+        "raw_n": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        },
+        "raw_dropped": {
+          "$ref": "#/$defs/U32"
+        },
+        "samples": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WeatherSample"
+          },
+          "minItems": 0,
+          "maxItems": 128
+        }
+      },
+      "required": [
+        "message_id",
+        "sensor_id",
+        "sensor_instance",
+        "representative",
+        "statistics",
+        "raw_n",
+        "raw_dropped",
+        "samples"
+      ],
+      "additionalProperties": true
+    },
+    "HumidityGroup": {
+      "type": "object",
+      "properties": {
+        "message_id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777215
+        },
+        "sensor_id": {
+          "$ref": "#/$defs/U32"
+        },
+        "sensor_instance": {
+          "$ref": "#/$defs/U8"
+        },
+        "representative": {
+          "$ref": "#/$defs/HumiditySample"
+        },
+        "statistics": {
+          "$ref": "#/$defs/HumidityStats"
+        },
+        "raw_n": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        },
+        "raw_dropped": {
+          "$ref": "#/$defs/U32"
+        },
+        "samples": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HumiditySample"
+          },
+          "minItems": 0,
+          "maxItems": 128
+        }
+      },
+      "required": [
+        "message_id",
+        "sensor_id",
+        "sensor_instance",
+        "representative",
+        "statistics",
+        "raw_n",
+        "raw_dropped",
+        "samples"
+      ],
+      "additionalProperties": true
+    },
+    "Weather": {
+      "type": "object",
+      "properties": {
+        "si_registry": {
+          "const": 1
+        },
+        "host_window_ms": {
+          "$ref": "#/$defs/U64String"
+        },
+        "n": {
+          "$ref": "#/$defs/U32"
+        },
+        "raw_n": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        },
+        "raw_dropped": {
+          "$ref": "#/$defs/U32"
+        },
+        "measurements": {
+          "type": "object",
+          "properties": {
+            "temperature": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TemperatureGroup"
+              },
+              "minItems": 0,
+              "maxItems": 16
+            },
+            "humidity": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/HumidityGroup"
+              },
+              "minItems": 0,
+              "maxItems": 16
+            }
+          },
+          "required": [
+            "temperature",
+            "humidity"
+          ],
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "si_registry",
+        "host_window_ms",
+        "n",
+        "raw_n",
+        "raw_dropped",
+        "measurements"
+      ],
+      "additionalProperties": true,
+      "description": "n0/empty groups is valid for spatial close-only updates. Total groups<=16 and total raw<=128 are application checks."
+    },
+    "SpatialStats": {
+      "type": "object",
+      "properties": {
+        "n": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "mean": {
+          "type": "number",
+          "minimum": 0
+        },
+        "m2": {
+          "type": "number",
+          "minimum": 0
+        },
+        "variance": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "min": {
+          "type": "number",
+          "minimum": 0
+        },
+        "max": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "n",
+        "mean",
+        "m2",
+        "variance",
+        "min",
+        "max"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "n": {
+                "const": 1
+              }
+            },
+            "required": [
+              "n"
+            ]
+          },
+          "then": {
+            "properties": {
+              "variance": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "variance": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "SpatialBin": {
+      "type": "object",
+      "properties": {
+        "continuity_key": {
+          "$ref": "#/$defs/U64String"
+        },
+        "bin_index": {
+          "$ref": "#/$defs/U64String"
+        },
+        "path_id": {
+          "$ref": "#/$defs/PositiveU64String"
+        },
+        "revision": {
+          "$ref": "#/$defs/PositiveU64String"
+        },
+        "state": {
+          "enum": [
+            "partial",
+            "complete",
+            "interrupted"
+          ]
+        },
+        "metric": {
+          "enum": [
+            "temperature",
+            "humidity"
+          ]
+        },
+        "message_id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777215
+        },
+        "sensor_id": {
+          "$ref": "#/$defs/U32"
+        },
+        "sensor_instance": {
+          "$ref": "#/$defs/U8"
+        },
+        "source_kind": {
+          "enum": [
+            "GPS",
+            "ESTGPS"
+          ]
+        },
+        "flags": {
+          "$ref": "#/$defs/U32"
+        },
+        "quality": {
+          "$ref": "#/$defs/U32"
+        },
+        "width_m": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1000000000,
+          "exclusiveMinimum": 0
+        },
+        "interval_start_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "interval_end_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "observed_start_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "observed_end_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "entry_step_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "t_start_us": {
+          "$ref": "#/$defs/U64String"
+        },
+        "t_end_us": {
+          "$ref": "#/$defs/U64String"
+        },
+        "statistics": {
+          "$ref": "#/$defs/SpatialStats"
+        },
+        "representative": {
+          "$ref": "#/$defs/WeatherSample"
+        }
+      },
+      "required": [
+        "continuity_key",
+        "bin_index",
+        "path_id",
+        "revision",
+        "state",
+        "metric",
+        "message_id",
+        "sensor_id",
+        "sensor_instance",
+        "source_kind",
+        "flags",
+        "quality",
+        "width_m",
+        "interval_start_m",
+        "interval_end_m",
+        "observed_start_m",
+        "observed_end_m",
+        "entry_step_m",
+        "t_start_us",
+        "t_end_us",
+        "statistics",
+        "representative"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "properties": {
+            "representative": {
+              "properties": {
+                "t_us": {
+                  "$ref": "#/$defs/U64String"
+                },
+                "position_m": {
+                  "$ref": "#/$defs/Vector3"
+                },
+                "velocity_mps": {
+                  "$ref": "#/$defs/Vector3"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "metric": {
+                "const": "humidity"
+              }
+            },
+            "required": [
+              "metric"
+            ]
+          },
+          "then": {
+            "properties": {
+              "representative": {
+                "$ref": "#/$defs/HumiditySample"
+              },
+              "statistics": {
+                "properties": {
+                  "mean": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "min": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "max": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "source_kind": {
+                "const": "GPS"
+              }
+            },
+            "required": [
+              "source_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "representative": {
+                "properties": {
+                  "position_source": {
+                    "const": "GPS"
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "representative": {
+                "properties": {
+                  "position_source": {
+                    "const": "ESTGPS"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "Cumulative replacement revision; never sum repeated partial revisions."
+    },
+    "Spatial": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "mavlink_spatial_v1"
+        },
+        "si_registry": {
+          "const": 1
+        },
+        "target_step_m": {
+          "type": "number",
+          "minimum": 1e-06,
+          "maximum": 1000000000
+        },
+        "adaptive": {
+          "type": "boolean"
+        },
+        "gap_us": {
+          "$ref": "#/$defs/PositiveU64String"
+        },
+        "path": {
+          "type": "object",
+          "properties": {
+            "known": {
+              "type": "boolean"
+            },
+            "path_id": {
+              "$ref": "#/$defs/U64String"
+            },
+            "bin_index": {
+              "$ref": "#/$defs/U64String"
+            },
+            "s_m": {
+              "type": "number",
+              "minimum": 0
+            },
+            "effective_width_m": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1000000000
+            }
+          },
+          "required": [
+            "known",
+            "path_id",
+            "bin_index",
+            "s_m",
+            "effective_width_m"
+          ],
+          "additionalProperties": true
+        },
+        "counters": {
+          "type": "object",
+          "properties": {
+            "samples_seen": {
+              "$ref": "#/$defs/U64String"
+            },
+            "spatial_samples": {
+              "$ref": "#/$defs/U64String"
+            },
+            "unknown_samples": {
+              "$ref": "#/$defs/U64String"
+            },
+            "rejected_samples": {
+              "$ref": "#/$defs/U64String"
+            },
+            "late_samples": {
+              "$ref": "#/$defs/U64String"
+            },
+            "paths_started": {
+              "$ref": "#/$defs/U64String"
+            },
+            "completed_records": {
+              "$ref": "#/$defs/U64String"
+            },
+            "dropped_records": {
+              "$ref": "#/$defs/U64String"
+            },
+            "undersampled_steps": {
+              "$ref": "#/$defs/U64String"
+            },
+            "inconsistent_steps": {
+              "$ref": "#/$defs/U64String"
+            },
+            "flags": {
+              "$ref": "#/$defs/U32"
+            }
+          },
+          "required": [
+            "samples_seen",
+            "spatial_samples",
+            "unknown_samples",
+            "rejected_samples",
+            "late_samples",
+            "paths_started",
+            "completed_records",
+            "dropped_records",
+            "undersampled_steps",
+            "inconsistent_steps",
+            "flags"
+          ],
+          "additionalProperties": true
+        },
+        "bins": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SpatialBin"
+          },
+          "minItems": 0,
+          "maxItems": 144
+        }
+      },
+      "required": [
+        "schema",
+        "si_registry",
+        "target_step_m",
+        "adaptive",
+        "gap_us",
+        "path",
+        "counters",
+        "bins"
+      ],
+      "additionalProperties": true,
+      "description": "Nested weather field; not a top-level ingestion envelope. Default target10m, effective width can adapt. Horizontal speed-time path is an estimate."
+    },
+    "WeatherRecord": {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "$ref": "#/$defs/U64Number"
+        },
+        "generation": {
+          "$ref": "#/$defs/U32"
+        },
+        "session": {
+          "$ref": "#/$defs/Token"
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        },
+        "frame": {
+          "const": "ENU"
+        },
+        "origin_wgs84": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Origin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time_basis": {
+          "const": "pixhawk_boot_us"
+        },
+        "host_time_basis": {
+          "const": "collector_monotonic_ms"
+        },
+        "clock_model": {
+          "$ref": "#/$defs/ClockModel"
+        },
+        "weather": {
+          "$ref": "#/$defs/Weather"
+        },
+        "spatial": {
+          "$ref": "#/$defs/Spatial"
+        }
+      },
+      "required": [
+        "seq",
+        "generation",
+        "session",
+        "source",
+        "frame",
+        "origin_wgs84",
+        "time_basis",
+        "host_time_basis",
+        "clock_model",
+        "weather"
+      ],
+      "additionalProperties": true
+    },
+    "WeatherEnvelope": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "mavlink_weather_v1"
+        },
+        "stream": {
+          "$ref": "#/$defs/Token"
+        },
+        "records": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WeatherRecord"
+          },
+          "minItems": 1,
+          "maxItems": 1
+        }
+      },
+      "required": [
+        "schema",
+        "stream",
+        "records"
+      ],
+      "additionalProperties": true,
+      "description": "Current sender emits one weather record per direct request. seq is numeric uint64; spatial revision is a string."
+    },
+    "FieldOrder": {
+      "const": [
+        "t_us",
+        "seq",
+        "quality",
+        "key",
+        "unit",
+        "east_m",
+        "north_m",
+        "up_m",
+        "ve_mps",
+        "vn_mps",
+        "vu_mps",
+        "value",
+        "time_uncert_us",
+        "nav_age_us",
+        "pos_error_m",
+        "utc_us",
+        "utc_uncert_us"
+      ]
+    },
+    "TelemetryRawRow": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/U64String"
+        },
+        {
+          "$ref": "#/$defs/U32"
+        },
+        {
+          "$ref": "#/$defs/U32"
+        },
+        {
+          "$ref": "#/$defs/Key"
+        },
+        {
+          "$ref": "#/$defs/Unit"
+        },
+        {
+          "type": "number",
+          "minimum": -1000000000.0,
+          "maximum": 1000000000.0
+        },
+        {
+          "type": "number",
+          "minimum": -1000000000.0,
+          "maximum": 1000000000.0
+        },
+        {
+          "type": "number",
+          "minimum": -1000000000.0,
+          "maximum": 1000000000.0
+        },
+        {
+          "type": "number",
+          "minimum": -1000000000.0,
+          "maximum": 1000000000.0
+        },
+        {
+          "type": "number",
+          "minimum": -1000000000.0,
+          "maximum": 1000000000.0
+        },
+        {
+          "type": "number",
+          "minimum": -1000000000.0,
+          "maximum": 1000000000.0
+        },
+        {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -1000000000.0,
+              "maximum": 1000000000.0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20000
+        },
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 200000
+        },
+        {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1000000000.0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveU64String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/U32"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      ],
+      "items": false,
+      "minItems": 17,
+      "maxItems": 17,
+      "allOf": [
+        {
+          "if": {
+            "prefixItems": [
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "then": {
+            "prefixItems": [
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "else": {
+            "prefixItems": [
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              {
+                "$ref": "#/$defs/U32"
+              }
+            ]
+          }
+        }
+      ],
+      "description": "Fixed17 tuple matched by field_order. Both UTC columns null when UTC absent; known UTC has numeric uint32 uncertainty, possibly UINT32_MAX."
+    },
+    "TelemetryStats": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/Key"
+        },
+        "unit": {
+          "$ref": "#/$defs/Unit"
+        },
+        "n": {
+          "$ref": "#/$defs/U32"
+        },
+        "mean": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "variance": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "min": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time_uncert_mean_us": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 20000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time_uncert_max_us": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 20000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "position_error_n": {
+          "$ref": "#/$defs/U32"
+        },
+        "position_error_mean_m": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "position_error_max_m": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "key",
+        "unit",
+        "n",
+        "mean",
+        "variance",
+        "min",
+        "max",
+        "time_uncert_mean_us",
+        "time_uncert_max_us",
+        "position_error_n",
+        "position_error_mean_m",
+        "position_error_max_m"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "n": {
+                "const": 0
+              }
+            },
+            "required": [
+              "n"
+            ]
+          },
+          "then": {
+            "properties": {
+              "mean": {
+                "type": "null"
+              },
+              "min": {
+                "type": "null"
+              },
+              "max": {
+                "type": "null"
+              },
+              "time_uncert_mean_us": {
+                "type": "null"
+              },
+              "time_uncert_max_us": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "mean": {
+                "type": "number"
+              },
+              "min": {
+                "type": "number"
+              },
+              "max": {
+                "type": "number"
+              },
+              "time_uncert_mean_us": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 20000
+              },
+              "time_uncert_max_us": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 20000
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "n": {
+                "maximum": 1
+              }
+            },
+            "required": [
+              "n"
+            ]
+          },
+          "then": {
+            "properties": {
+              "variance": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "variance": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "position_error_n": {
+                "const": 0
+              }
+            },
+            "required": [
+              "position_error_n"
+            ]
+          },
+          "then": {
+            "properties": {
+              "position_error_mean_m": {
+                "type": "null"
+              },
+              "position_error_max_m": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "position_error_mean_m": {
+                "type": "number",
+                "minimum": 0
+              },
+              "position_error_max_m": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TelemetryBatch": {
+      "type": "object",
+      "properties": {
+        "window_us": {
+          "$ref": "#/$defs/U64String"
+        },
+        "n": {
+          "$ref": "#/$defs/U32"
+        },
+        "raw_n": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 512
+        },
+        "raw_dropped": {
+          "$ref": "#/$defs/U32"
+        },
+        "key_n": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16
+        },
+        "raw_included": {
+          "type": "boolean"
+        },
+        "stats": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TelemetryStats"
+          },
+          "minItems": 0,
+          "maxItems": 16
+        },
+        "raw": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TelemetryRawRow"
+          },
+          "minItems": 0,
+          "maxItems": 512
+        }
+      },
+      "required": [
+        "window_us",
+        "n",
+        "raw_n",
+        "raw_dropped",
+        "key_n",
+        "raw_included",
+        "stats",
+        "raw"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "raw_included": {
+                "const": false
+              }
+            },
+            "required": [
+              "raw_included"
+            ]
+          },
+          "then": {
+            "properties": {
+              "raw": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TelemetryBatchV3": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/TelemetryBatch"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "batch_id": {
+              "$ref": "#/$defs/PositiveU64String"
+            },
+            "clock_model": {
+              "$ref": "#/$defs/ClockModel"
+            },
+            "raw_clock_anchor": {
+              "$ref": "#/$defs/RawClockAnchor"
+            }
+          },
+          "required": [
+            "batch_id",
+            "clock_model"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "TelemetryBase": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "enum": [
+            2,
+            3
+          ]
+        },
+        "stream": {
+          "$ref": "#/$defs/Token"
+        },
+        "session": {
+          "$ref": "#/$defs/Token"
+        },
+        "frame": {
+          "const": "ENU"
+        },
+        "origin_wgs84": {
+          "$ref": "#/$defs/Origin"
+        },
+        "time_basis": {
+          "const": "pixhawk_boot_us"
+        },
+        "time_epoch": {
+          "const": "session_boot"
+        },
+        "utc_basis": {
+          "const": "unix_us_estimate"
+        },
+        "field_order": {
+          "$ref": "#/$defs/FieldOrder"
+        },
+        "loss": {
+          "type": "object",
+          "properties": {
+            "rejected": {
+              "$ref": "#/$defs/U64String"
+            },
+            "sequence_gaps": {
+              "$ref": "#/$defs/U64String"
+            },
+            "queue_windows": {
+              "$ref": "#/$defs/U64String"
+            },
+            "queue_samples": {
+              "$ref": "#/$defs/U64String"
+            },
+            "raw_samples": {
+              "$ref": "#/$defs/U64String"
+            }
+          },
+          "required": [
+            "rejected",
+            "sequence_gaps",
+            "queue_windows",
+            "queue_samples",
+            "raw_samples"
+          ],
+          "additionalProperties": true
+        },
+        "clock_model": {
+          "$ref": "#/$defs/ClockModel"
+        },
+        "batches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TelemetryBatch"
+          },
+          "minItems": 1,
+          "maxItems": 4
+        }
+      },
+      "required": [
+        "schema",
+        "stream",
+        "session",
+        "frame",
+        "origin_wgs84",
+        "time_basis",
+        "time_epoch",
+        "utc_basis",
+        "field_order",
+        "loss",
+        "clock_model",
+        "batches"
+      ],
+      "additionalProperties": true
+    },
+    "TelemetryV3": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/TelemetryBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema": {
+              "const": 3
+            },
+            "source": {
+              "$ref": "#/$defs/TelemetrySource"
+            },
+            "raw_clock_anchor": {
+              "$ref": "#/$defs/RawClockAnchor"
+            },
+            "batches": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TelemetryBatchV3"
+              },
+              "minItems": 1,
+              "maxItems": 4
+            }
+          },
+          "required": [
+            "schema",
+            "source"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "CsvV2": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/TelemetryBase"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": 2
+            }
+          }
+        }
+      ],
+      "description": "Explicit development CSV replay. Deduplicate stream/session/window_us; schema3 uses batch_id instead."
+    },
+    "Heartbeat": {
+      "type": "object",
+      "properties": {
+        "sysid": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 255
+        },
+        "compid": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "type": {
+          "$ref": "#/$defs/U8"
+        },
+        "autopilot": {
+          "$ref": "#/$defs/U8"
+        },
+        "base_mode": {
+          "$ref": "#/$defs/U8"
+        },
+        "custom_mode": {
+          "$ref": "#/$defs/U32"
+        },
+        "system_status": {
+          "$ref": "#/$defs/U8"
+        },
+        "received_monotonic_ms": {
+          "$ref": "#/$defs/U64Number"
+        }
+      },
+      "required": [
+        "sysid",
+        "compid",
+        "type",
+        "autopilot",
+        "base_mode",
+        "custom_mode",
+        "system_status",
+        "received_monotonic_ms"
+      ],
+      "additionalProperties": true
+    },
+    "HeartbeatPosition": {
+      "type": "object",
+      "properties": {
+        "lat_deg": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90
+        },
+        "lon_deg": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180
+        },
+        "alt_msl_m": {
+          "type": "number"
+        },
+        "boot_ms": {
+          "$ref": "#/$defs/U64Number"
+        },
+        "received_monotonic_ms": {
+          "$ref": "#/$defs/U64Number"
+        }
+      },
+      "required": [
+        "lat_deg",
+        "lon_deg",
+        "alt_msl_m",
+        "boot_ms",
+        "received_monotonic_ms"
+      ],
+      "additionalProperties": true
+    },
+    "HeartbeatRecord": {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "$ref": "#/$defs/U64Number"
+        },
+        "source_generation": {
+          "$ref": "#/$defs/U64Number"
+        },
+        "session": {
+          "$ref": "#/$defs/Token"
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "heartbeat": {
+          "$ref": "#/$defs/Heartbeat"
+        },
+        "position": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HeartbeatPosition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "coordinate_age_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/U64Number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "seq",
+        "source_generation",
+        "session",
+        "source",
+        "heartbeat",
+        "position",
+        "coordinate_age_ms"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "position": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "position"
+            ]
+          },
+          "then": {
+            "properties": {
+              "coordinate_age_ms": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "coordinate_age_ms": {
+                "$ref": "#/$defs/U64Number"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "HeartbeatEnvelope": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "mavlink_router_test_v1"
+        },
+        "stream": {
+          "$ref": "#/$defs/Token"
+        },
+        "records": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HeartbeatRecord"
+          },
+          "minItems": 1,
+          "maxItems": 4
+        }
+      },
+      "required": [
+        "schema",
+        "stream",
+        "records"
+      ],
+      "additionalProperties": true,
+      "description": "Diagnostic heartbeat/latest navigation, not a simultaneous atmospheric observation."
+    },
+    "BundleEntry": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "weather"
+            },
+            "payload": {
+              "$ref": "#/$defs/WeatherEnvelope"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "telemetry"
+            },
+            "payload": {
+              "$ref": "#/$defs/TelemetryV3"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "BundleEnvelope": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "mavlink_router_bundle_v1"
+        },
+        "records": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BundleEntry"
+          },
+          "minItems": 2,
+          "maxItems": 4
+        }
+      },
+      "required": [
+        "schema",
+        "records"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "properties": {
+            "records": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "weather"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "records": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "telemetry"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "description": "Mixed live envelopes; spatial stays inside nested weather payloads."
+    }
+  }
+}

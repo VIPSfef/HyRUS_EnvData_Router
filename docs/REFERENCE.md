@@ -104,7 +104,7 @@ weather: {
 }
 ```
 
-`representative`와 `samples[]`는 `t_us`(decimal string/null), `position_m`·`velocity_mps`(ENU/null), `value`(SI), `measurement_variance`(SI²/null), `time_uncertainty_us`, `navigation_uncertainty_m`, `position_uncertainty_m`, `quality`, `seq`, `position_source`, `estimation_age_us`를 갖는다. 표본의 측정 불확도는 알 수 없으면 null이며 패킷의 해상도를 측정 정확도로 바꾸지 않는다. `position_uncertainty_m`은 알려진 항법 오차와 `|v|·time_uncertainty_us/1e6`의 합인 현재 속도 기반 추정이며 교정된 절대상한이 아니다.
+`representative`와 `samples[]`는 `t_us`(decimal string/null), `position_m`·`velocity_mps`(ENU/null), `value`(SI), `measurement_variance`(SI²/null), `time_uncertainty_us`, `navigation_uncertainty_m`, `position_uncertainty_m`, `quality`, `seq`, `position_source`, `estimation_age_us`, `velocity_valid`, `navigation_segment`를 갖는다. 속도 배열의 존재와 측정시각의 속도 유효성을 구분한다. 표본의 측정 불확도는 알 수 없으면 null이며 패킷의 해상도를 측정 정확도로 바꾸지 않는다. `position_uncertainty_m`은 알려진 항법 오차와 `|v|·time_uncertainty_us/1e6`의 합인 현재 속도 기반 추정이며 교정된 절대상한이 아니다.
 
 대표 표본은 알려진 측정시각·위치를 우선하고, 위치가 있는 표본끼리는 GPS를 ESTGPS보다 우선한다. 이후 알려진 위치 오차 추정, 그 크기, 알려진 측정분산, 그 크기, 알려진 시각 오차와 그 크기, 결정적인 표본 순서로 선택한다. 원본 표본의 값·시각·위치를 함께 유지하며 통계 평균을 대표 좌표에서의 측정값처럼 사용하지 않는다. quality의 `0x08000000`은 측정시각 미상, `0x04000000`은 측정 위치 미상, `0x10000000`은 ESTGPS 추정 위치다. 기존 미인증 시계 플래그 등 다른 비트도 보존한다. 품질 비트의 숫자 크기를 센서 정확도 순위로 해석하지 않는다.
 
@@ -247,7 +247,7 @@ SHTC3용 소프트웨어 모듈의 원본은 `src/px4/shtc3/`에 둔다. sensor_
 
 기존 key–value 관측만 담은 실제 MAVLink의 최상위 JSON은 schema3다. 온습도 및 혼합 관측 envelope는 위 절을 따른다. stream/session, ENU origin_wgs84, source{sysid,compid,epoch,altitude_datum:MSL}, field_order, 누적 loss, clock_model, 선택 raw_clock_anchor, batches를 포함한다. 세션은 설정 session에 OS 난수 기반 실행 ID와 소스 세대를 붙여 부팅/연결 시계를 분리한다.
 
-각 batch는 **불변 batch_id**와 측정시각 window_us, n/raw_n/raw_dropped, 키별 통계·원본·해당 묶음의 clock_model/선택 raw_clock_anchor를 갖는다. 같은 측정시각 1초 구간이 여러 batch로 나뉠 수 있다. 서버는 `(stream,session,batch_id)`로 중복 제거하고 window_us로 재집계한다. schema2 CSV의 `(stream,session,window_us)` 중복 키를 schema3에 적용하면 정상 후속 묶음을 잃는다.
+각 batch는 **불변 batch_id**와 측정시각 window_us, n/raw_n/raw_dropped/key_n/raw_included, 키별 stats·원본·해당 묶음의 clock_model/선택 raw_clock_anchor를 갖는다. 같은 측정시각1초 구간이 여러 batch로 나뉠 수 있다. 서버는 `(stream,session,batch_id)`로 중복 제거하고 window_us로 재집계한다. schema2 CSV의 `(stream,session,window_us)` 중복 키를 schema3에 적용하면 정상 후속 묶음을 잃는다. 재시도 중 개별 봉인 묶음은 유지되지만 전체 요청의 선택 항목·bundle 포장·누적 loss는 달라질 수 있으므로 요청 전체 해시로만 중복을 판단하지 않는다. 전체 수신 계약은 [서버 API](SERVER_API.md)를 따른다.
 
 서버는 요청의 모든 묶음을 영속 저장/영속 큐 수락한 뒤 **204**를 반환한다. 이미 수락한 중복에도204를 반환한다. 200/202/오류/응답 단절은 자료와 ID를 유지해 다시 보낸다. TCP ACK는 이 애플리케이션 확인을 대체하지 않는다.
 
@@ -308,7 +308,7 @@ seq는 키별 중계 관측 순번이며 MAVLink 공용8bit헤더 순번이 아�
 | `--duration-ms N` | 기본 0 무기한, 양수는 실행 제한 |
 | `--max-requests N` | 기본 0 무제한, 양수는 TCP 연결 처리 횟수 제한 |
 
-서버는 POST `/ingest`와 Content-Length를 처리한다. 헤더 최대 8KiB·본문 최대 128KiB·레코드 최대 64개·연결별 최대 5초로 제한하며 JSON 스키마와 필수 하트비트/좌표 필드를 검사한다. 잘못된 JSON·중복 Content-Length·Transfer-Encoding·범위 밖 크기는 204로 수락하지 않는다. 정상 레코드가 화면 또는 stdout에 출력된 뒤 204를 보낸다. 메모리 링 로그만 유지하고 관측 파일이나 영속 큐는 만들지 않으므로 **이 시험 서버의 204는 영속 저장 확인이 아니다.**
+서버는 POST `/ingest`와 Content-Length를 처리한다. 헤더 최대8KiB·본문 최대512KiB·JSON32,768토큰/깊이32·레코드 최대64개·연결별 최대5초로 제한하며 온습도/공간 및 하트비트 시험 필드를 검사한다. 일반 schema3·혼합bundle·CSV2는 이 선택 시험 서버의 수락 범위에 포함하지 않는다. 잘못된 JSON·중복 Content-Length·Transfer-Encoding·범위 밖 크기는204로 수락하지 않는다. 정상 레코드가 화면 또는 stdout에 출력된 뒤204를 보낸다. 메모리 링 로그만 유지하고 관측 파일이나 영속 큐는 만들지 않으므로 **이 시험 서버의204는 영속 저장 확인이 아니다.** 운영 서버는 [서버 API](SERVER_API.md)의 전체 schema·중복 제거·커밋 규칙을 구현한다.
 
 ## 빌드와 개발 검사
 

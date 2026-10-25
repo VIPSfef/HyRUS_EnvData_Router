@@ -1,0 +1,320 @@
+{
+  "schema": "mavlink_weather_v1",
+  "stream": "synthetic",
+  "records": [
+    {
+      "seq": 1,
+      "generation": 1,
+      "session": "synthetic.fixture",
+      "source": {
+        "sysid": 1,
+        "compid": 1
+      },
+      "frame": "ENU",
+      "origin_wgs84": [
+        37,
+        127,
+        100
+      ],
+      "time_basis": "pixhawk_boot_us",
+      "host_time_basis": "collector_monotonic_ms",
+      "clock_model": {
+        "anchors": 2,
+        "oldest_boot_us": "1000000",
+        "last_boot_us": "1100000",
+        "last_utc_us": "1800000001100000",
+        "offset_us": "1800000000000000",
+        "drift_ppm": 0,
+        "residual_std_us": 0,
+        "max_residual_us": 0,
+        "anchor_uncert_max_us": 100,
+        "rtt_mean_us": 0,
+        "rtt_max_us": 0
+      },
+      "weather": {
+        "si_registry": 1,
+        "host_window_ms": "1234",
+        "n": 2,
+        "raw_n": 2,
+        "raw_dropped": 0,
+        "measurements": {
+          "temperature": [
+            {
+              "message_id": 8009,
+              "sensor_id": 0,
+              "sensor_instance": 0,
+              "representative": {
+                "t_us": "1000000",
+                "position_m": [
+                  0,
+                  0,
+                  0
+                ],
+                "velocity_mps": [
+                  2,
+                  0,
+                  0
+                ],
+                "value": 293.15,
+                "measurement_variance": null,
+                "time_uncertainty_us": null,
+                "navigation_uncertainty_m": 3.5999999046325684,
+                "position_uncertainty_m": null,
+                "quality": 536870912,
+                "seq": 1,
+                "position_source": "GPS",
+                "estimation_age_us": 0,
+                "velocity_valid": true,
+                "navigation_segment": 0
+              },
+              "statistics": {
+                "n": 1,
+                "mean": 293.15,
+                "variance": null,
+                "min": 293.15,
+                "max": 293.15,
+                "time_known_n": 1,
+                "t_start_us": "1000000",
+                "t_end_us": "1000000"
+              },
+              "raw_n": 1,
+              "raw_dropped": 0,
+              "samples": [
+                {
+                  "t_us": "1000000",
+                  "position_m": [
+                    0,
+                    0,
+                    0
+                  ],
+                  "velocity_mps": [
+                    2,
+                    0,
+                    0
+                  ],
+                  "value": 293.15,
+                  "measurement_variance": null,
+                  "time_uncertainty_us": null,
+                  "navigation_uncertainty_m": 3.5999999046325684,
+                  "position_uncertainty_m": null,
+                  "quality": 536870912,
+                  "seq": 1,
+                  "position_source": "GPS",
+                  "estimation_age_us": 0,
+                  "velocity_valid": true,
+                  "navigation_segment": 0
+                }
+              ]
+            }
+          ],
+          "humidity": [
+            {
+              "message_id": 8009,
+              "sensor_id": 0,
+              "sensor_instance": 0,
+              "representative": {
+                "t_us": "1000000",
+                "position_m": [
+                  0,
+                  0,
+                  0
+                ],
+                "velocity_mps": [
+                  2,
+                  0,
+                  0
+                ],
+                "value": 0.5,
+                "measurement_variance": null,
+                "time_uncertainty_us": null,
+                "navigation_uncertainty_m": 3.5999999046325684,
+                "position_uncertainty_m": null,
+                "quality": 536870912,
+                "seq": 2,
+                "position_source": "GPS",
+                "estimation_age_us": 0,
+                "velocity_valid": true,
+                "navigation_segment": 0
+              },
+              "statistics": {
+                "n": 1,
+                "mean": 0.5,
+                "variance": null,
+                "min": 0.5,
+                "max": 0.5,
+                "time_known_n": 1,
+                "t_start_us": "1000000",
+                "t_end_us": "1000000"
+              },
+              "raw_n": 1,
+              "raw_dropped": 0,
+              "samples": [
+                {
+                  "t_us": "1000000",
+                  "position_m": [
+                    0,
+                    0,
+                    0
+                  ],
+                  "velocity_mps": [
+                    2,
+                    0,
+                    0
+                  ],
+                  "value": 0.5,
+                  "measurement_variance": null,
+                  "time_uncertainty_us": null,
+                  "navigation_uncertainty_m": 3.5999999046325684,
+                  "position_uncertainty_m": null,
+                  "quality": 536870912,
+                  "seq": 2,
+                  "position_source": "GPS",
+                  "estimation_age_us": 0,
+                  "velocity_valid": true,
+                  "navigation_segment": 0
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "spatial": {
+        "schema": "mavlink_spatial_v1",
+        "si_registry": 1,
+        "target_step_m": 10,
+        "adaptive": true,
+        "gap_us": "2000000",
+        "path": {
+          "known": true,
+          "path_id": "1",
+          "bin_index": "0",
+          "s_m": 0,
+          "effective_width_m": 10
+        },
+        "counters": {
+          "samples_seen": "2",
+          "spatial_samples": "2",
+          "unknown_samples": "0",
+          "rejected_samples": "0",
+          "late_samples": "0",
+          "paths_started": "1",
+          "completed_records": "0",
+          "dropped_records": "0",
+          "undersampled_steps": "0",
+          "inconsistent_steps": "0",
+          "flags": 0
+        },
+        "bins": [
+          {
+            "continuity_key": "4294967296",
+            "path_id": "1",
+            "bin_index": "0",
+            "revision": "1",
+            "state": "partial",
+            "metric": "temperature",
+            "message_id": 8009,
+            "sensor_id": 0,
+            "sensor_instance": 0,
+            "source_kind": "GPS",
+            "flags": 2048,
+            "quality": 536870912,
+            "width_m": 10,
+            "interval_start_m": 0,
+            "interval_end_m": 10,
+            "observed_start_m": 0,
+            "observed_end_m": 0,
+            "entry_step_m": 0,
+            "t_start_us": "1000000",
+            "t_end_us": "1000000",
+            "statistics": {
+              "n": 1,
+              "mean": 293.15,
+              "m2": 0,
+              "variance": null,
+              "min": 293.15,
+              "max": 293.15
+            },
+            "representative": {
+              "t_us": "1000000",
+              "position_m": [
+                0,
+                0,
+                0
+              ],
+              "velocity_mps": [
+                2,
+                0,
+                0
+              ],
+              "value": 293.15,
+              "measurement_variance": null,
+              "time_uncertainty_us": null,
+              "navigation_uncertainty_m": 3.5999999046325684,
+              "position_uncertainty_m": null,
+              "quality": 536870912,
+              "seq": 1,
+              "position_source": "GPS",
+              "estimation_age_us": 0,
+              "velocity_valid": true,
+              "navigation_segment": 0
+            }
+          },
+          {
+            "continuity_key": "4294967296",
+            "path_id": "1",
+            "bin_index": "0",
+            "revision": "1",
+            "state": "partial",
+            "metric": "humidity",
+            "message_id": 8009,
+            "sensor_id": 0,
+            "sensor_instance": 0,
+            "source_kind": "GPS",
+            "flags": 2048,
+            "quality": 536870912,
+            "width_m": 10,
+            "interval_start_m": 0,
+            "interval_end_m": 10,
+            "observed_start_m": 0,
+            "observed_end_m": 0,
+            "entry_step_m": 0,
+            "t_start_us": "1000000",
+            "t_end_us": "1000000",
+            "statistics": {
+              "n": 1,
+              "mean": 0.5,
+              "m2": 0,
+              "variance": null,
+              "min": 0.5,
+              "max": 0.5
+            },
+            "representative": {
+              "t_us": "1000000",
+              "position_m": [
+                0,
+                0,
+                0
+              ],
+              "velocity_mps": [
+                2,
+                0,
+                0
+              ],
+              "value": 0.5,
+              "measurement_variance": null,
+              "time_uncertainty_us": null,
+              "navigation_uncertainty_m": 3.5999999046325684,
+              "position_uncertainty_m": null,
+              "quality": 536870912,
+              "seq": 2,
+              "position_source": "GPS",
+              "estimation_age_us": 0,
+              "velocity_valid": true,
+              "navigation_segment": 0
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

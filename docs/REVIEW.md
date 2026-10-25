@@ -1,6 +1,14 @@
 # 검토 기록 — mavlink_telemetry_data_router v0.10.0
 
-검토일: 2026-10-25. 현재 호스트 설계 버전은 0.10.0이다. 새 10m 공간 구간의 설계·검증 범위는 첫 절, 0.9.0 ESTGPS·화면 및 실제 센서/PX4 검증은 각 버전/날짜의 기록을 따른다. 이전 내용의 수치·PASS는 당시 구현과 실행 범위를 보존한 이력이며 새 공간 구간 검증으로 옮겨 해석하지 않는다. [현재 사용법](../README.md), [출력/통신 규약](REFERENCE.md)을 따른다.
+검토일: 2026-10-25. 현재 호스트 설계 버전은 0.10.0이다. 서버 API 문서와 공유 검증은 첫 절, 10m 공간 구간 및0.9.0 ESTGPS·실제 센서/PX4 검증은 각 버전/날짜의 기록을 따른다. 이전 내용의 수치·PASS는 당시 구현과 실행 범위를 보존한 이력이며 다른 검증으로 옮겨 해석하지 않는다. [현재 사용법](../README.md), [서버 API](SERVER_API.md), [기술 참조](REFERENCE.md)를 따른다.
+
+## 2026-10-25 · 서버 API 문서와 Git 공유
+
+SERVER_API.md에 실제0.10.0의 다섯 최상위 envelope, HTTP204·개별 봉인 ID 중복 제거, 공간 revision 교체, 시각/단위/null, 64비트 표현 혼재, 저장 트랜잭션과 시험 서버의 제한을 기록했다. 재시도 요청 전체의 바이트 불변은 보장하지 않으며 개별 ID·관측·봉인 메타데이터가 불변임을 소스와 독립 대조했다. 일반 통계의 실제 stats/key_n/raw_included와 n0, 기본 time_uncert_us20,000/nav_age_us200,000µs 상한도 확인했다. 기존 기술 참조의 시험 본문128KiB 표기는 실제512KiB로 교정했다.
+
+docs/api의 JSON Schema2020-12·OpenAPI3.1.1과 실제 C 인코더로 생성한 합성 예제3개를 추가했다. 설치된 WSL jsonschema로 메타스키마·예제·음성·64비트 경계60개 검사를 통과했다. 임시 loopback 포트의 실제 C 시험 서버에서 정상204·공간 변조8종400·정상회복204를 확인했다. OpenAPI는 로컬 참조·필수 구조·인증·응답을 검사했으며 전용 OpenAPI 메타검증기는 실행하지 않았다. 예제는 실물 관측 기록이 아니며 검사 출력은RAM에서만 유지했다.
+
+API·공유 문서를 README에서 연결하고 CMake 문서 설치에 포함했다. 별도 설치 경로에서 포함 여부와 Markdown 로컬 링크/코드 fence를 확인했다. COLLABORATION.md는 private GitHub/GitLab과 OneDrive 완성 bundle을 통한 독립 clone/fetch·fast-forward 절차를 설명한다. 실제 서비스의 저장소 생성·push는 수행하지 않았다. Git 원본을 변경하지 않는 별도 clone에서 기준 bundle의 전체 이력 복제를 확인했고, 배포 commit·파일 SHA256과 최종 갱신 검증은 build/sharing 배포 목록에 남긴다.
 
 ## 0.10.0 · 기본 10m 공간 구간과 적응 폭
 
