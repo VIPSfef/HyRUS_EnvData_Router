@@ -1,5 +1,9 @@
 # Real SHTC3 test profile. Use --test-weather with the local TCP 21000 test server.
 # This is a saved-settings example; observation data remain in RAM.
+# Find the current COM/tty automatically: try every port at 115200 first, then
+# 57600,230400,460800,921600,38400,19200,9600, re-enumerating at each rate.
+# Keep the first CRC-valid MAVLink port/baud; restart discovery after link loss.
+# TUI shows the actual selected baud; no fixed COM number is required.
 input_mode=mavlink
 serial_port=auto
 serial_baud=115200
@@ -7,10 +11,28 @@ auto_scan=1
 udp_enabled=1
 udp_bind=127.0.0.1
 udp_port=14540
+qgc_enabled=1
+qgc_host=127.0.0.1
+qgc_port=14550
 url=http://127.0.0.1:21000/ingest
 stream=physical-shtc3
 session=auto
+# The local test server needs no token. Direct input is available in TUI field 47.
+# Empty token falls back to token_env. Windows: DPAPI. Linux: 0600 on POSIX FS.
+token_env=TB_TOKEN
+token=
 send_interval_ms=1000
+# Shared HTTP completion-to-next-request gap (500..60000 ms); UDP is independent.
+http_min_interval_ms=500
+# The bundled test server accepts independent 10-second connection/status reports.
+status_interval_ms=10000
+# Enable only when this router should manage the selected serial link's rates.
+mavlink_rates_enabled=0
+udp_backup_enabled=0
+udp_backup_host=auto
+udp_backup_port=0
+# HTTP/TCP backlog stays in RAM, allocated as needed; 1024 MiB = 1 GiB.
+tcp_buffer_max_mb=1024
 connect_timeout_ms=1000
 io_timeout_ms=1000
 origin_auto=1

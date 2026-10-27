@@ -3,6 +3,7 @@
 
 #include "telemetry.h"
 #include "weather.h"
+#include "battery.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -40,8 +41,9 @@ typedef struct {
 typedef struct {
     uint8_t sysid, compid, type, autopilot, base_mode, system_status;
     uint32_t custom_mode;
-    uint64_t last_seen_ms, last_heartbeat_ms, packets, sequence_gaps;
-    uint8_t have_heartbeat, have_sequence, last_sequence;
+    uint64_t last_seen_ms, last_heartbeat_ms, last_data_ms;
+    uint64_t packets, sequence_gaps, duplicates;
+    uint8_t have_heartbeat, have_data, have_sequence, last_sequence;
 } mi_device;
 
 typedef struct {
@@ -56,10 +58,14 @@ typedef struct {
     double lat, lon, altitude_msl_m;
     uint64_t navigation_received_ms, navigation_boot_us;
     uint8_t have_navigation;
+    /* Last accepted coordinate for display only; independent of the short
+     * alignment window. Explicit invalidation does not erase its receipt age. */
+    uint8_t have_last_geodetic, last_position_kind, navigation_invalid;
     uint8_t position_kind, gps_fix_fresh, have_gps_anchor, estimate_source;
     uint64_t gps_fix_received_ms, last_fix_boot_us;
     uint32_t estimation_age_us, position_flags;
     float navigation_error_m, navigation_v[3];
+    mi_battery battery;
     mi_device device[MI_DEVICE_CAP];
 } mi_report;
 
@@ -118,6 +124,7 @@ typedef struct {
     uint8_t have_gps_fix, have_gps_anchor, have_global, have_local_velocity;
     uint8_t estimate_active, have_estimator_status, have_previous_velocity, have_gps_fix_clock;
     uint8_t absolute_invalid_active;
+    mi_battery battery_status, system_battery;
 } mi_input;
 
 /* Fixed storage, no allocation, feed is O(bytes * log(common messages) +
@@ -136,9 +143,12 @@ void mi_tick(mi_input *input, uint64_t host_monotonic_ms);
  * when navigation is unavailable. Call before changing channels or ending a session. */
 void mi_finish(mi_input *input, uint64_t host_monotonic_ms);
 void mi_get_report(const mi_input *input, mi_report *report);
+/* Selected sys.comp only; radio/GCS traffic must not refresh this identity. */
+const mi_device *mi_selected_device(const mi_report *report);
 /* Discard a partial frame when switching byte streams. Device/clock history and
  * the configured coordinate origin stay; estimator/GPS anchors and navigation
- * history are cleared so a different byte source cannot continue dead reckoning.
+ * history and battery observations are cleared so a different byte source cannot
+ * continue dead reckoning or display the previous connection's battery as live.
  * Call mi_finish first to preserve the old source's pending observations. */
 void mi_link_reset(mi_input *input);
 /* Optional announcement (not a command): MAV_TYPE_ONBOARD_CONTROLLER and

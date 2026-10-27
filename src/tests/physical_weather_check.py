@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Physical SHTC3 -> collector -> actual C HTTP server test, observations in RAM.
 
-Default is plan only. --run is for an operator with exclusive COM ownership after closing any other
-serial handle and configures the real PX4 SENS_ATMOS stream. No PX4 commands,
+Default is plan only. --run requires an explicit COM port, exclusive ownership,
+and an already configured real PX4 SENS_ATMOS stream. No PX4 commands,
 firmware changes, UDP injection, synthetic MAVLink, or observation files.
 """
 import argparse
@@ -33,6 +33,25 @@ class CheckFailure(Exception):
 def require(condition, code):
     if not condition:
         raise CheckFailure(code)
+
+
+def add_run_arguments(parser):
+    parser.add_argument("--run", action="store_true", help="explicit live run; requires COM port released and PX4 stream configured")
+    parser.add_argument("--serial", help="explicit COM port required with --run; no default port")
+    parser.add_argument("--baud", type=int, default=115200, help="serial baud for the selected port (default: 115200); validated by the collector")
+    parser.add_argument("--duration-ms", type=int, default=12000)
+
+
+def require_live_arguments(args):
+    require(isinstance(args.serial, str) and re.fullmatch(r"COM[1-9][0-9]*", args.serial, re.IGNORECASE) is not None,
+            "explicit_com_port_required")
+    require(6000 <= args.duration_ms <= 20000, "duration_outside_6_to_20_seconds")
+
+
+def physical_config(args, stream):
+    return "\n".join(["input_mode=mavlink", "serial_port=" + args.serial, "serial_baud=" + str(args.baud), "auto_scan=0", "udp_enabled=0",
+        "url=http://127.0.0.1:21000/ingest", "stream=" + stream, "session=" + stream, "token_env=MTR_PHYSICAL_TEST_NO_AUTH",
+        "duration_ms=" + str(args.duration_ms), "send_interval_ms=1000", "connect_timeout_ms=1000", "io_timeout_ms=1000", "origin_auto=1", "summary=1", ""])
 
 
 def finite(value):
@@ -190,11 +209,10 @@ class PipeCapture:
 
 
 def run(args):
+    require_live_arguments(args)
     collector = BUILD / ("mavlink_telemetry_data_router_" + args.variant + ".exe")
     require(SERVER.is_file() and collector.is_file(), "required_executable_missing")
     require(os.name == "nt", "native_windows_only")
-    require(6000 <= args.duration_ms <= 20000, "duration_outside_6_to_20_seconds")
-    require(re.fullmatch(r"COM[1-9][0-9]*", args.serial, re.IGNORECASE) is not None, "explicit_com_port_required")
     children = []
     captures = []
     environment = os.environ.copy()
@@ -202,9 +220,7 @@ def run(args):
     try:
         with tempfile.TemporaryDirectory(prefix="physical-weather-config-") as directory:
             config = Path(directory) / "physical-weather.ini"
-            config.write_text("\n".join(["input_mode=mavlink", "serial_port=" + args.serial, "serial_baud=115200", "auto_scan=0", "udp_enabled=0",
-                "url=http://127.0.0.1:21000/ingest", "stream=physical-shtc3", "session=physical-shtc3", "token_env=MTR_PHYSICAL_TEST_NO_AUTH",
-                "duration_ms=" + str(args.duration_ms), "send_interval_ms=1000", "connect_timeout_ms=1000", "io_timeout_ms=1000", "origin_auto=1", "summary=1", ""]), encoding="utf-8")
+            config.write_text(physical_config(args, "physical-shtc3"), encoding="utf-8")
             server = subprocess.Popen([str(SERVER), "--plain", "--bind", "127.0.0.1", "--port", "21000", "--duration-ms", str(args.duration_ms + 5000)],
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment, creationflags=subprocess.CREATE_NO_WINDOW)
             children.append(server)
@@ -227,7 +243,7 @@ def run(args):
                 records.append(json.loads(line))
                 arrivals.append(arrived)
             result = validate(records, arrivals, client_err.text(), server_err.text(), args.position, args.clock_model)
-            result.update({"collector_variant_binary": args.variant, "monitor_forced_off_for_machine_check": True, "serial": args.serial,
+            result.update({"collector_variant_binary": args.variant, "monitor_forced_off_for_machine_check": True, "serial": args.serial, "serial_baud": args.baud,
                            "input_auto_scan": False, "udp_input": False, "duration_ms": args.duration_ms, "actual_c_server": True})
             return result
     finally:
@@ -245,15 +261,13 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run", action="store_true", help="explicit live run; requires COM port released and PX4 stream configured")
-    parser.add_argument("--serial", default="COM5")
-    parser.add_argument("--duration-ms", type=int, default=12000)
+    add_run_arguments(parser)
     parser.add_argument("--variant", choices=("headless", "interactive"), default="headless")
     parser.add_argument("--position", choices=("any", "known", "unknown"), default="any")
     parser.add_argument("--clock-model", choices=("any", "unknown"), default="any")
     args = parser.parse_args()
     if not args.run:
-        print(json.dumps({"status":"PLAN_ONLY", "run_switch_required":True, "actual_c_server":str(SERVER), "input_serial":args.serial,
+        print(json.dumps({"status":"PLAN_ONLY", "run_switch_required":True, "actual_c_server":str(SERVER), "input_serial":args.serial, "serial_baud":args.baud,
                           "duration_ms":args.duration_ms,"output":"summary JSON only; sensor values stay in RAM", "server_port":21000, "auto_scan":False, "udp_enabled":False}, ensure_ascii=False))
         return 0
     try:

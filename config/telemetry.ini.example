@@ -5,10 +5,34 @@ url=-
 stream=env1
 session=replace-for-each-boot
 token_env=TB_TOKEN
+# Direct HTTP Bearer token, TUI field 47. Empty falls back to token_env.
+# Windows save: current-user DPAPI. Linux: plaintext, 0600 on a POSIX filesystem.
+# TUI: e -> 47 -> Enter -> Ctrl+U -> paste token -> Enter -> r.
+# Keep real credentials out of shared examples.
+token=
 origin_lat=37
 origin_lon=127
 origin_alt=100
 send_interval_ms=1000
+# Shared HTTP gap after every response/failure, including status and backlog.
+# 500..60000 ms; 500 permits at most two requests/second, without catch-up bursts.
+# HTTP 401/403/429 retries back off 1..30 seconds; retained data require HTTP 204.
+http_min_interval_ms=500
+# Separate latest-state reports, even without new sensor samples. Enable with
+# 10000 for every 10 seconds only when the API accepts mavlink_router_status_v1.
+# 0 disables; allowed enabled range 1000..60000. TUI field 41; r applies edits.
+status_interval_ms=0
+# Opt-in serial telemetry prioritization using MAV_CMD_SET_MESSAGE_INTERVAL.
+# Keeps heartbeat unchanged; reserves bandwidth for GPS/weather/airspeed.
+# Runtime requests only, no persistent FC parameter edits. TUI field 42.
+mavlink_rates_enabled=0
+udp_backup_enabled=0
+# auto host and port 0 follow the HTTP host and TCP port + 1.
+udp_backup_host=auto
+udp_backup_port=0
+# HTTP/TCP backlog stays in RAM, allocated as needed; 1024 MiB = 1 GiB.
+# Allowed 1..65536 MiB on 64-bit systems; settings restart applies changes.
+tcp_buffer_max_mb=1024
 connect_timeout_ms=1000
 io_timeout_ms=1000
 max_windows=4
@@ -19,6 +43,12 @@ summary=0
 
 # Native binary MAVLink: listen to UDP while rotating serial/WS candidates.
 # Keep the first CRC-valid source; retry discovery after link_timeout_ms.
+# auto_scan=1 checks every current COM/tty at serial_baud first, then all other
+# supported rates: 115200,57600,230400,460800,921600,38400,19200,9600 (no duplicate).
+# Re-enumerate ports for each rate; check configured WS only on the first pass.
+# After all rates fail or the selected link times out, restart at serial_baud.
+# TUI shows the actual selected baud, which can differ from this preferred value.
+# auto_scan=0 uses only an explicit serial_port at serial_baud; UDP/WS still work.
 # For normalized CSV replay, use input_mode=csv.
 input_mode=mavlink
 serial_port=auto
@@ -48,14 +78,20 @@ origin_auto=1
 # Existing saved port values are preserved; edits apply after restart.
 # WSL loopback14540 is reachable inside WSL, not automatically from Windows.
 # 127.0.0.1 accepts local input; 0.0.0.0 accepts all local IPv4 interfaces.
-# UDP sends no heartbeat. UART-to-QGC raw forwarding is not implemented.
+# This input socket sends no heartbeat. QGC forwarding uses a separate socket.
 udp_bind=127.0.0.1
 udp_port=14540
 udp_enabled=1
 
+# Selected serial MAVLink <-> QGC. QGC owns 14550; the router uses an ephemeral
+# local port for replies. Does not forward UDP/WS input or change sensor URL.
+qgc_enabled=1
+qgc_host=127.0.0.1
+qgc_port=14550
+
 # WebSocket uses ws:// or wss:// and carries binary MAVLink frames.
 # Do not put credentials in URLs. UI hides query values; files retain them.
-# Token values stay in the environment named by token_env; only its NAME is saved.
+# A nonempty token overrides token_env. HTTP authentication is not sent over UDP.
 # Windows applies HTTP I/O timeouts per stage. Linux total HTTP timeout is
 # connect_timeout_ms + 2 * io_timeout_ms. Warning thresholds affect the monitor.
 

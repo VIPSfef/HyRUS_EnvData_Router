@@ -25,7 +25,7 @@ def load(path):
     return json.loads(path.read_text(encoding="utf-8"), parse_constant=invalid)
 
 
-def check_c_server(executable, example):
+def check_c_server(executable, example, status):
     # Self-contained so docs/api can be copied without the repository tests.
     reservation = socket.socket()
     reservation.bind(("127.0.0.1", 0))
@@ -43,13 +43,36 @@ def check_c_server(executable, example):
         lambda item: item["spatial"]["bins"][0]["statistics"].update(m2=-1),
         lambda item: item["spatial"]["bins"][0]["statistics"].update(variance=-1),
     ]
+    cases = [(valid, 204)]
+    for change in changes:
+        invalid = deepcopy(valid)
+        change(invalid["records"][0])
+        cases.append((invalid, 400))
+    cases.extend(((valid, 204), (status, 204)))
+    for change in (
+        lambda item: item.update(sample_count=1),
+        lambda item: item.update(seq=7),
+        lambda item: item["source"].update(connected=True),
+        lambda item: item["source"].update(hb_age_ms=None),
+        lambda item: item["weather"]["humidity"].update(value=0.5),
+        lambda item: item["weather"]["temperature"].update(observations="0"),
+        lambda item: item["devices"][1].update(data_age_ms="0"),
+        lambda item: item["position"].update(lat_deg=91),
+        lambda item: item["position"].update(rx_age_ms=None),
+        lambda item: item["position"].update(source="UNKNOWN"),
+        lambda item: item["position"].update(state="invented"),
+    ):
+        invalid = deepcopy(status)
+        change(invalid["records"][0])
+        cases.append((invalid, 400))
+    cases.append((status, 204))
     output = bytearray()
     with tempfile.TemporaryDirectory(prefix="api-synthetic-server-") as temporary:
         directory = Path(temporary)
         copied = directory / executable.name
         shutil.copy2(executable, copied)
         child = subprocess.Popen([str(copied), "--bind", "127.0.0.1", "--port", str(port),
-                                  "--plain", "--duration-ms", "5000", "--max-requests", str(len(changes) + 3)],
+                                  "--plain", "--duration-ms", "5000", "--max-requests", str(len(cases) + 1)],
                                  cwd=directory, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         def drain():
             while True:
@@ -80,21 +103,18 @@ def check_c_server(executable, example):
                 except (ConnectionRefusedError, socket.timeout):
                     assert time.monotonic() < until
                     time.sleep(.025)
-            assert post(valid) == 204
-            for change in changes:
-                invalid = deepcopy(valid)
-                change(invalid["records"][0])
-                assert post(invalid) == 400
-            assert post(valid) == 204
+            for body, expected in cases:
+                assert post(body) == expected
             child.wait(timeout=7)
             reader.join(timeout=2)
             assert child.returncode == 0 and not reader.is_alive()
-            assert [json.loads(line) for line in output.decode("utf-8").splitlines()] == [example, example]
+            expected_records = [record for body, code in cases if code == 204 for record in body["records"]]
+            assert [json.loads(line) for line in output.decode("utf-8").splitlines()] == expected_records
         finally:
             if child.poll() is None: child.kill(); child.wait(timeout=2)
             reader.join(timeout=2)
             child.stdout.close(); child.stderr.close()
-    print("PASS synthetic C server fixture204 / eight malformed400 / recovery204; ephemeral port, RAM output only")
+    print("PASS synthetic weather/status/GPS C server valid204 / malformed400 / recovery204; ephemeral port, RAM output only")
 
 
 def main():
@@ -106,7 +126,8 @@ def main():
     validator = Draft202012Validator(schema)
     checks = 1
     examples = {name: load(BASE / "examples" / name) for name in (
-        "synthetic-weather-unknown.json", "synthetic-weather-gps-spatial.json", "synthetic-mixed-bundle.json")}
+        "synthetic-weather-unknown.json", "synthetic-weather-gps-spatial.json", "synthetic-mixed-bundle.json",
+        "synthetic-status-disconnected.json")}
 
     def valid(value):
         nonlocal checks
@@ -128,6 +149,7 @@ def main():
     unknown = examples["synthetic-weather-unknown.json"]
     known = examples["synthetic-weather-gps-spatial.json"]
     mixed = examples["synthetic-mixed-bundle.json"]
+    status = examples["synthetic-status-disconnected.json"]
     telemetry = next(entry["payload"] for entry in mixed["records"] if entry["kind"] == "telemetry")
     valid(telemetry)
     csv = deepcopy(telemetry)
@@ -158,6 +180,45 @@ def main():
     for item in close["records"][0]["spatial"]["bins"]:
         item.update(state="interrupted", revision="2")
     valid(close)
+    # Latest status is not a measurement, and live GCS traffic cannot hide a
+    # selected vehicle heartbeat that has expired. Every age keeps its basis.
+    live = deepcopy(status)
+    live["records"][0]["source"].update(state="LOCKED", connected=True, heartbeat="LIVE", hb_age_ms="0")
+    valid(live)
+    waiting = deepcopy(status)
+    waiting["records"][0]["source"].update(state="WAIT_HEARTBEAT", heartbeat="WAIT", hb_age_ms=None)
+    valid(waiting)
+    no_position = deepcopy(status)
+    no_position["records"][0]["position"] = None
+    valid(no_position)
+    no_position["records"][0].pop("position")
+    valid(no_position)  # Backwards-compatible optional field.
+    capacity = deepcopy(status)
+    device = capacity["records"][0]["devices"][0]
+    capacity["records"][0]["devices"] = [dict(device, sysid=i + 1) for i in range(32)]
+    valid(capacity)
+    mutated(capacity, lambda item: item["records"][0]["devices"].append(dict(device, sysid=33)))
+    for change in (
+        lambda item: item.update(sample_count=1),
+        lambda item: item.update(seq=7),
+        lambda item: item.update(generation="18446744073709551616"),
+        lambda item: item["source"].update(connected=True),
+        lambda item: item["source"].update(hb_age_ms=None),
+        lambda item: item["source"].update(heartbeat="WAIT"),
+        lambda item: item["weather"]["temperature"].update(observations="0"),
+        lambda item: item["weather"]["temperature"].update(value=None),
+        lambda item: item["weather"]["humidity"].update(value=0.5),
+        lambda item: item["weather"]["humidity"].update(state="FRESH", value=1.1, rx_age_ms="0", observations="1"),
+        lambda item: item["devices"][1].update(data_age_ms="0"),
+        lambda item: item["devices"][0].update(sysid=0),
+        lambda item: item["position"].update(lat_deg=91),
+        lambda item: item["position"].update(lon_deg=-181),
+        lambda item: item["position"].update(rx_age_ms=None),
+        lambda item: item["position"].update(source="UNKNOWN"),
+        lambda item: item["position"].update(state="invented"),
+    ):
+        mutated(status, lambda item, change=change: change(item["records"][0]))
+    mutated(live, lambda item: item["records"][0]["source"].update(connected=False))
 
     def sample(value):
         return value["records"][0]["weather"]["measurements"]["temperature"][0]["samples"][0]
@@ -232,7 +293,7 @@ def main():
     if args.test_server:
         executable = args.test_server.resolve()
         assert executable.is_file(), executable
-        check_c_server(executable, known["records"][0])
+        check_c_server(executable, known["records"][0], status)
 
 
 if __name__ == "__main__":

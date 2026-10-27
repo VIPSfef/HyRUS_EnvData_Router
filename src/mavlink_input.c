@@ -12,6 +12,7 @@ typedef struct { uint32_t id; uint8_t crc, base_len, max_len; } mi_message_info;
 #define MI_BOOT_RESET_US UINT64_C(5000000)
 #define MI_UNIX_MIN_US UINT64_C(946684800000000)
 #define MI_UNIX_MAX_US UINT64_C(4102444800000000)
+enum { MI_MSG_SYS_STATUS = 1, MI_MSG_BATTERY_STATUS = 147 };
 
 static uint16_t u16(const uint8_t *p)
 { return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8)); }
@@ -64,6 +65,82 @@ static void event(mi_input *m, mi_event_kind kind, uint64_t boot)
     e.origin[2] = m->options.origin_alt;
     m->emit(m->context, &e);
 }
+static void clear_battery_state(mi_input *m)
+{
+    memset(&m->report.battery, 0, sizeof(m->report.battery));
+    memset(&m->battery_status, 0, sizeof(m->battery_status));
+    memset(&m->system_battery, 0, sizeof(m->system_battery));
+}
+static int battery_usable(const mi_battery *b, uint64_t now)
+{
+    return mi_battery_field_fresh(b, MI_BATTERY_HAVE_VOLTAGE, now) ||
+           mi_battery_field_fresh(b, MI_BATTERY_HAVE_REMAINING, now);
+}
+static void refresh_battery(mi_input *m, uint64_t now)
+{
+    /* Prefer the explicit battery identity. SYS_STATUS is an atomic fallback:
+     * its voltage and percentage may describe a different aggregate battery. */
+    const mi_battery *selected = &m->battery_status;
+    if (!battery_usable(selected, now) && battery_usable(&m->system_battery, now))
+        selected = &m->system_battery;
+    else if (selected->source == MI_BATTERY_SOURCE_NONE)
+        selected = &m->system_battery;
+    m->report.battery = *selected;
+}
+static void battery_observation(mi_input *m, uint32_t id, const uint8_t *p, uint64_t now)
+{
+    /* Official common.xml wire offsets (little endian); extensions have already
+     * been zero-padded by parse(), including truncated base-field zero percent. */
+    enum {
+        SYS_VOLTAGE_OFFSET = 14, SYS_REMAINING_OFFSET = 30,
+        BAT_VOLTAGE_OFFSET = 10, BAT_CELL_COUNT = 10, BAT_ID_OFFSET = 32,
+        BAT_REMAINING_OFFSET = 35, BAT_EXT_OFFSET = 41, BAT_EXT_COUNT = 4,
+        VOLTAGE_BYTES = 2, BAT_PRIMARY_ID = 0, REMAINING_MAX = 100
+    };
+    mi_battery *b;
+    uint32_t voltage = 0;
+    uint8_t remaining;
+    unsigned i, cells = 0;
+    if (id == MI_MSG_SYS_STATUS) {
+        b = &m->system_battery;
+        voltage = u16(p + SYS_VOLTAGE_OFFSET);
+        cells = voltage != UINT16_MAX;
+        remaining = p[SYS_REMAINING_OFFSET];
+        b->source = MI_BATTERY_SOURCE_SYS_STATUS;
+    } else {
+        b = &m->battery_status;
+        /* Keep one pack stable. The conventional primary ID 0 may supersede
+         * the first observed pack once; subsequent packs never alternate. */
+        if (b->source != MI_BATTERY_SOURCE_NONE && p[BAT_ID_OFFSET] != b->id &&
+            p[BAT_ID_OFFSET] != BAT_PRIMARY_ID) return;
+        if (b->source != MI_BATTERY_SOURCE_NONE && p[BAT_ID_OFFSET] != b->id)
+            memset(b, 0, sizeof(*b));
+        for (i = 0; i < BAT_CELL_COUNT; ++i) {
+            const uint16_t cell = u16(p + BAT_VOLTAGE_OFFSET + i * VOLTAGE_BYTES);
+            if (cell != UINT16_MAX) { voltage += cell; ++cells; }
+        }
+        for (i = 0; i < BAT_EXT_COUNT; ++i) {
+            const uint16_t cell = u16(p + BAT_EXT_OFFSET + i * VOLTAGE_BYTES);
+            /* Extension zero means absent, unlike the base-array sentinel. */
+            if (cell) { voltage += cell; ++cells; }
+        }
+        remaining = p[BAT_REMAINING_OFFSET];
+        b->source = MI_BATTERY_SOURCE_BATTERY_STATUS;
+        b->id = p[BAT_ID_OFFSET];
+    }
+    b->received_ms = now;
+    b->flags = 0;
+    if (cells) {
+        b->flags |= MI_BATTERY_HAVE_VOLTAGE;
+        b->voltage_mv = voltage;
+        b->voltage_received_ms = now;
+    }
+    if (remaining <= REMAINING_MAX) {
+        b->flags |= MI_BATTERY_HAVE_REMAINING;
+        b->remaining_percent = remaining;
+        b->remaining_received_ms = now;
+    }
+}
 static void clear_position_state(mi_input *m)
 {
     m->have_gps_fix = m->have_gps_anchor = m->have_global = 0;
@@ -77,6 +154,8 @@ static void clear_position_state(mi_input *m)
     m->estimator_flags = 0;
     m->report.gps_fix = m->report.gps_fix_fresh = m->report.have_gps_anchor = 0;
     m->report.have_navigation = 0;
+    m->report.have_last_geodetic = m->report.navigation_invalid = 0;
+    m->report.last_position_kind = WEATHER_POSITION_UNKNOWN;
     m->report.position_kind = WEATHER_POSITION_UNKNOWN;
     m->report.estimate_source = MI_ESTIMATE_NONE;
     m->report.estimation_age_us = UINT32_MAX;
@@ -116,10 +195,20 @@ void mi_link_reset(mi_input *m)
         m->pending_count = m->weather_pending_count = m->nav_count = 0;
         m->gps_error_m = NAN; m->gps_accuracy_ms = 0;
         clear_position_state(m);
+        clear_battery_state(m);
     }
 }
 void mi_get_report(const mi_input *m, mi_report *r)
 { if (m && r) { *r = m->report; r->pending = m->pending_count + m->weather_pending_count; } }
+const mi_device *mi_selected_device(const mi_report *r)
+{
+    unsigned i;
+    if (!r) return NULL;
+    for (i = 0; i < r->devices; ++i)
+        if (r->device[i].sysid == r->selected_system &&
+            r->device[i].compid == r->selected_component) return &r->device[i];
+    return NULL;
+}
 
 static mi_device *device(mi_input *m, uint8_t sysid, uint8_t compid, uint64_t now)
 {
@@ -147,6 +236,7 @@ static void reset_clock(mi_input *m)
     m->last_boot_ms = m->next_seq = m->emitted_seq = 0; m->have_boot = m->have_emitted = 0;
     m->gps_error_m = NAN; m->gps_accuracy_ms = 0;
     clear_position_state(m);
+    clear_battery_state(m);
     m->report.gps_fix = 0;
     m->report.have_navigation = 0;
     m->report.navigation_received_ms = m->report.navigation_boot_us = 0;
@@ -534,6 +624,12 @@ static void refresh_navigation(mi_input *m, uint64_t now)
     m->report.gps_fix_fresh = (uint8_t)gps_fresh(m, now);
     m->report.have_gps_anchor = m->have_gps_anchor;
     m->report.last_fix_boot_us = m->gps_anchor_us;
+    /* An absent/delayed packet is different from a fresh estimator rejection.
+     * Keep rejection latched until a new accepted position replaces it. */
+    if (m->report.have_last_geodetic && estimator_status_fresh(m, m->high_boot_us, now) &&
+        !estimator_valid(m, m->high_boot_us, now,
+            m->report.estimate_source == MI_ESTIMATE_VELOCITY ? 2u | 4u : 16u | 32u))
+        m->report.navigation_invalid = 1;
     if (m->report.position_kind == WEATHER_POSITION_GPS && !m->report.gps_fix_fresh) {
         m->report.position_kind = WEATHER_POSITION_ESTGPS;
         m->report.navigation_error_m = NAN;
@@ -570,6 +666,7 @@ void mi_tick(mi_input *m, uint64_t now)
     uint64_t watermark;
     if (!m) return;
     refresh_navigation(m, now);
+    refresh_battery(m, now);
     watermark = m->high_boot_us > MI_REORDER_US ? m->high_boot_us - MI_REORDER_US : 0;
     flush_weather(m,now,0);
     flush_pending(m, watermark, now, 0);
@@ -584,6 +681,9 @@ static void report_navigation(mi_input *m, const tb_nav *nav, const mi_nav_info 
     if (!m->report.navigation_boot_us || nav->t_us >= m->report.navigation_boot_us) {
         m->report.lat = lat; m->report.lon = lon; m->report.altitude_msl_m = altitude;
         m->report.have_navigation = 1;
+        m->report.have_last_geodetic = 1;
+        m->report.last_position_kind = info->position_kind;
+        m->report.navigation_invalid = 0;
         m->report.navigation_received_ms = now;
         m->report.navigation_boot_us = nav->t_us;
         m->report.position_kind = info->position_kind;
@@ -613,6 +713,7 @@ static void global_navigation(mi_input *m, const uint8_t *p, uint64_t now)
         m->have_global = 0;
         if (m->report.estimate_source == MI_ESTIMATE_EKF) {
             m->report.have_navigation = 0; m->report.position_kind = WEATHER_POSITION_UNKNOWN;
+            m->report.navigation_invalid = 1;
         }
         return;
     }
@@ -768,11 +869,16 @@ static void packet(mi_input *m, uint32_t id, const uint8_t *p, uint8_t sysid,
 {
     mi_device *d = device(m, sysid, compid, now);
     uint64_t stamp;
+    int duplicate = 0;
     if (!sysid || !compid) return;
     if (d) {
         uint8_t delta = (uint8_t)(sequence - d->last_sequence);
+        /* Receipt freshness is independent of sequence deduplication. A
+         * restarted transmitter can reuse its previous heartbeat sequence. */
+        if (id == 0) { d->last_heartbeat_ms = now; d->have_heartbeat = 1; }
+        else { d->last_data_ms = now; d->have_data = 1; }
         ++d->packets;
-        if (d->have_sequence && !delta) { ++m->report.duplicates; return; }
+        if (d->have_sequence && !delta) { ++d->duplicates; ++m->report.duplicates; duplicate = 1; }
         if (d->have_sequence && delta > 1 && delta < 128) {
             d->sequence_gaps += delta - 1u; m->report.sequence_gaps += delta - 1u;
         }
@@ -783,7 +889,6 @@ static void packet(mi_input *m, uint32_t id, const uint8_t *p, uint8_t sysid,
         if (d) {
             d->custom_mode = u32(p); d->type = p[4]; d->autopilot = p[5];
             d->base_mode = p[6]; d->system_status = p[7];
-            d->last_heartbeat_ms = now; d->have_heartbeat = 1;
         }
         if ((!m->report.selected_system || m->report.selected_system == sysid) &&
             (!m->report.selected_component || m->report.selected_component == compid) &&
@@ -792,6 +897,7 @@ static void packet(mi_input *m, uint32_t id, const uint8_t *p, uint8_t sysid,
         }
         return;
     }
+    if (duplicate) return;
     if (!m->report.selected_system || !m->report.selected_component ||
         m->report.selected_system != sysid) return;
     if (m->report.selected_component != compid) {
@@ -799,7 +905,8 @@ static void packet(mi_input *m, uint32_t id, const uint8_t *p, uint8_t sysid,
             ++m->report.wrong_clock_component;
         return;
     }
-    if(id==12920 || id==8009) weather_observation(m,p,id,now);
+    if (id == MI_MSG_SYS_STATUS || id == MI_MSG_BATTERY_STATUS) battery_observation(m, id, p, now);
+    else if(id==12920 || id==8009) weather_observation(m,p,id,now);
     else if (id == 2) {
         uint64_t utc = u64(p);
         stamp = boot_ms(m, u32(p + 8));

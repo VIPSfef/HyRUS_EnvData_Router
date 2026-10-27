@@ -1,15 +1,21 @@
 /* Independent strict configuration parsing, boundaries and file transaction tests. */
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include "config.h"
 
 #include <locale.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "test_workdir.h"
 #ifdef _WIN32
 #include <windows.h>
 #include <process.h>
 #else
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -102,6 +108,7 @@ static int check_settings(void)
     cfg_defaults(&c);
     CHECK(!cfg_validate(&c, 4, error, sizeof(error)));
     CHECK(c.send_interval_ms >= 1000);
+    CHECK(c.http_min_interval_ms == 500);
     CHECK(c.refresh_ms >= 250 && c.refresh_ms <= 10000);
     CHECK(!strcmp(c.token_env, "TB_TOKEN"));
     CHECK(valid_config(&c));
@@ -119,7 +126,11 @@ static int check_settings(void)
     CHECK(invalid_set(&c, "stream", "invalid stream"));
     CHECK(invalid_set(&c, "session", "invalid\nsession"));
     CHECK(invalid_set(&c, "token_env", "Bearer PRIVATE_TOKEN_VALUE"));
-    CHECK(invalid_set(&c, "token", "PRIVATE_TOKEN_VALUE"));
+    CHECK(!cfg_set(&c, "token_env", "0123456789abcdef", error, sizeof(error)));
+    CHECK(strstr(error,"environment variable name")!=NULL && strstr(error,"TB_TOKEN")!=NULL);
+    CHECK(strstr(error,"0123456789abcdef")==NULL);
+    CHECK(cfg_set(&c, "token", "PRIVATE_TOKEN_VALUE", error, sizeof(error)));
+    CHECK(cfg_set(&c, "token", "", error, sizeof(error)));
     CHECK(invalid_set(&c, "origin_lat", "90.0001"));
     CHECK(invalid_set(&c, "origin_lon", "-180.0001"));
     CHECK(invalid_set(&c, "origin_alt", "nan"));
@@ -131,6 +142,11 @@ static int check_settings(void)
     CHECK(invalid_set(&c, "send_interval_ms", "4294967296"));
     CHECK(invalid_set(&c, "send_interval_ms", "1000garbage"));
     CHECK(cfg_set(&c, "send_interval_ms", "1000", error, sizeof(error)));
+    CHECK(invalid_set(&c, "http_min_interval_ms", "499"));
+    CHECK(invalid_set(&c, "http_min_interval_ms", "0"));
+    CHECK(invalid_set(&c, "http_min_interval_ms", "60001"));
+    CHECK(cfg_set(&c, "http_min_interval_ms", "60000", error, sizeof(error)));
+    CHECK(cfg_set(&c, "http_min_interval_ms", "500", error, sizeof(error)));
     for (i = 0; i < sizeof(timeout_keys) / sizeof(timeout_keys[0]); ++i) {
         CHECK(invalid_set(&c, timeout_keys[i], "99"));
         CHECK(cfg_set(&c, timeout_keys[i], "100", error, sizeof(error)));
@@ -153,6 +169,85 @@ static int check_settings(void)
     CHECK(!cfg_validate(&c, 3, error, sizeof(error)));
     CHECK(!memcmp(&saved, &c, sizeof(c)));
     CHECK(cfg_validate(&c, 4, error, sizeof(error)));
+    return 1;
+}
+
+static int check_field_registry(void)
+{
+    tb_config original,roundtrip;
+    char raw[2048],display[2048],error[128],tiny[2];
+    unsigned i,urls=0,count=cfg_field_count();
+    CHECK(valid_config(&original));
+    CHECK(cfg_set(&original,"websocket_url","wss://example.com/data?key=PRIVATE_WS",error,sizeof(error)));
+    CHECK(cfg_set(&original,"origin_lat","37.12345678912345",error,sizeof(error)));
+    CHECK(count>0 && count<=64);
+    CHECK(!strcmp(cfg_field_name(7),"send_interval_ms"));
+    CHECK(!strcmp(cfg_field_name(11),"refresh_ms"));
+    CHECK(!strcmp(cfg_field_name(31),"udp_port"));
+    CHECK(!strcmp(cfg_field_name(36),"spatial_adaptive"));
+    CHECK(!strcmp(cfg_field_name(37),"qgc_enabled"));
+    CHECK(!strcmp(cfg_field_name(38),"qgc_host"));
+    CHECK(!strcmp(cfg_field_name(39),"qgc_port"));
+    CHECK(!strcmp(cfg_field_name(40),"status_interval_ms"));
+    CHECK(!strcmp(cfg_field_name(41),"mavlink_rates_enabled"));
+    CHECK(!strcmp(cfg_field_name(42),"udp_backup_enabled"));
+    CHECK(!strcmp(cfg_field_name(43),"udp_backup_host"));
+    CHECK(!strcmp(cfg_field_name(44),"udp_backup_port"));
+    CHECK(!strcmp(cfg_field_name(45),"tcp_buffer_max_mb"));
+    CHECK(!strcmp(cfg_field_name(46),"token") && cfg_field_is_secret(46));
+    CHECK(!strcmp(cfg_field_name(47),"http_min_interval_ms"));
+    cfg_defaults(&roundtrip);
+    for(i=0;i<count;++i) {
+        const char *name=cfg_field_name(i);
+        CHECK(name && *name);
+        CHECK(cfg_field_value(&original,i,raw,sizeof(raw),1));
+        CHECK(cfg_set(&roundtrip,name,raw,error,sizeof(error)));
+        CHECK(cfg_field_value(&original,i,display,sizeof(display),0));
+        if(cfg_field_is_url(i)) {
+            ++urls;
+            CHECK(strchr(raw,'?')!=NULL && strchr(display,'?')==NULL);
+            CHECK(strstr(display,"PRIVATE")==NULL);
+        } else CHECK(!strcmp(raw,display));
+    }
+    CHECK(urls==2 && !memcmp(&original,&roundtrip,sizeof(original)));
+    CHECK(cfg_field_name(count)==NULL && !cfg_field_is_url(count) && !cfg_field_is_secret(count));
+    CHECK(!cfg_field_value(&original,count,raw,sizeof(raw),1) && !raw[0]);
+    CHECK(!cfg_field_value(NULL,0,raw,sizeof(raw),1) && !raw[0]);
+    CHECK(!cfg_field_value(&original,0,NULL,0,1));
+    CHECK(!cfg_field_value(&original,0,tiny,sizeof(tiny),1) && tiny[1]=='\0');
+    CHECK(!cfg_field_value(&original,0,tiny,sizeof(tiny),0) && tiny[1]=='\0');
+    return 1;
+}
+
+static int check_tcp_buffer_settings(void)
+{
+    tb_config c, loaded;
+    char error[128], text[32], path[128];
+    unsigned max_mb = SIZE_MAX / CFG_MIB_BYTES < CFG_TCP_BUFFER_MAX_MB ?
+        (unsigned)(SIZE_MAX / CFG_MIB_BYTES) : CFG_TCP_BUFFER_MAX_MB;
+    CHECK(valid_config(&c));
+    CHECK(c.tcp_buffer_max_mb == 1024);
+    CHECK(invalid_set(&c,"tcp_buffer_max_mb","0"));
+    CHECK(invalid_set(&c,"tcp_buffer_max_mb","-1"));
+    CHECK(invalid_set(&c,"tcp_buffer_max_mb","1.5"));
+    CHECK(cfg_set(&c,"tcp_buffer_max_mb","1",error,sizeof(error)));
+    CHECK(c.tcp_buffer_max_mb == 1);
+    (void)snprintf(text,sizeof(text),"%u",max_mb);
+    CHECK(cfg_set(&c,"tcp_buffer_max_mb",text,error,sizeof(error)));
+    CHECK(c.tcp_buffer_max_mb == max_mb);
+    CHECK(cfg_validate(&c,4,error,sizeof(error)));
+    (void)snprintf(text,sizeof(text),"%u",max_mb+1);
+    CHECK(invalid_set(&c,"tcp_buffer_max_mb",text));
+    c.tcp_buffer_max_mb = max_mb+1;
+    CHECK(!cfg_validate(&c,4,error,sizeof(error)));
+    CHECK(cfg_set(&c,"tcp_buffer_max_mb","2048",error,sizeof(error)));
+    (void)snprintf(path,sizeof(path),"test_tcp_buffer_%u.ini",process_id());
+    CHECK(cfg_save(path,&c,4,error,sizeof(error)));
+    cfg_defaults(&loaded);
+    CHECK(cfg_load(path,&loaded,4,error,sizeof(error)));
+    CHECK(loaded.tcp_buffer_max_mb == 2048);
+    CHECK(!memcmp(&loaded,&c,sizeof(c)));
+    CHECK(remove_utf8(path));
     return 1;
 }
 
@@ -179,6 +274,52 @@ static int check_redaction(void)
         for (i = 0; i < sizeof(guard.right); ++i) CHECK(guard.right[i] == 0xA5);
         if (cap) CHECK(memchr(guard.value, '\0', cap) != NULL);
     }
+    return 1;
+}
+
+static int check_url_drafts(void)
+{
+    static const struct { const char *input,*shown; } cases[] = {
+        {"", ""}, {"-", "-"}, {"h", "h"}, {"ht", "ht"}, {"http", "http"},
+        {"http:", "http:"}, {"http:/", "http:/"}, {"http://", "http://"},
+        {"http://127.0.0.1:", "http://127.0.0.1:"},
+        {"ttp://example.com/ingest", "ttp://example.com/ingest"},
+        {"w", "w"}, {"ws:/", "ws:/"}, {"wss://", "wss://"},
+        {"http://PRIVATE_USER:PRIVATE_PASSWORD@example.com/x?PRIVATE_QUERY#PRIVATE_FRAGMENT", "http://example.com/x"},
+        {"ttp://PRIVATE_USER:PRIVATE_PASSWORD@example.com/x?PRIVATE_QUERY", "ttp://example.com/x"},
+        {"http//PRIVATE_USER:PRIVATE_PASSWORD@example.com/x#PRIVATE_FRAGMENT", "http//example.com/x"},
+        {"http:/PRIVATE_USER:PRIVATE_PASSWORD@example.com/x", "http:/example.com/x"},
+        {"//PRIVATE_USER:PRIVATE_PASSWORD@example.com/x", "//example.com/x"},
+        {"PRIVATE_USER:PRIVATE_PASSWORD@example.com/x", "example.com/x"},
+        {"PRIVATE_USER:PRIVATE_PASSWORD@PRIVATE_OTHER@example.com/x", "example.com/x"},
+        {"h?PRIVATE_QUERY#PRIVATE_FRAGMENT", "h"},
+        {"http://host/path@name", "http://host/path@name"},
+        {"http://ho\nst/\033path", "http://ho_st/_path"}
+    };
+    struct { unsigned char left[8]; char value[8]; unsigned char right[8]; } guard;
+    tb_config c;
+    char shown[512];
+    size_t item,cap,i;
+    cfg_defaults(&c);
+    for(item=0;item<sizeof(cases)/sizeof(cases[0]);++item) {
+        cfg_edit_url(cases[item].input,shown,sizeof(shown));
+        CHECK(!strcmp(shown,cases[item].shown));
+        CHECK(!strstr(shown,"PRIVATE_"));
+        for(cap=0;cap<=sizeof(guard.value);++cap) {
+            memset(&guard,0xA5,sizeof(guard));
+            cfg_edit_url(cases[item].input,guard.value,cap);
+            for(i=0;i<sizeof(guard.left);++i) CHECK(guard.left[i]==0xA5);
+            for(i=cap;i<sizeof(guard.value);++i) CHECK((unsigned char)guard.value[i]==0xA5);
+            for(i=0;i<sizeof(guard.right);++i) CHECK(guard.right[i]==0xA5);
+            if(cap) CHECK(memchr(guard.value,'\0',cap)!=NULL);
+        }
+    }
+    cfg_safe_url("h",shown,sizeof(shown)); CHECK(!strcmp(shown,"[invalid URL]"));
+    cfg_safe_url("http//host/x",shown,sizeof(shown)); CHECK(!strcmp(shown,"[invalid URL]"));
+    cfg_edit_url(NULL,shown,sizeof(shown)); CHECK(!shown[0]);
+    cfg_edit_url("h",NULL,sizeof(shown));
+    CHECK(invalid_set(&c,"url","http://"));
+    CHECK(invalid_set(&c,"websocket_url","ws://"));
     return 1;
 }
 
@@ -364,32 +505,40 @@ static int check_mavlink_settings(void)
     return 1;
 }
 
-static int check_udp_settings(void)
+/* Both input and output endpoints use the same strict literal/port/bool rules. */
+static int check_udp_fields(tb_config *c, const char *host_key,
+                            const char *port_key, const char *enabled_key)
 {
-    tb_config c, loaded, saved;
-    char error[160], path[128];
+    char error[160];
     const char *valid[] = {"127.0.0.1", "0.0.0.0", "255.255.255.255", "192.168.10.1", "10.0.0.2"};
     const char *invalid[] = {"", "localhost", "::1", "udp://127.0.0.1", "127.0.0", "127.0.0.1.2",
         "256.0.0.1", "1.2.3.999", "-1.2.3.4", "01.2.3.4", "1..3.4", "1.2.3.", "1.2.3.4:14551"};
     size_t i;
+    for(i=0;i<sizeof(valid)/sizeof(valid[0]);++i)
+        CHECK(cfg_set(c,host_key,valid[i],error,sizeof(error)));
+    for(i=0;i<sizeof(invalid)/sizeof(invalid[0]);++i) CHECK(invalid_set(c,host_key,invalid[i]));
+    CHECK(cfg_set(c,port_key,"1",error,sizeof(error)));
+    CHECK(cfg_set(c,port_key,"65535",error,sizeof(error)));
+    CHECK(invalid_set(c,port_key,"0"));
+    CHECK(invalid_set(c,port_key,"65536"));
+    CHECK(invalid_set(c,port_key,"-1"));
+    CHECK(invalid_set(c,port_key,"14551.0"));
+    CHECK(cfg_set(c,enabled_key,"0",error,sizeof(error)));
+    CHECK(cfg_set(c,enabled_key,"1",error,sizeof(error)));
+    CHECK(invalid_set(c,enabled_key,"2"));
+    CHECK(invalid_set(c,enabled_key,"true"));
+    return 1;
+}
+
+static int check_udp_settings(void)
+{
+    tb_config c, loaded, saved;
+    char error[160], path[128];
     cfg_defaults(&c);
     CHECK(!strcmp(c.udp_bind,"127.0.0.1") && c.udp_port==14540 && c.udp_enabled==1);
     CHECK(valid_config(&c));
-    for(i=0;i<sizeof(valid)/sizeof(valid[0]);++i) {
-        CHECK(cfg_set(&c,"udp_bind",valid[i],error,sizeof(error)));
-        CHECK(!strcmp(c.udp_bind,valid[i]));
-    }
-    for(i=0;i<sizeof(invalid)/sizeof(invalid[0]);++i) CHECK(invalid_set(&c,"udp_bind",invalid[i]));
-    CHECK(cfg_set(&c,"udp_port","1",error,sizeof(error)) && c.udp_port==1);
-    CHECK(cfg_set(&c,"udp_port","65535",error,sizeof(error)) && c.udp_port==65535);
-    CHECK(invalid_set(&c,"udp_port","0"));
-    CHECK(invalid_set(&c,"udp_port","65536"));
-    CHECK(invalid_set(&c,"udp_port","-1"));
-    CHECK(invalid_set(&c,"udp_port","14551.0"));
-    CHECK(cfg_set(&c,"udp_enabled","0",error,sizeof(error)) && c.udp_enabled==0);
-    CHECK(cfg_set(&c,"udp_enabled","1",error,sizeof(error)) && c.udp_enabled==1);
-    CHECK(invalid_set(&c,"udp_enabled","2"));
-    CHECK(invalid_set(&c,"udp_enabled","true"));
+    CHECK(check_udp_fields(&c,"udp_bind","udp_port","udp_enabled"));
+    CHECK(!strcmp(c.udp_bind,"10.0.0.2") && c.udp_port==65535 && c.udp_enabled==1);
     saved=c; memset(c.udp_bind,'x',sizeof(c.udp_bind));
     CHECK(!cfg_validate(&c,4,error,sizeof(error))); c=saved;
     CHECK(cfg_set(&c,"udp_bind","0.0.0.0",error,sizeof(error)));
@@ -402,6 +551,45 @@ static int check_udp_settings(void)
         const char duplicate[]="url=-\nstream=s\nsession=x\nudp_enabled=0\nudp_enabled=1\n";
         CHECK(invalid_file(path,duplicate,sizeof(duplicate)-1,&c));
     }
+    CHECK(remove_utf8(path));
+    return 1;
+}
+
+static int check_qgc_settings(void)
+{
+    tb_config c, loaded, saved;
+    char error[160], path[128], duplicate[128];
+    const char *keys[] = {"qgc_host", "qgc_port", "qgc_enabled"};
+    const char *values[] = {"127.0.0.1", "14550", "1"};
+    const char legacy[] = "url=-\nstream=s\nsession=legacy\n";
+    size_t i;
+    cfg_defaults(&c);
+    CHECK(!strcmp(c.qgc_host,"127.0.0.1") && c.qgc_port==14550 && c.qgc_enabled==1);
+    CHECK(valid_config(&c));
+    CHECK(check_udp_fields(&c,"qgc_host","qgc_port","qgc_enabled"));
+    CHECK(!strcmp(c.qgc_host,"10.0.0.2") && c.qgc_port==65535 && c.qgc_enabled==1);
+    /* Output edits must never alter the independent input listener. */
+    CHECK(!strcmp(c.udp_bind,"127.0.0.1") && c.udp_port==14540 && c.udp_enabled==1);
+    saved=c; memset(c.qgc_host,'x',sizeof(c.qgc_host));
+    CHECK(!cfg_validate(&c,4,error,sizeof(error))); c=saved;
+    c.qgc_port=0;
+    CHECK(!cfg_validate(&c,4,error,sizeof(error))); c=saved;
+    c.qgc_enabled=2;
+    CHECK(!cfg_validate(&c,4,error,sizeof(error))); c=saved;
+    (void)snprintf(path,sizeof(path),"tb-qgc-config-%u.ini",process_id());
+    for(i=0;i<sizeof(keys)/sizeof(keys[0]);++i) {
+        (void)snprintf(duplicate,sizeof(duplicate),"url=-\nstream=s\nsession=x\n%s=%s\n%s=%s\n",
+                       keys[i],values[i],keys[i],values[i]);
+        CHECK(invalid_file(path,duplicate,strlen(duplicate),&c));
+    }
+    CHECK(write_bytes(path,legacy,sizeof(legacy)-1));
+    CHECK(cfg_load(path,&loaded,4,error,sizeof(error)));
+    CHECK(!strcmp(loaded.qgc_host,"127.0.0.1") && loaded.qgc_port==14550 && loaded.qgc_enabled==1);
+    CHECK(cfg_set(&c,"qgc_enabled","0",error,sizeof(error)) && c.qgc_enabled==0);
+    CHECK(cfg_save(path,&c,4,error,sizeof(error)));
+    CHECK(cfg_load(path,&loaded,4,error,sizeof(error)));
+    CHECK(!strcmp(loaded.qgc_host,c.qgc_host) && loaded.qgc_port==c.qgc_port && loaded.qgc_enabled==0);
+    CHECK(!strcmp(loaded.udp_bind,c.udp_bind) && loaded.udp_port==c.udp_port && loaded.udp_enabled==c.udp_enabled);
     CHECK(remove_utf8(path));
     return 1;
 }
@@ -467,10 +655,241 @@ static int check_spatial_settings(void)
     return 1;
 }
 
+static int check_status_settings(void)
+{
+    tb_config c, loaded, saved;
+    char error[160], path[128];
+    static const char *valid[] = {"0", "1000", "10000", "60000"};
+    static const char *invalid[] = {"1", "999", "60001", "-1", "1000.5", "4294967296"};
+    static const char duplicate[] = "url=-\nstream=s\nsession=x\nstatus_interval_ms=0\nstatus_interval_ms=10000\n";
+    static const char legacy[] = "url=-\nstream=s\nsession=legacy\n";
+    size_t i;
+    cfg_defaults(&c);
+    CHECK(c.status_interval_ms==0 && c.mavlink_rates_enabled==0);
+    CHECK(valid_config(&c));
+    for(i=0;i<sizeof(valid)/sizeof(valid[0]);++i)
+        CHECK(cfg_set(&c,"status_interval_ms",valid[i],error,sizeof(error)));
+    for(i=0;i<sizeof(invalid)/sizeof(invalid[0]);++i)
+        CHECK(invalid_set(&c,"status_interval_ms",invalid[i]));
+    saved=c; c.status_interval_ms=999;
+    CHECK(!cfg_validate(&c,4,error,sizeof(error))); c=saved;
+    c.status_interval_ms=60001;
+    CHECK(!cfg_validate(&c,4,error,sizeof(error))); c=saved;
+    (void)snprintf(path,sizeof(path),"tb-status-config-%u.ini",process_id());
+    CHECK(invalid_file(path,duplicate,sizeof(duplicate)-1,&c));
+    CHECK(write_bytes(path,legacy,sizeof(legacy)-1));
+    CHECK(cfg_load(path,&loaded,4,error,sizeof(error)) && loaded.status_interval_ms==0 && loaded.mavlink_rates_enabled==0);
+    CHECK(invalid_set(&c,"mavlink_rates_enabled","2"));
+    CHECK(invalid_set(&c,"mavlink_rates_enabled","-1"));
+    CHECK(cfg_set(&c,"mavlink_rates_enabled","1",error,sizeof(error)));
+    CHECK(cfg_set(&c,"status_interval_ms","10000",error,sizeof(error)));
+    CHECK(cfg_save(path,&c,4,error,sizeof(error)));
+    CHECK(cfg_load(path,&loaded,4,error,sizeof(error)));
+    CHECK(loaded.status_interval_ms==10000 && loaded.mavlink_rates_enabled==1 && !memcmp(&loaded,&c,sizeof(c)));
+    CHECK(remove_utf8(path));
+    return 1;
+}
+
+static int check_udp_backup_settings(void)
+{
+    static const struct { const char *url,*host; unsigned port; } derived[]={
+        {"http://127.0.0.1:21000/ingest","127.0.0.1",21001},
+        {"http://localhost/ingest","localhost",81},
+        {"https://sensor.example/ingest?port=9000","sensor.example",444},
+        {"https://sensor.example:65534/a","sensor.example",65535},
+        {"http://[::1]:21000/ingest","::1",21001},
+        {"https://[2001:db8::2]/ingest","2001:db8::2",444},
+        {"http://[::ffff:192.0.2.1]:9000/","::ffff:192.0.2.1",9001}
+    };
+    static const char *hosts[]={"auto","localhost","telemetry.example.","192.0.2.1",
+        "::","::1","2001:db8::1","1:2:3:4:5:6:7:8","::ffff:192.0.2.1","[2001:db8::1]"};
+    static const char *bad_hosts[]={"","udp://localhost","user:PRIVATE_PASSWORD@host","host/path",
+        "host?token=PRIVATE","host:21001","host\\path","host\r\nINJECT","host name",
+        "127.1","01.2.3.4","256.0.0.1","-host.example","host-.example","host..example",
+        "[127.0.0.1]","[::1","[::1]:1234",":",":::1","1::2::3","1:2:3:4:5:6:7",
+        "1:2:3:4:5:6:7:8:9","1:2:3:4:5:6:7::8","12345::1","::ffff:192.0.2.999","fe80::1%eth0"};
+    tb_config c,saved,loaded;
+    char host[256],error[160],path[128],duplicate[256];
+    unsigned port;
+    size_t i;
+    CHECK(valid_config(&c));
+    CHECK(!c.udp_backup_enabled && !strcmp(c.udp_backup_host,"auto") && !c.udp_backup_port);
+    CHECK(cfg_set(&c,"udp_backup_enabled","1",error,sizeof(error)));
+    CHECK(invalid_set(&c,"udp_backup_enabled","2"));
+    CHECK(invalid_set(&c,"udp_backup_enabled","true"));
+    CHECK(invalid_set(&c,"udp_backup_port","65536"));
+    CHECK(invalid_set(&c,"udp_backup_port","-1"));
+    for(i=0;i<sizeof(derived)/sizeof(derived[0]);++i) {
+        CHECK(cfg_set(&c,"url",derived[i].url,error,sizeof(error)));
+        CHECK(cfg_validate(&c,4,error,sizeof(error)));
+        CHECK(cfg_udp_backup_destination(&c,host,sizeof(host),&port,error,sizeof(error)));
+        CHECK(!strcmp(host,derived[i].host) && port==derived[i].port);
+    }
+    for(i=0;i<sizeof(hosts)/sizeof(hosts[0]);++i)
+        CHECK(cfg_set(&c,"udp_backup_host",hosts[i],error,sizeof(error)));
+    for(i=0;i<sizeof(bad_hosts)/sizeof(bad_hosts[0]);++i)
+        CHECK(invalid_set(&c,"udp_backup_host",bad_hosts[i]));
+    CHECK(invalid_set(&c,"url","http://[:::1]/ingest"));
+    CHECK(invalid_set(&c,"url","http://[1:2:3:4:5:6:7]/ingest"));
+    CHECK(cfg_udp_backup_destination(&c,host,sizeof(host),&port,error,sizeof(error)));
+    CHECK(!strcmp(host,"2001:db8::1") && port==9001); /* Independent host override. */
+    CHECK(cfg_set(&c,"udp_backup_port","65000",error,sizeof(error)));
+    CHECK(cfg_set(&c,"udp_backup_host","auto",error,sizeof(error)));
+    CHECK(cfg_udp_backup_destination(&c,host,sizeof(host),&port,error,sizeof(error)));
+    CHECK(!strcmp(host,"::ffff:192.0.2.1") && port==65000); /* Independent port override. */
+
+    CHECK(cfg_set(&c,"url","http://example.com:65535/ingest",error,sizeof(error)));
+    CHECK(cfg_validate(&c,4,error,sizeof(error))); /* Explicit UDP port avoids overflow. */
+    CHECK(cfg_set(&c,"udp_backup_port","0",error,sizeof(error)));
+    strcpy(host,"sentinel"); port=17;
+    CHECK(!cfg_udp_backup_destination(&c,host,sizeof(host),&port,error,sizeof(error)));
+    CHECK(!host[0] && !port && error[0]);
+    CHECK(!cfg_validate(&c,4,error,sizeof(error)));
+    CHECK(cfg_set(&c,"udp_backup_enabled","0",error,sizeof(error)));
+    CHECK(cfg_validate(&c,4,error,sizeof(error)));
+    CHECK(cfg_set(&c,"url","-",error,sizeof(error)));
+    CHECK(cfg_validate(&c,4,error,sizeof(error)));
+    CHECK(cfg_set(&c,"udp_backup_enabled","1",error,sizeof(error)));
+    CHECK(!cfg_validate(&c,4,error,sizeof(error)));
+    CHECK(cfg_set(&c,"udp_backup_port","21001",error,sizeof(error)));
+    CHECK(!cfg_validate(&c,4,error,sizeof(error))); /* Host remains automatic. */
+    CHECK(cfg_set(&c,"udp_backup_host","::1",error,sizeof(error)));
+    CHECK(cfg_validate(&c,4,error,sizeof(error)));
+    CHECK(cfg_udp_backup_destination(&c,host,sizeof(host),&port,error,sizeof(error)));
+    CHECK(!strcmp(host,"::1") && port==21001);
+    CHECK(cfg_set(&c,"udp_backup_port","0",error,sizeof(error)));
+    CHECK(!cfg_validate(&c,4,error,sizeof(error))); /* Port remains automatic. */
+    CHECK(cfg_set(&c,"udp_backup_port","1",error,sizeof(error)));
+    saved=c;
+    CHECK(!cfg_udp_backup_destination(NULL,host,sizeof(host),&port,error,sizeof(error)));
+    CHECK(!host[0] && !port);
+    CHECK(!cfg_udp_backup_destination(&c,host,2,&port,error,sizeof(error)));
+    CHECK(!host[0] && !port);
+    memset(c.udp_backup_host,'x',sizeof(c.udp_backup_host));
+    CHECK(!cfg_udp_backup_destination(&c,host,sizeof(host),&port,error,sizeof(error))); c=saved;
+    memset(c.url,'x',sizeof(c.url));
+    CHECK(!cfg_udp_backup_destination(&c,host,sizeof(host),&port,error,sizeof(error))); c=saved;
+    strcpy(c.url,"http://PRIVATE_USER:PRIVATE_PASSWORD@example.com/path");
+    CHECK(!cfg_udp_backup_destination(&c,host,sizeof(host),&port,error,sizeof(error)));
+    CHECK(strstr(error,"PRIVATE")==NULL); c=saved;
+
+    (void)snprintf(path,sizeof(path),"tb-backup-config-%u.ini",process_id());
+    CHECK(cfg_save(path,&c,4,error,sizeof(error)));
+    CHECK(cfg_load(path,&loaded,4,error,sizeof(error)));
+    CHECK(loaded.udp_backup_enabled==c.udp_backup_enabled && loaded.udp_backup_port==c.udp_backup_port);
+    CHECK(!strcmp(loaded.udp_backup_host,c.udp_backup_host) && !strcmp(loaded.url,c.url));
+    for(i=42;i<45;++i) {
+        const char *key=cfg_field_name((unsigned)i);
+        const char *value=i==43 ? "auto" : "0";
+        (void)snprintf(duplicate,sizeof(duplicate),"url=-\nstream=s\nsession=x\n%s=%s\n%s=%s\n",
+                       key,value,key,value);
+        CHECK(invalid_file(path,duplicate,strlen(duplicate),&c));
+    }
+    CHECK(remove_utf8(path));
+    return 1;
+}
+
+static int check_direct_token(void)
+{
+    static const char credential[]="TEST_ONLY_direct.token-+/=_~";
+    static const char environment_name[]="MTR_TEST_DIRECT_TOKEN";
+    static const char manual[]="url=-\nstream=s\nsession=t\ntoken=TEST_ONLY_manual\n";
+    static const char *reserved[]={"dpapi:TEST_ONLY_literal","plain:TEST_ONLY_literal"};
+    tb_config c,loaded;
+    char error[192],path[128],text[8192],value[CFG_AUTH_TOKEN_BYTES+1];
+    char malformed[256];
+    FILE *file;
+    size_t n,i;
+    unsigned index=0;
+    while(index<cfg_field_count() && strcmp(cfg_field_name(index),"token")) ++index;
+    CHECK(valid_config(&c));
+    CHECK(index<cfg_field_count() && cfg_field_is_secret(index));
+    CHECK(!cfg_field_is_secret(0) && cfg_auth_token(NULL)==NULL);
+    CHECK(cfg_set(&c,"token_env",environment_name,error,sizeof(error)));
+#ifdef _WIN32
+    CHECK(_putenv_s(environment_name,"TEST_ONLY_environment")==0);
+#else
+    CHECK(setenv(environment_name,"TEST_ONLY_environment",1)==0);
+#endif
+    CHECK(!strcmp(cfg_auth_token(&c),"TEST_ONLY_environment"));
+    CHECK(cfg_set(&c,"token",credential,error,sizeof(error)));
+    CHECK(!strcmp(cfg_auth_token(&c),credential));
+    CHECK(cfg_field_value(&c,index,value,sizeof(value),0) && !strcmp(value,"********"));
+    CHECK(cfg_field_value(&c,index,value,sizeof(value),1) && !strcmp(value,credential));
+    CHECK(invalid_set(&c,"token","TEST_ONLY space"));
+    CHECK(invalid_set(&c,"token"," TEST_ONLY"));
+    CHECK(invalid_set(&c,"token","TEST_ONLY "));
+    CHECK(invalid_set(&c,"token","TEST_ONLY\r\nInjected:1"));
+    CHECK(invalid_set(&c,"token","TEST_ONLY\tvalue"));
+    CHECK(invalid_set(&c,"token","TEST_ONLY\x7f"));
+    CHECK(invalid_set(&c,"token","TEST_ONLY\x80"));
+    memset(value,'x',CFG_AUTH_TOKEN_MAX+1); value[CFG_AUTH_TOKEN_MAX+1]='\0';
+    CHECK(invalid_set(&c,"token",value));
+    value[CFG_AUTH_TOKEN_MAX]='\0';
+    CHECK(cfg_set(&c,"token",value,error,sizeof(error)));
+    (void)snprintf(path,sizeof(path),"test_direct_token_%u.ini",process_id());
+    CHECK(cfg_save(path,&c,4,error,sizeof(error)));
+    CHECK(cfg_load(path,&loaded,4,error,sizeof(error)));
+    CHECK(!memcmp(&loaded,&c,sizeof(c))); /* Maximum-length encrypted roundtrip. */
+    CHECK(cfg_set(&c,"token",credential,error,sizeof(error)));
+    CHECK(cfg_save(path,&c,4,error,sizeof(error)));
+    file=open_utf8(path,"rb"); CHECK(file!=NULL);
+    n=fread(text,1,sizeof(text)-1,file); text[n]='\0';
+    CHECK(!ferror(file) && fclose(file)==0);
+#ifdef _WIN32
+    CHECK(strstr(text,"token=dpapi:")!=NULL);
+    CHECK(strstr(text,credential)==NULL);
+    {
+        char *cipher=strstr(text,"token=dpapi:")+strlen("token=dpapi:");
+        CHECK(cipher[0]); cipher[0]=cipher[0]=='0' ? '1' : '0';
+        CHECK(invalid_file(path,text,strlen(text),&c));
+    }
+#else
+    {
+        struct stat metadata;
+        CHECK(strstr(text,credential)!=NULL);
+        CHECK(stat(path,&metadata)==0 && (metadata.st_mode&0777)==0600);
+    }
+#endif
+    for(i=0;i<sizeof(reserved)/sizeof(reserved[0]);++i) {
+        CHECK(cfg_set(&c,"token",reserved[i],error,sizeof(error)));
+        CHECK(cfg_save(path,&c,4,error,sizeof(error)));
+        CHECK(cfg_load(path,&loaded,4,error,sizeof(error)));
+        CHECK(!strcmp(loaded.token,reserved[i]));
+    }
+    CHECK(write_bytes(path,manual,sizeof(manual)-1));
+    CHECK(cfg_load(path,&loaded,4,error,sizeof(error)));
+    CHECK(!strcmp(loaded.token,"TEST_ONLY_manual"));
+    (void)snprintf(malformed,sizeof(malformed),"url=-\nstream=s\nsession=t\ntoken=dpapi:PRIVATE_BAD_HEX\n");
+    CHECK(invalid_file(path,malformed,strlen(malformed),&c));
+    (void)snprintf(malformed,sizeof(malformed),"url=-\nstream=s\nsession=t\ntoken=dpapi:00\n");
+    CHECK(invalid_file(path,malformed,strlen(malformed),&c));
+    (void)snprintf(malformed,sizeof(malformed),"url=-\nstream=s\nsession=t\ntoken=dpapi:\n");
+    CHECK(invalid_file(path,malformed,strlen(malformed),&c));
+    CHECK(cfg_set(&c,"token","",error,sizeof(error)));
+    CHECK(!strcmp(cfg_auth_token(&c),"TEST_ONLY_environment"));
+    CHECK(cfg_field_value(&c,index,value,sizeof(value),0) && !value[0]);
+    CHECK(cfg_save(path,&c,4,error,sizeof(error)));
+    CHECK(cfg_load(path,&loaded,4,error,sizeof(error)) && !loaded.token[0]);
+#ifdef _WIN32
+    CHECK(_putenv_s(environment_name,"")==0);
+#else
+    CHECK(unsetenv(environment_name)==0);
+#endif
+    CHECK(cfg_auth_token(&c)==NULL || !cfg_auth_token(&c)[0]);
+    CHECK(remove_utf8(path));
+    return 1;
+}
+
 int main(void)
 {
+    test_workdir directory;
+    int ok;
+    if(!test_workdir_enter(&directory)) return 1;
     (void)setlocale(LC_NUMERIC, "C");
-    if (!check_settings() || !check_redaction() || !check_files() || !check_mavlink_settings() || !check_udp_settings() || !check_spatial_settings()) return 1;
+    ok=check_settings() && check_field_registry() && check_tcp_buffer_settings() && check_redaction() && check_url_drafts() && check_files() && check_mavlink_settings() && check_udp_settings() && check_qgc_settings() && check_spatial_settings() && check_status_settings() && check_udp_backup_settings() && check_direct_token();
+    if(!test_workdir_leave(&directory)) ok=0;
+    if(!ok) return 1;
     printf("PASS %u configuration checks\n", checks);
     return 0;
 }

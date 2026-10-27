@@ -1,0 +1,77 @@
+{
+  "schema": "mavlink_router_status_v1",
+  "stream": "synthetic",
+  "records": [
+    {
+      "seq": "7",
+      "generation": "2",
+      "session": "synthetic.fixture",
+      "reported_monotonic_ms": "15000",
+      "run_elapsed_ms": "10000",
+      "sample_count": 0,
+      "source": {
+        "sysid": 1,
+        "compid": 1,
+        "endpoint": "COM4",
+        "state": "HEARTBEAT_LOST",
+        "serial_baud": 57600,
+        "connected": false,
+        "heartbeat": "LOST",
+        "hb_age_ms": "6000",
+        "data": "STALE",
+        "data_age_ms": "5500"
+      },
+      "weather": {
+        "temperature": {
+          "value": 298.15,
+          "unit": "K",
+          "state": "STALE",
+          "rx_age_ms": "7000",
+          "observations": "12"
+        },
+        "humidity": {
+          "value": null,
+          "unit": "1",
+          "state": "UNKNOWN",
+          "rx_age_ms": null,
+          "observations": "0"
+        }
+      },
+      "packets": {
+        "received": "240",
+        "estimated_lost": "3",
+        "duplicates": "1"
+      },
+      "devices": [
+        {
+          "sysid": 1,
+          "compid": 1,
+          "heartbeat": "LOST",
+          "hb_age_ms": "6000",
+          "data": "STALE",
+          "data_age_ms": "5500",
+          "rx_age_ms": "5500"
+        },
+        {
+          "sysid": 255,
+          "compid": 190,
+          "heartbeat": "LIVE",
+          "hb_age_ms": "100",
+          "data": "WAIT",
+          "data_age_ms": null,
+          "rx_age_ms": "100"
+        }
+      ],
+      "position": {
+        "source": "ESTGPS",
+        "state": "STALE",
+        "fix": 0,
+        "lat_deg": 37.0,
+        "lon_deg": 127.0,
+        "alt_msl_m": 100.0,
+        "rx_age_ms": "5500",
+        "stale_after_ms": 5000
+      }
+    }
+  ]
+}

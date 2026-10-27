@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(mavlink_telemetry_data_router VERSION 0.10.0 LANGUAGES C)
+project(mavlink_telemetry_data_router VERSION 0.11.0 LANGUAGES C)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
   message(FATAL_ERROR "Use an out-of-source build: cmake --preset windows-x64 or linux-x64")
@@ -14,6 +14,8 @@ foreach(config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
 endforeach()
 include(cmake/Architecture.cmake)
 include(GNUInstallDirs)
+configure_file(cmake/version.h.in generated/tb_version.h @ONLY)
+include_directories("${CMAKE_BINARY_DIR}/generated")
 # Developer tests are opt-in; ordinary builds produce only the two programs.
 option(BUILD_TESTING "Build developer verification programs" OFF)
 option(BUILD_TEST_SERVER "Build optional TCP HTTP diagnostic server" OFF)
@@ -30,15 +32,11 @@ add_subdirectory(src)
 
 install(FILES README.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
 install(FILES src/vendor/MAVLINK_COPYING.txt DESTINATION ${CMAKE_INSTALL_DOCDIR}/licenses)
-install(FILES docs/REFERENCE.md docs/REVIEW.md docs/SERVER_API.md docs/COLLABORATION.md DESTINATION ${CMAKE_INSTALL_DOCDIR}/docs)
+install(FILES src/vendor/mavlink/UPSTREAM.md DESTINATION ${CMAKE_INSTALL_DOCDIR}/licenses RENAME MAVLINK_UPSTREAM.md)
+install(FILES docs/REFERENCE.md docs/REVIEW.md docs/SERVER_API.md docs/UDP_BACKUP.md docs/COLLABORATION.md docs/PX4_MAVLINK_CONTRACT.md DESTINATION ${CMAKE_INSTALL_DOCDIR}/docs)
 install(DIRECTORY docs/api DESTINATION ${CMAKE_INSTALL_DOCDIR}/docs
   PATTERN "__pycache__" EXCLUDE PATTERN "*.pyc" EXCLUDE)
 install(DIRECTORY support/sharing DESTINATION ${CMAKE_INSTALL_DOCDIR}/support
-  PATTERN "__pycache__" EXCLUDE)
-install(DIRECTORY support/px4 DESTINATION ${CMAKE_INSTALL_DOCDIR}/support
-  PATTERN "__pycache__" EXCLUDE)
-# Keep the PX4 overlay installer and its independent source payload together.
-install(DIRECTORY src/px4/shtc3 src/px4/shtc3_probe src/px4/sens_atmos DESTINATION ${CMAKE_INSTALL_DOCDIR}/src/px4
   PATTERN "__pycache__" EXCLUDE)
 install(FILES examples/example.csv DESTINATION ${CMAKE_INSTALL_DOCDIR}/examples)
 install(FILES config/telemetry.ini.example config/shtc3-physical.ini.example DESTINATION ${CMAKE_INSTALL_DOCDIR}/config)
@@ -54,5 +52,5 @@ else()
 endif()
 set(CPACK_SOURCE_GENERATOR "ZIP;TGZ")
 set(CPACK_SOURCE_PACKAGE_FILE_NAME "mavlink_telemetry_data_router-${PROJECT_VERSION}-source")
-set(CPACK_SOURCE_IGNORE_FILES "/\\.git/;/\\.build[^/]*/;/build[^/]*/;/dist/;/install/;/stage/;/__pycache__/;/CMakeUserPresets\\.json$;/telemetry\\.ini$;\\.ini\\.tmp\\.;\\.pyc$;\\.exe$;\\.zip$;\\.tar\\.gz$")
+set(CPACK_SOURCE_IGNORE_FILES "/\\.git/;/\\.build[^/]*/;/build[^/]*/;/release/;/dist/;/install/;/stage/;/src/px4/;/support/px4/;/__pycache__/;/CMakeUserPresets\\.json$;/\\.env[^/]*$;\\.ini$;\\.ini\\.tmp\\.;\\.log$;\\.bundle$;\\.pyc$;\\.exe$;\\.zip$;\\.tar\\.gz$")
 include(CPack)

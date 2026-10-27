@@ -3,6 +3,8 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "monitor.h"
+#include "monitor_frame.h"
+#include "status_report.h"
 #include <inttypes.h>
 #include <math.h>
 #include <stdarg.h>
@@ -24,17 +26,6 @@
 typedef char tm_snapshot_under_64k[(sizeof(tm_snapshot)<=65536u) ? 1 : -1];
 
 enum { KEY_NONE=0, KEY_UP=256, KEY_DOWN, KEY_ENTER, KEY_ESCAPE, KEY_BACK, KEY_CLEAR };
-enum { FIELD_COUNT=37 };
-static const char *const fields[FIELD_COUNT]={
-    "url","stream","session","token_env","origin_lat","origin_lon","origin_alt",
-    "send_interval_ms","connect_timeout_ms","io_timeout_ms","max_windows",
-    "refresh_ms","idle_warn_ms","ack_warn_ms","summary",
-    "input_mode","serial_port","serial_baud","websocket_url","auto_scan","probe_ms",
-    "link_timeout_ms","reconnect_ms","target_system","target_component",
-    "system_time_uncert_us","accel_bound_mps2","duration_ms","unit_map","origin_auto",
-    "udp_bind","udp_port","udp_enabled",
-    "spatial_step_m","spatial_gap_ms","spatial_enabled","spatial_adaptive"
-};
 typedef struct {
     int ansi, input_ready, csv_console;
     unsigned cleanup_mask;
@@ -78,8 +69,6 @@ static void wait_tick(void)
 #endif
 }
 static uint64_t elapsed(uint64_t now,uint64_t before)
-{ return now>=before ? now-before : 0; }
-static uint64_t delta(uint64_t now,uint64_t before)
 { return now>=before ? now-before : 0; }
 
 
@@ -260,9 +249,24 @@ static unsigned terminal_columns(void)
 #endif
     return 80;
 }
-typedef struct { FILE *out; unsigned columns, used, lines, max_lines; } writer;
-/* One bounded line at a time, never a full screen allocation. Console lines
- * are clipped before the last column so long keys/URLs cannot wrap the frame. */
+typedef struct {
+    FILE *out;
+    unsigned columns, used, lines, max_lines;
+    mf_frame *frame;
+} writer;
+/* Text and colour share the same sink. Interactive frames stay in bounded
+ * RAM until presentation; redirected output remains plain full snapshots. */
+static void write_bytes(writer *w,const char *text,size_t length)
+{
+    if(w->frame) (void)mf_append(w->frame,text,length);
+    else (void)fwrite(text,1,length,w->out);
+}
+static void write_control(writer *w,const char *control)
+{
+    if(!w->max_lines || w->lines<w->max_lines)
+        write_bytes(w,control,strlen(control));
+}
+/* Clip before the last column so long keys/URLs cannot wrap the frame. */
 static void write_text(writer *w,const char *fmt,...)
 {
     char text[2304];
@@ -272,9 +276,9 @@ static void write_text(writer *w,const char *fmt,...)
     va_start(ap,fmt); (void)vsnprintf(text,sizeof(text),fmt,ap); va_end(ap);
     for(p=(const unsigned char *)text;*p;++p) {
         if(w->max_lines && w->lines>=w->max_lines) break;
-        if(*p=='\n') { (void)fputc('\n',w->out); w->used=0; ++w->lines; }
+        if(*p=='\n') { write_bytes(w,"\n",1); w->used=0; ++w->lines; }
         else {
-            if(!w->columns || w->used+1<w->columns) (void)fputc(*p,w->out);
+            if(!w->columns || w->used+1<w->columns) write_bytes(w,(const char *)p,1);
             ++w->used;
         }
     }
@@ -342,8 +346,8 @@ static void compute_rates(rates *r,const tm_snapshot *s,const tm_snapshot *old,i
     memset(r,0,sizeof(*r));
     dt=(double)elapsed(s->now_ms,have_old ? old->now_ms : s->started_ms)/1000;
     if(dt<=0) return;
-    r->accepted=(double)delta(s->accepted,have_old ? old->accepted : 0)/dt;
-    r->bytes=(double)delta(s->input_bytes,have_old ? old->input_bytes : 0)/dt;
+    r->accepted=(double)elapsed(s->accepted,have_old ? old->accepted : 0)/dt;
+    r->bytes=(double)elapsed(s->input_bytes,have_old ? old->input_bytes : 0)/dt;
     /* At most 16*16 short comparisons, only in the monitoring thread. */
     for(i=0;i<s->key_n && i<TB_MAX_KEYS;++i) {
         uint64_t previous=0;
@@ -351,7 +355,7 @@ static void compute_rates(rates *r,const tm_snapshot *s,const tm_snapshot *old,i
             if(!strncmp(s->keys[i].key,old->keys[j].key,TB_KEY_BYTES)) {
                 previous=old->keys[j].observations; break;
             }
-        r->key[i]=(double)delta(s->keys[i].observations,previous)/dt;
+        r->key[i]=(double)elapsed(s->keys[i].observations,previous)/dt;
     }
 }
 /* HEARTBEAT enums identify the device; component IDs are not device kinds. */
@@ -421,48 +425,117 @@ static void render_weather(writer *w,const tm_snapshot *s,const tb_config *c,con
     else write_text(w,"unknown");
     write_text(w,"\n");
     receipt_age(s,temperature,t_age); receipt_age(s,humidity,h_age);
-    write_text(w,"weather Hz=%.1f/%.1f age=%s/%sms boot=",temperature ? r->key[ti] : 0,humidity ? r->key[hi] : 0,t_age,h_age);
+    write_text(w,"weather Hz=%.1f/%.1f rx_age=%s/%sms boot=",temperature ? r->key[ti] : 0,humidity ? r->key[hi] : 0,t_age,h_age);
     if(have_t && have_h && temperature->t_us && temperature->t_us==humidity->t_us)
         write_text(w,"%" PRIu64 "us\n",temperature->t_us);
     else if(have_t && have_h && temperature->t_us && humidity->t_us)
         write_text(w,"%" PRIu64 "/%" PRIu64 "us\n",temperature->t_us,humidity->t_us);
     else write_text(w,"unknown\n");
 }
-static void render_location(writer *w,const tm_snapshot *s,int ansi)
+static void render_location(writer *w,const tm_snapshot *s,const tb_config *c,int ansi)
 {
-    const char *kind="UNKNOWN";
-    int valid=s->have_geodetic && isfinite(s->latitude_deg) && isfinite(s->longitude_deg) &&
-        isfinite(s->altitude_msl_m) && s->latitude_deg>=-90 && s->latitude_deg<=90 &&
-        s->longitude_deg>=-180 && s->longitude_deg<=180;
-    if(s->position_kind==TM_POSITION_NO_ANCHOR) { kind="NO_ANCHOR"; valid=0; }
-    else if(valid && s->position_kind==TM_POSITION_GPS) kind="GPS";
-    else if(valid && s->position_kind==TM_POSITION_ESTGPS) kind="ESTGPS";
-    else valid=0;
+    const int valid=sr_position_known(s);
+    const char *kind=valid ? sr_position_source(s) :
+        s->position_kind==TM_POSITION_NO_ANCHOR ? "NO_ANCHOR" : "UNKNOWN";
+    const char *state=sr_position_state(s,c);
     write_text(w,"position=");
-    if(ansi) fputs(valid && s->position_kind==TM_POSITION_GPS ? "\033[32m" : "\033[33m",w->out);
+    if(ansi) write_control(w,!strcmp(state,"LIVE") ? "\033[32m" : "\033[33m");
     write_text(w,"%s",kind);
-    if(ansi) fputs("\033[0m",w->out);
-    write_text(w," fix=%u last_fix_age=",s->gps_fix);
-    if(s->have_fix_age) write_text(w,"%" PRIu64 "ms",s->last_fix_age_ms);
+    if(ansi) write_control(w,"\033[0m");
+    write_text(w," state=%s rx_age=",state);
+    if(valid && s->now_ms>=s->navigation_received_ms)
+        write_text(w,"%" PRIu64 "ms",s->now_ms-s->navigation_received_ms);
     else write_text(w,"unknown");
-    write_text(w," error=");
-    if(valid && s->have_position_error && isfinite(s->estimated_error_m) && s->estimated_error_m>=0)
-        write_text(w,"%.3gm\n",s->estimated_error_m);
-    else write_text(w,"unknown\n");
+    write_text(w," fix=%u\n",s->gps_fix);
     if(valid) write_text(w,"geo lat=%.7f lon=%.7f alt_msl=%.2fm\n",s->latitude_deg,s->longitude_deg,s->altitude_msl_m);
 }
-static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
-                            const rates *r,unsigned first,unsigned max_keys,unsigned columns,int show_devices,int ansi)
+static int receipt_fresh(int known,uint64_t received,uint64_t now,unsigned timeout)
+{ return !strcmp(sr_receipt_state(known,received,now,timeout,"STALE"),"LIVE"); }
+
+/* Display bands, not flight-controller failsafe thresholds or a voltage-based
+ * charge estimate. Unknown and stale readings never use a healthy colour. */
+enum { BATTERY_CRITICAL_PERCENT=20, BATTERY_LOW_PERCENT=40, BATTERY_BAR_CELLS=10 };
+typedef enum { BATTERY_UNKNOWN, BATTERY_STALE, BATTERY_VOLTAGE_ONLY,
+               BATTERY_CRITICAL, BATTERY_LOW, BATTERY_OK } battery_display_state;
+
+static void render_battery(writer *w,const tm_snapshot *s,const tb_config *c,int ansi)
 {
-    writer w={out,columns,0,0,0};
+    const mi_battery *b=&s->battery;
+    int voltage=(b->flags&MI_BATTERY_HAVE_VOLTAGE)!=0;
+    int remaining=(b->flags&MI_BATTERY_HAVE_REMAINING)!=0 && b->remaining_percent<=100;
+    int known=voltage || remaining;
+    int fresh=!s->stop && !s->eof && !s->failed && !strcmp(s->source_status,"LOCKED") &&
+        receipt_fresh(s->have_heartbeat,s->heartbeat_received_ms,s->now_ms,c->link_timeout_ms) &&
+        (!voltage || mi_battery_field_fresh(b,MI_BATTERY_HAVE_VOLTAGE,s->now_ms)) &&
+        (!remaining || mi_battery_field_fresh(b,MI_BATTERY_HAVE_REMAINING,s->now_ms));
+    battery_display_state state=!known ? BATTERY_UNKNOWN : !fresh ? BATTERY_STALE :
+        !remaining ? BATTERY_VOLTAGE_ONLY : b->remaining_percent<=BATTERY_CRITICAL_PERCENT ? BATTERY_CRITICAL :
+        b->remaining_percent<=BATTERY_LOW_PERCENT ? BATTERY_LOW : BATTERY_OK;
+    const char *colour=state==BATTERY_OK ? "\033[1;32m" : state==BATTERY_LOW ? "\033[1;33m" :
+        state==BATTERY_CRITICAL ? "\033[1;31m" : state==BATTERY_VOLTAGE_ONLY ? "\033[1m" : "\033[1;90m";
+    unsigned i,filled=remaining ? (unsigned)b->remaining_percent*BATTERY_BAR_CELLS/100u : 0;
+    if(ansi) write_control(w,colour);
+    write_text(w,"BATTERY");
+    if(b->source==MI_BATTERY_SOURCE_BATTERY_STATUS) write_text(w," #%u",(unsigned)b->id);
+    if(voltage) write_text(w," %.2f V",(double)b->voltage_mv/1000.0);
+    else write_text(w," unknown V");
+    write_text(w," | ");
+    if(remaining) {
+        write_text(w,"%u%% [",(unsigned)b->remaining_percent);
+        for(i=0;i<BATTERY_BAR_CELLS;++i) write_text(w,"%c",i<filled ? '#' : '-');
+        write_text(w,"]");
+    } else write_text(w,"remaining=unknown");
+    if(state==BATTERY_STALE) write_text(w," STALE");
+    else if(state==BATTERY_CRITICAL) write_text(w," CRITICAL");
+    else if(state==BATTERY_LOW) write_text(w," LOW");
+    else if(state==BATTERY_OK) write_text(w," OK");
+    else if(state==BATTERY_UNKNOWN) write_text(w," WAIT");
+    if(ansi) write_control(w,"\033[0m");
+    write_text(w," | rx_age=");
+    if(b->source!=MI_BATTERY_SOURCE_NONE && s->now_ms>=b->received_ms)
+        write_text(w,"%" PRIu64 "ms",elapsed(s->now_ms,b->received_ms));
+    else write_text(w,"unknown");
+    write_text(w,"\n");
+}
+
+static void render_receipt(writer *w,const char *label,const char *age_label,int known,uint64_t received,
+                           const tm_snapshot *s,const tb_config *c,const char *stale,int ansi)
+{
+    const char *state=sr_receipt_state(known,received,s->now_ms,c->link_timeout_ms,stale);
+    write_text(w," %s=",label);
+    if(ansi) write_control(w,!strcmp(state,"LIVE") ? "\033[32m" : known ? "\033[31m" : "\033[33m");
+    write_text(w,"%s",state);
+    if(ansi) write_control(w,"\033[0m");
+    write_text(w," %s=",age_label);
+    if(known) write_text(w,"%" PRIu64 "ms",elapsed(s->now_ms,received));
+    else write_text(w,"unknown");
+}
+
+static void render_link(writer *w,const tm_snapshot *s,const tb_config *c,int ansi)
+{
+    uint64_t unique=elapsed(s->received_packets,s->duplicate_packets);
+    double expected=(double)unique+(double)s->estimated_sequence_gaps;
+    write_text(w,"vehicle %u.%u",s->selected_system,s->selected_component);
+    render_receipt(w,"heartbeat","hb_age",s->have_heartbeat,s->heartbeat_received_ms,s,c,"LOST",ansi);
+    render_receipt(w,"data","data_age",s->have_data,s->data_received_ms,s,c,"STALE",ansi);
+    write_text(w,"\npackets rx=%" PRIu64 " gap~=%" PRIu64 " loss~=",s->received_packets,s->estimated_sequence_gaps);
+    if(expected>0) write_text(w,"%.2f%%",100.0*(double)s->estimated_sequence_gaps/expected);
+    else write_text(w,"unknown");
+    write_text(w," dup=%" PRIu64 " (link session)\n",s->duplicate_packets);
+}
+
+static void render_snapshot(writer *output,const tm_snapshot *s,const tb_config *c,
+                            const rates *r,unsigned first,unsigned max_keys,int show_devices,int ansi)
+{
+    writer w=*output;
+    unsigned columns=w.columns;
     char endpoint[2048], source_name[256];
     int mav=strcmp(c->input_mode,"csv")!=0;
     int compact=mav && columns;
-    if(columns) { unsigned rows=terminal_rows(); w.max_lines=rows>2 ? rows-2 : 1; }
     unsigned i,last,n=s->key_n<TB_MAX_KEYS ? s->key_n : TB_MAX_KEYS;
     uint64_t idle=elapsed(s->now_ms,s->last_receipt_ms ? s->last_receipt_ms : s->started_ms);
     uint64_t ack_age=elapsed(s->now_ms,s->last_success_ms ? s->last_success_ms : s->started_ms);
-    const char *token=c->token_env[0] ? getenv(c->token_env) : NULL;
+    const char *token=cfg_auth_token(c);
     int stale=s->have_clock && (
         (s->last_anchor_receipt_ms && elapsed(s->now_ms,s->last_anchor_receipt_ms)>TC_EXTRAPOLATE_US/1000) ||
         (s->last_boot_us>s->clock.last_boot_us && s->last_boot_us-s->clock.last_boot_us>TC_EXTRAPOLATE_US));
@@ -470,20 +543,49 @@ static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
         s->consecutive_failures && s->queue_count ? "RETRY" :
         idle>=c->idle_warn_ms && s->current_observations ? "WAIT_WATERMARK" :
         idle>=c->idle_warn_ms ? "IDLE" : "RECEIVING";
+    const char *source_status=sr_source_state(s,c);
+    if(mav && !s->failed) {
+        if(!s->have_heartbeat) health="WAIT_HEARTBEAT";
+        else if(!receipt_fresh(s->have_heartbeat,s->heartbeat_received_ms,s->now_ms,c->link_timeout_ms)) health="HEARTBEAT_LOST";
+        else if(!s->have_data) health="WAIT_DATA";
+        else if(!receipt_fresh(s->have_data,s->data_received_ms,s->now_ms,c->link_timeout_ms)) health="DATA_STALE";
+    }
     const char *utc_status=!s->utc_us ? "UNKNOWN" : stale ? "STALE" : "ESTIMATED";
     cfg_safe_url(c->url,endpoint,sizeof(endpoint));
     if(strstr(s->active_source,"://") && strncmp(s->active_source,"udp://",6)) cfg_safe_url(s->active_source,source_name,sizeof(source_name));
     else (void)snprintf(source_name,sizeof(source_name),"%.*s",255,s->active_source);
-    write_text(&w,"[monitor] state=%s mode=%s uptime=%.1fs boundary=%s\n",
+    write_text(&w,"[monitor] state=%s mode=%s run_elapsed=%.1fs boundary=%s\n",
             status(s),s->test_mode ? "TEST-HTTP" : s->dry_run ? "DRY" : "HTTP",(double)elapsed(s->now_ms,s->started_ms)/1000,
             mav ? (s->test_mode==2 ? "MAVLink-test-weather" : s->test_mode==1 ? "MAVLink-test-HB+position" : "MAVLink") : "normalized-CSV");
+    if(mav) render_battery(&w,s,c,ansi);
     write_text(&w,"ACTIVE endpoint=%s\n",endpoint);
+    if(c->udp_backup_enabled) {
+        const char *backup_state=!s->backup_ready ? "WAIT" : s->backup_error ? "ERROR" : "READY";
+        write_text(&w,"BACKUP UDP %s%s%s:%u %s sent=%" PRIu64 " immediate drop=%" PRIu64 " errors=%" PRIu64,
+            strchr(s->backup_host,':') ? "[" : "",s->backup_host[0] ? s->backup_host : "auto",
+            strchr(s->backup_host,':') ? "]" : "",s->backup_port,backup_state,s->backup_messages,
+            s->backup_dropped,s->backup_errors);
+        if(s->backup_error) write_text(&w," err=%u",s->backup_error);
+        write_text(&w," (no ACK)\n");
+    }
+    if(mav && c->status_interval_ms) {
+        write_text(&w,"STATUS every=%ums tries=%" PRIu64 " ack=%" PRIu64 " fail=%" PRIu64 " HTTP=%ld ack_age=",
+            c->status_interval_ms,s->status_attempts,s->status_acks,s->status_failures,s->status_http_status);
+        if(s->last_status_success_ms) write_text(&w,"%" PRIu64 "ms",elapsed(s->now_ms,s->last_status_success_ms));
+        else write_text(&w,"unknown");
+        if(s->status_error_code) write_text(&w," err=%u",s->status_error_code);
+        write_text(&w,"\n");
+    }
+    if(s->config_restarts || s->restarting || s->restart_notice[0]) {
+        write_text(&w,"config restarts=%u refresh=%ums\n",s->config_restarts,c->refresh_ms);
+        if(s->restart_notice[0]) write_text(&w,"config status=%.159s\n",s->restart_notice);
+    }
     if(!compact && mav && c->origin_auto)
         write_text(&w,"ACTIVE stream=%.64s session=%.64s origin=auto(GLOBAL_POSITION_INT/MSL)\n",c->stream,c->session);
     else if(!compact) write_text(&w,"ACTIVE stream=%.64s session=%.64s origin=(%.7g,%.7g,%.7g)\n",
             c->stream,c->session,c->origin[0],c->origin[1],c->origin[2]);
-    write_text(&w,"ACTIVE interval=%ums connect=%ums io=%ums max_windows=%u summary=%d\n",
-            c->send_interval_ms,c->connect_timeout_ms,c->io_timeout_ms,c->max_windows,c->summary);
+    write_text(&w,"ACTIVE interval=%ums HTTP gap=%ums connect=%ums io=%ums max_windows=%u summary=%d\n",
+            c->send_interval_ms,c->http_min_interval_ms,c->connect_timeout_ms,c->io_timeout_ms,c->max_windows,c->summary);
     if(mav) {
         if(!compact) write_text(&w,"ACTIVE UDP enabled=%u bind=%.63s:%u (receive-only)\n",
                 c->udp_enabled,c->udp_bind,c->udp_port);
@@ -491,15 +593,32 @@ static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
          * LOCKED is published only after valid MAVLink and device identity;
          * merely opening a port or seeing unidentified traffic stays yellow. */
         write_text(&w,"source status=");
-        if(ansi) fputs(s->failed ? "\033[31m" :
-                !s->stop && !s->eof && !strcmp(s->source_status,"LOCKED") ? "\033[32m" : "\033[33m",out);
-        write_text(&w,"%.31s",s->source_status[0] ? s->source_status : "WAITING");
-        if(ansi) fputs("\033[0m",out);
-        write_text(&w," active=%s\n",source_name[0] ? source_name : "none");
+        if(ansi) write_control(&w,s->failed ? "\033[31m" :
+                !s->stop && !s->eof && !strcmp(source_status,"LOCKED") ? "\033[32m" : "\033[33m");
+        write_text(&w,"%.31s",source_status);
+        if(ansi) write_control(&w,"\033[0m");
+        write_text(&w," active=%s",source_name[0] ? source_name : "none");
+        if(s->serial_baud) write_text(&w," baud=%u",s->serial_baud);
+        write_text(&w,"\n");
         if(s->source_error[0]) write_text(&w,"source error=%.159s\n",s->source_error);
+        write_text(&w,"QGC UDP %.63s:%u state=%.31s tx=%" PRIu64 " rx=%" PRIu64 " frames\n",
+                c->qgc_host,c->qgc_port,!c->qgc_enabled ? "DISABLED" :
+                s->qgc_status[0] ? s->qgc_status : "WAIT_SERIAL",s->qgc_tx_frames,s->qgc_rx_frames);
+        if(!compact || s->qgc_local_port || s->qgc_dropped || s->qgc_errors)
+            write_text(&w,"QGC local_port=%u tx_bytes=%" PRIu64 " rx_bytes=%" PRIu64
+                    " drop=%" PRIu64 " errors=%" PRIu64 "\n",s->qgc_local_port,
+                    s->qgc_tx_bytes,s->qgc_rx_bytes,s->qgc_dropped,s->qgc_errors);
+        if(s->qgc_error[0]) write_text(&w,"QGC error=%.159s\n",s->qgc_error);
+        if(c->mavlink_rates_enabled) {
+            write_text(&w,"rates %s rx=%u budget=%u B/s scale~%u%% ack=%" PRIu64 " refused=%" PRIu64 " timeout=%" PRIu64 "\n",
+                mr_state_name(s->rates.state),s->rates.observed_bps,s->rates.budget_bps,
+                s->rates.rate_scale_milli ? s->rates.rate_scale_milli/10u : 100u,
+                s->rates.accepted,s->rates.unsupported,s->rates.timed_out);
+        }
     }
     if(mav) {
-        render_weather(&w,s,c,r); render_location(&w,s,ansi);
+        render_link(&w,s,c,ansi);
+        render_weather(&w,s,c,r); render_location(&w,s,c,ansi);
         if(c->spatial_enabled) {
             write_text(&w,"spatial target=%.3gm effective=",c->spatial_step_m);
             if(s->spatial_known) write_text(&w,"%.3gm path=%.2fm",s->spatial_effective_m,s->spatial_distance_m);
@@ -517,9 +636,14 @@ static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
     if(!compact || s->sequence_gaps || s->raw_dropped || s->queue_windows_dropped || s->queue_samples_dropped)
     write_text(&w,"loss gaps=%" PRIu64 " raw=%" PRIu64 " queue_windows=%" PRIu64 " queue_samples=%" PRIu64 "\n",
             s->sequence_gaps,s->raw_dropped,s->queue_windows_dropped,s->queue_samples_dropped);
-    write_text(&w,"queue windows=%u/%u inflight=%u oldest=%" PRIu64 "ms current=%u raw=%u/%u\n",
-            s->queue_count,s->queue_capacity,s->inflight_windows,s->oldest_age_ms,
+    write_text(&w,"queue records=%u inflight=%u oldest=%" PRIu64 "ms current=%u raw=%u/%u\n",
+            s->queue_count,s->inflight_windows,s->oldest_age_ms,
             s->current_observations,s->current_raw,s->raw_capacity);
+    if(compact) write_text(&w,"TCP memory=%.2f/%.0f MiB peak=%.2f MiB\n",
+            (double)s->tcp_buffer_bytes/CFG_MIB_BYTES,(double)s->tcp_buffer_limit/CFG_MIB_BYTES,
+            (double)s->tcp_buffer_high_water/CFG_MIB_BYTES);
+    else write_text(&w,"tcp_buffer bytes=%" PRIu64 " limit=%" PRIu64 " high_water=%" PRIu64 " allocation_failures=%" PRIu64 "\n",
+            s->tcp_buffer_bytes,s->tcp_buffer_limit,s->tcp_buffer_high_water,s->tcp_allocation_failures);
     if(!compact) write_text(&w,"event boot=%" PRIu64 "us watermark=%" PRIu64 "us open_window=%" PRIu64 "us\n",
             s->last_boot_us,s->watermark_us,s->current_window_us);
     if(!compact) write_text(&w,"network attempts=%" PRIu64 " acks=%" PRIu64 " failures=%" PRIu64 " dry_releases=%" PRIu64
@@ -530,8 +654,10 @@ static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
     else write_text(&w,"HTTP status=%ld error=%u consecutive=%u bytes_attempted=%" PRIu64
             " net_rtt=%.1fms encode=%.3fms\n",
             s->http_status,s->error_code,s->consecutive_failures,s->net_sent_bytes,s->last_rtt_ms,s->last_encode_ms);
-    write_text(&w,"health=%s input_idle=%" PRIu64 "ms last_ack_age=%" PRIu64 "ms%s\n",
-            health,idle,ack_age,!s->dry_run && s->queue_count && ack_age>=c->ack_warn_ms ? " WARN" : "");
+    write_text(&w,"health=%s input_idle=%" PRIu64 "ms last_%s_age=",health,idle,s->dry_run ? "output" : "ack");
+    if(s->last_success_ms) write_text(&w,"%" PRIu64 "ms",ack_age);
+    else write_text(&w,"unknown");
+    write_text(&w,"%s\n",!s->dry_run && s->queue_count && ack_age>=c->ack_warn_ms ? " WARN" : "");
     if(mav) {
         write_text(&w,"MAVLink frames=%" PRIu64 " crc_bad=%" PRIu64 " unknown=%" PRIu64 "\n",
                 s->parsed_frames,s->bad_crc,s->unknown_message);
@@ -549,11 +675,12 @@ static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
         write_text(&w,"selected=%u.%u gps_fix=%u devices=%u\n",
                 s->selected_system,s->selected_component,s->gps_fix,s->device_n);
     } else write_text(&w,"decoder=external CRC=n/a fix=n/a boundary=normalized-CSV\n");
-    if(!compact) write_text(&w,"auth token_env=%.64s token=%s (credential value hidden)\n",
-            c->token_env[0] ? c->token_env : "(none)",token && token[0] ? "set" : "missing");
+    if(!compact) write_text(&w,"auth token_env=%.64s token=%s source=%s (credential value hidden)\n",
+            c->token_env[0] ? c->token_env : "(none)",token && token[0] ? "set" : "missing",
+            c->token[0] ? "direct" : "environment");
     if(s->have_clock) {
         if(compact) {
-            write_text(&w,"UTC=%s n=%u drift=%.3gppm res=%.3gus age=",utc_status,
+            write_text(&w,"UTC=%s n=%u drift=%.3gppm res=%.3gus anchor_age=",utc_status,
                     (unsigned)s->clock.count,s->clock.drift_ppm,s->clock.residual_std_us);
             if(s->last_anchor_receipt_ms) write_text(&w,"%" PRIu64 "ms\n",elapsed(s->now_ms,s->last_anchor_receipt_ms));
             else write_text(&w,"unknown\n");
@@ -584,8 +711,7 @@ static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
         else write_text(&w,"unknown absolute_uncert=n/a\n");
     }
     if(columns) {
-        unsigned rows=terminal_rows();
-        unsigned available=rows>w.lines+4 ? rows-w.lines-4 : 0;
+        unsigned available=w.max_lines>w.lines+1 ? w.max_lines-w.lines-1 : 0;
         if(max_keys>available) max_keys=available;
     }
     if(!show_devices || !columns || !mav) {
@@ -608,112 +734,86 @@ static void render_snapshot(FILE *out,const tm_snapshot *s,const tb_config *c,
         unsigned visible=columns ? max_keys : TM_MAX_DEVICES;
         if(begin>count) begin=count;
         last=count-begin>visible ? begin+visible : count;
-        write_text(&w,"devices %u-%u/%u (sys.comp type autopilot mode status age)\n",
+        write_text(&w,"devices %u-%u/%u (sys.comp type autopilot mode status rx_age)\n",
                 last>begin ? begin+1 : 0,last,count);
         for(i=begin;i<last;++i) {
             const tm_device *d=&s->devices[i];
             if(d->have_heartbeat)
-                write_text(&w,"  %u.%u %s(%u) %s(%u) b=%u m=%" PRIu32 " s=%u age=%" PRIu64 "ms\n",
+                write_text(&w,"  %u.%u %s(%u) %s(%u) b=%u m=%" PRIu32 " s=%u rx_age=%" PRIu64 "ms\n",
                         (unsigned)d->sysid,(unsigned)d->compid,device_type(d->type),(unsigned)d->type,
                         device_autopilot(d->autopilot),(unsigned)d->autopilot,(unsigned)d->base_mode,
                         d->custom_mode,(unsigned)d->system_status,elapsed(s->now_ms,d->last_seen_ms));
-            else write_text(&w,"  %u.%u unknown (no HEARTBEAT) age=%" PRIu64 "ms\n",
+            else write_text(&w,"  %u.%u unknown (no HEARTBEAT) rx_age=%" PRIu64 "ms\n",
                         (unsigned)d->sysid,(unsigned)d->compid,elapsed(s->now_ms,d->last_seen_ms));
         }
     }
+    *output=w;
 }
 void tm_render(FILE *out,const tm_snapshot *s,const tb_config *c)
 {
     rates r;
+    writer w={out,0,0,0,0,NULL};
     if(!out || !s || !c) return;
     compute_rates(&r,s,s,0);
-    render_snapshot(out,s,c,&r,0,TB_MAX_KEYS,0,0,0);
+    render_snapshot(&w,s,c,&r,0,TB_MAX_KEYS,0,0);
     (void)fflush(out);
 }
-static void field_value(const tb_config *c,unsigned field,char *buf,size_t cap,int reveal_url)
+static void render_editor(writer *output,const editor *e,unsigned rows)
 {
-    switch(field) {
-    case 0: if(reveal_url) (void)snprintf(buf,cap,"%s",c->url); else cfg_safe_url(c->url,buf,cap); break;
-    case 1: (void)snprintf(buf,cap,"%s",c->stream); break;
-    case 2: (void)snprintf(buf,cap,"%s",c->session); break;
-    case 3: (void)snprintf(buf,cap,"%s",c->token_env); break;
-    case 4: case 5: case 6: (void)snprintf(buf,cap,"%.17g",c->origin[field-4]); break;
-    case 7: (void)snprintf(buf,cap,"%u",c->send_interval_ms); break;
-    case 8: (void)snprintf(buf,cap,"%u",c->connect_timeout_ms); break;
-    case 9: (void)snprintf(buf,cap,"%u",c->io_timeout_ms); break;
-    case 10: (void)snprintf(buf,cap,"%u",c->max_windows); break;
-    case 11: (void)snprintf(buf,cap,"%u",c->refresh_ms); break;
-    case 12: (void)snprintf(buf,cap,"%u",c->idle_warn_ms); break;
-    case 13: (void)snprintf(buf,cap,"%u",c->ack_warn_ms); break;
-    case 14: (void)snprintf(buf,cap,"%d",c->summary); break;
-    case 15: (void)snprintf(buf,cap,"%s",c->input_mode); break;
-    case 16: (void)snprintf(buf,cap,"%s",c->serial_port); break;
-    case 17: (void)snprintf(buf,cap,"%u",c->serial_baud); break;
-    case 18: if(reveal_url) (void)snprintf(buf,cap,"%s",c->websocket_url); else cfg_safe_url(c->websocket_url,buf,cap); break;
-    case 19: (void)snprintf(buf,cap,"%u",c->auto_scan); break;
-    case 20: (void)snprintf(buf,cap,"%u",c->probe_ms); break;
-    case 21: (void)snprintf(buf,cap,"%u",c->link_timeout_ms); break;
-    case 22: (void)snprintf(buf,cap,"%u",c->reconnect_ms); break;
-    case 23: (void)snprintf(buf,cap,"%u",c->target_system); break;
-    case 24: (void)snprintf(buf,cap,"%u",c->target_component); break;
-    case 25: (void)snprintf(buf,cap,"%u",c->system_time_uncert_us); break;
-    case 26: (void)snprintf(buf,cap,"%.17g",c->accel_bound_mps2); break;
-    case 27: (void)snprintf(buf,cap,"%u",c->duration_ms); break;
-    case 28: (void)snprintf(buf,cap,"%s",c->unit_map); break;
-    case 29: (void)snprintf(buf,cap,"%u",c->origin_auto); break;
-    case 30: (void)snprintf(buf,cap,"%s",c->udp_bind); break;
-    case 31: (void)snprintf(buf,cap,"%u",c->udp_port); break;
-    case 32: (void)snprintf(buf,cap,"%u",c->udp_enabled); break;
-    case 33: (void)snprintf(buf,cap,"%.17g",c->spatial_step_m); break;
-    case 34: (void)snprintf(buf,cap,"%u",c->spatial_gap_ms); break;
-    case 35: (void)snprintf(buf,cap,"%d",c->spatial_enabled); break;
-    case 36: (void)snprintf(buf,cap,"%d",c->spatial_adaptive); break;
-    default: if(cap) buf[0]='\0'; break;
-    }
-}
-static void render_editor(FILE *out,const editor *e,unsigned rows,unsigned columns)
-{
-    writer w={out,columns,0,0,0};
-    unsigned i,first;
+    writer w=*output;
+    unsigned i,first,count=cfg_field_count();
     unsigned visible=rows>10 ? rows-10 : 1;
     char value[2048];
     const char *display;
-    if(visible>FIELD_COUNT) visible=FIELD_COUNT;
+    if(visible>count) visible=count;
     /* Keep the selected field visible even in short terminals. Up/Down and
      * two-digit selection reach every appended setting without a fixed page. */
     first=(unsigned)e->selected>3 ? (unsigned)e->selected-3 : 0;
     if((unsigned)e->selected>=first+visible) first=(unsigned)e->selected-visible+1;
-    if(first+visible>FIELD_COUNT) first=FIELD_COUNT-visible;
-    write_text(&w,"[settings] Private draft. Active receiver remains unchanged.\n");
+    if(first+visible>count) first=count-visible;
+    write_text(&w,"[settings] Private draft. [r] Save + restart to apply.\n");
     write_text(&w,"%s%s\n",e->saved ? "SAVED - applies on restart. " : "",e->dirty ? "Unsaved draft edits." : "");
-    write_text(&w,"Up/Down or number+Enter: edit | s: atomic save | Esc/q: back\n");
-    for(i=first;i<FIELD_COUNT && i<first+visible;++i) {
-        field_value(&e->draft,i,value,sizeof(value),0);
-        write_text(&w,"%c %2u %-20s %.90s\n",i==(unsigned)e->selected ? '>' : ' ',i+1,fields[i],value);
+    write_text(&w,"Up/Down or number+Enter: edit | s: save | r: restart | Esc/q: back\n");
+    for(i=first;i<count && i<first+visible;++i) {
+        (void)cfg_field_value(&e->draft,i,value,sizeof(value),0);
+        write_text(&w,"%c %2u %-20s %.90s\n",i==(unsigned)e->selected ? '>' : ' ',i+1,cfg_field_name(i),value);
     }
+    if(!strcmp(cfg_field_name((unsigned)e->selected),"token_env"))
+        write_text(&w,"token_env: variable name (e.g. TB_TOKEN). Use the token field for a direct value.\n");
+    if(cfg_field_is_secret((unsigned)e->selected))
+        write_text(&w,"token: paste value; empty uses token_env. Input stays hidden; r applies.\n");
     if(e->editing) {
-        if(e->selected==0 || e->selected==18) { cfg_safe_url(e->input,value,sizeof(value)); display=value; }
+        int url=cfg_field_is_url((unsigned)e->selected);
+        if(cfg_field_is_secret((unsigned)e->selected)) display=e->input[0] ? "********" : "";
+        else if(url) { cfg_edit_url(e->input,value,sizeof(value)); display=value; }
         else display=e->input;
         if(strlen(display)>80) display+=strlen(display)-80;
         write_text(&w,"Edit %s (ASCII; Enter validates, Esc cancels, Ctrl+U clears):\n> %s_\n",
-                fields[e->selected],display);
-        if(e->selected==0 || e->selected==18) write_text(&w,"URL query/fragment values stay hidden, including while editing.\n");
+                cfg_field_name((unsigned)e->selected),display);
+        if(url) write_text(&w,"URL query/fragment values stay hidden, including while editing.\n");
     } else if(e->number[0]) write_text(&w,"Selected field number: %s (Enter)\n",e->number);
     write_text(&w,"%s\n",e->notice);
+    *output=w;
 }
-static void editor_key(editor *e,int key,unsigned max_windows,const char *path)
+static void editor_key(editor *e,int key,unsigned max_windows,const char *path,
+                       void *context,tm_restart_fn restart)
 {
+    int count=(int)cfg_field_count();
     if(e->editing) {
-        if(key==KEY_ESCAPE) { e->editing=0; notice(e,"Edit cancelled."); }
+        /* A validation result describes the previous submitted draft. Hide it
+         * as soon as editing resumes; the next Enter validates the new text. */
+        if(key==KEY_BACK || key==KEY_CLEAR || (key>=32 && key<=126)) e->notice[0]='\0';
+        if(key==KEY_ESCAPE) { e->editing=0; memset(e->input,0,sizeof(e->input)); e->input_n=0; notice(e,"Edit cancelled."); }
         else if(key==KEY_BACK) { if(e->input_n) e->input[--e->input_n]='\0'; }
         else if(key==KEY_CLEAR) { e->input_n=0; e->input[0]='\0'; }
         else if(key==KEY_ENTER) {
             tb_config next=e->draft;
             char error[160];
-            if(cfg_set(&next,fields[e->selected],e->input,error,sizeof(error)) &&
+            if(cfg_set(&next,cfg_field_name((unsigned)e->selected),e->input,error,sizeof(error)) &&
                cfg_validate(&next,max_windows,error,sizeof(error))) {
                 e->draft=next; e->dirty=1; e->editing=0;
-                notice(e,"Draft validated. Press s to save; changes apply on restart.");
+                memset(e->input,0,sizeof(e->input)); e->input_n=0;
+                notice(e,"Draft validated. Press r to save + restart, or s to save only.");
             } else notice(e,"Invalid setting: %s",error);
         } else if(key>=32 && key<=126 && e->input_n+1<sizeof(e->input)) {
             e->input[e->input_n++]=(char)key; e->input[e->input_n]='\0';
@@ -724,7 +824,7 @@ static void editor_key(editor *e,int key,unsigned max_windows,const char *path)
         e->open=0; e->draft=e->saved_config; e->dirty=0; e->number[0]='\0';
         notice(e,e->saved ? "SAVED - applies on restart. Active receiver continues." : "Settings closed. Receiver continues.");
     } else if(key==KEY_UP || key==KEY_DOWN) {
-        e->selected=(e->selected+(key==KEY_UP ? FIELD_COUNT-1 : 1))%FIELD_COUNT;
+        e->selected=(e->selected+(key==KEY_UP ? count-1 : 1))%count;
         e->number[0]='\0';
     } else if(key>='0' && key<='9') {
         size_t len=strlen(e->number);
@@ -734,39 +834,68 @@ static void editor_key(editor *e,int key,unsigned max_windows,const char *path)
         if(e->number[0]) {
             int selected=atoi(e->number);
             e->number[0]='\0';
-            if(selected<1 || selected>FIELD_COUNT) { notice(e,"Choose field 1-%d.",FIELD_COUNT); return; }
+            if(selected<1 || selected>count) { notice(e,"Choose field 1-%d.",count); return; }
             e->selected=selected-1;
         }
-        field_value(&e->draft,(unsigned)e->selected,e->input,sizeof(e->input),1);
+        (void)cfg_field_value(&e->draft,(unsigned)e->selected,e->input,sizeof(e->input),1);
         e->input_n=strlen(e->input); e->editing=1;
-    } else if(key=='s' || key=='S') {
+    } else if(key=='s' || key=='S' || key=='r' || key=='R') {
         char error[160];
-        if(cfg_save(path,&e->draft,max_windows,error,sizeof(error))) {
+        int restarting=key=='r' || key=='R';
+        int saved;
+        if(restarting && !restart) { notice(e,"Restart is unavailable for this monitor."); return; }
+        saved=restarting ? restart(context,&e->draft,error,sizeof(error)) :
+            cfg_save(path,&e->draft,max_windows,error,sizeof(error));
+        if(saved) {
             e->saved_config=e->draft; e->dirty=0; e->saved=1;
-            notice(e,"SAVED - applies on restart. Current connection and pending data are unchanged.");
-        } else notice(e,"Save failed: %s",error);
+            if(restarting) { e->open=0; notice(e,"Restart requested. Finishing pending data with the current settings."); }
+            else notice(e,"SAVED - press r to apply. Current connection and pending data are unchanged.");
+        } else notice(e,"%s failed: %s",restarting ? "Restart" : "Save",error);
     }
 }
+/* Complete frame -> compare rows -> one terminal write. Kept outside terminal
+ * because signal cleanup copies terminal state and must never copy screens. */
+static struct {
+    mf_frame frame[2];
+    unsigned next,rows,columns;
+    int valid;
+} display;
+size_t tm_screen_storage_bytes(void) { return sizeof(display)+mf_storage_bytes(); }
+
 static void draw(terminal *t,const tm_snapshot *s,const tb_config *c,const rates *r,const editor *e)
 {
     unsigned rows=terminal_rows(),columns=t->ansi ? terminal_columns() : 0;
-    unsigned visible=rows>22 ? rows-22 : 1;
-    if(t->ansi) fputs("\033[?25l\033[H\033[2J",stderr);
-    if(e->open) render_editor(stderr,e,rows,columns);
+    writer w={stderr,columns,0,0,0,NULL};
+    if(t->ansi) {
+        if(rows>MF_MAX_ROWS) rows=MF_MAX_ROWS;
+        w.frame=&display.frame[display.next];
+        mf_reset(w.frame);
+        w.max_lines=rows;
+    }
+    if(e->open) render_editor(&w,e,rows);
     else {
-        render_snapshot(stderr,s,c,r,(unsigned)(e->show_devices ? e->device_scroll : e->scroll),
-                        t->ansi ? visible : TB_MAX_KEYS,columns,e->show_devices,t->ansi);
+        if(t->ansi) w.max_lines=rows>2 ? rows-2 : 1;
+        render_snapshot(&w,s,c,r,(unsigned)(e->show_devices ? e->device_scroll : e->scroll),
+                        TM_MAX_DEVICES,e->show_devices,t->ansi);
         if(t->ansi) {
-            writer w={stderr,columns,0,0,0};
-            write_text(&w,"%s\n",t->input_ready ? "e: settings | d: devices | k: values | Up/Down scroll | q does not stop" :
+            w.max_lines=rows;
+            write_text(&w,"%s\n",t->input_ready ? "e: settings | r: restart | d/k: view | Up/Down scroll | q keeps running" :
                 t->csv_console ? "Editing requires piped CSV input; keyboard belongs to CSV stdin." :
                 "Keyboard unavailable; monitoring continues until input stops.");
             write_text(&w,"%s\n",e->notice);
         }
     }
-    (void)fflush(stderr);
+    if(t->ansi) {
+        const mf_frame *previous=display.valid ? &display.frame[display.next^1u] : NULL;
+        int repaint=display.rows!=rows || display.columns!=columns;
+        display.valid=mf_present(stderr,w.frame,previous,rows,columns,repaint);
+        if(display.valid) {
+            display.next^=1u; display.rows=rows; display.columns=columns;
+        }
+    } else (void)fflush(stderr);
 }
-void tm_run(void *context,void (*snapshot)(void *,tm_snapshot *),const tb_config *active,const char *path)
+void tm_run(void *context,void (*snapshot)(void *,tm_snapshot *),const tb_config *active,const char *path,
+            tm_restart_fn restart)
 {
     terminal term;
     editor edit;
@@ -777,22 +906,30 @@ void tm_run(void *context,void (*snapshot)(void *,tm_snapshot *),const tb_config
     int have_previous=0,redraw=0;
     if(!snapshot || !active) return;
     if(!path || !path[0]) path="telemetry.ini";
+    memset(&display,0,sizeof(display));
     terminal_open(&term,active);
     restore_install(&term);
     memset(&edit,0,sizeof(edit)); edit.draft=edit.saved_config=*active;
     edit.show_devices=strcmp(active->input_mode,"csv")!=0;
     memset(&previous,0,sizeof(previous)); memset(&current,0,sizeof(current));
+    snapshot(context,&current);
     refresh=term.ansi ? active->refresh_ms : 1000;
     if(refresh<100) refresh=100;
     next=next_poll=mono_ms();
     for(;;) {
-        int key=key_read(&term);
-        now=mono_ms();
-        if(key) {
-            if(edit.open) editor_key(&edit,key,current.send_capacity ? current.send_capacity : 4,path);
+        size_t read_count;
+        /* Consume a queued paste before presenting its draft. Rendering after
+         * every character could expose userinfo before the pasted @ arrives,
+         * and made a full URL take seconds to enter. Bound work by the editor
+         * capacity so continuous input cannot starve status/stop polling. */
+        for(read_count=0;read_count<sizeof(edit.input);++read_count) {
+          int key=key_read(&term);
+          if(!key) break;
+          if(!current.restarting) {
+            if(edit.open || key=='r' || key=='R') editor_key(&edit,key,current.send_capacity,path,context,restart);
             else if(key=='e' || key=='E') {
                 edit.open=1; edit.editing=0; edit.draft=edit.saved_config; edit.number[0]='\0';
-                notice(&edit,"Edit, validate, then save. Runtime settings stay fixed until restart.");
+                notice(&edit,"Edit and validate. r saves + restarts; s saves for later.");
             } else if(key=='d' || key=='D') { edit.show_devices=1; }
             else if(key=='k' || key=='K') { edit.show_devices=0; }
             else if(key==KEY_UP) {
@@ -806,7 +943,9 @@ void tm_run(void *context,void (*snapshot)(void *,tm_snapshot *),const tb_config
                           (unsigned)(edit.scroll+1)<TB_MAX_KEYS) ++edit.scroll;
             } else if(key=='q' || key=='Q') notice(&edit,"Monitoring continues. Stop the input source or use configured duration to finish.");
             redraw=1;
+          }
         }
+        now=mono_ms();
         /* Stop polling is independent of a possibly long display refresh. */
         if(now>=next_poll) {
             memset(&current,0,sizeof(current)); snapshot(context,&current);

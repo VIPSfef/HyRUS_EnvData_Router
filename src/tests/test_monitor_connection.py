@@ -16,6 +16,73 @@ import time
 from test_mavlink_router import Wire
 
 
+def assert_source_width(text, rows=24, columns=80):
+    """Reconstruct cursor-addressed rows; delta frames deliberately omit LF."""
+    screen = [[] for _ in range(rows)]
+    row = column = checked = 0
+    control = re.compile(rb"\x1b\[([0-9;?]*)([A-Za-z])")
+
+    def inspect(line):
+        nonlocal checked
+        value = bytes(line).rstrip(b" ")
+        if value.startswith(b"source status="):
+            assert len(value) < columns, value
+            checked += 1
+
+    index = 0
+    while index < len(text):
+        if text[index] == 27:
+            match = control.match(text, index)
+            assert match is not None, text[index:index + 32]
+            parameters, command = match.groups()
+            index = match.end()
+            if parameters.startswith(b"?") or command == b"m":
+                continue
+            values = [int(value or b"0") for value in parameters.split(b";")]
+            inspect(screen[row])
+            if command in (b"H", b"f"):
+                row = max(1, values[0]) - 1
+                column = max(1, values[1] if len(values) > 1 else 1) - 1
+                assert 0 <= row < rows and 0 <= column < columns
+            elif command == b"K":
+                if values[0] == 2:
+                    screen[row] = []
+                else:
+                    assert values[0] == 0
+                    del screen[row][column:]
+            elif command == b"J":
+                if values[0] == 2:
+                    screen = [[] for _ in range(rows)]
+                else:
+                    assert values[0] == 0
+                    del screen[row][column:]
+                    for below in range(row + 1, rows):
+                        screen[below] = []
+            else:
+                raise AssertionError((parameters, command))
+        elif text[index] == 13:
+            inspect(screen[row])
+            column = 0
+            index += 1
+        elif text[index] == 10:
+            inspect(screen[row])
+            row += 1
+            if row == rows:
+                screen.pop(0)
+                screen.append([])
+                row -= 1
+            index += 1
+        else:
+            while len(screen[row]) <= column:
+                screen[row].append(32)
+            screen[row][column] = text[index]
+            column += 1
+            index += 1
+    for line in screen:
+        inspect(line)
+    assert checked, "No source row was reconstructed"
+
+
 def main():
     if os.name != "posix":
         print("SKIP connection-colour PTY check: requires a POSIX PTY")
@@ -112,10 +179,7 @@ def main():
             with changed:
                 text = bytes(captured)
             assert b"\x1b[0m\x1b[?25h" in text, "exit must restore colour and cursor"
-            plain = re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", text)
-            for line in plain.splitlines():
-                if line.startswith(b"source status="):
-                    assert len(line) < 80, line
+            assert_source_width(text)
             # The same interactive program must emit plain diagnostics when its
             # stderr is a pipe, even after it has rendered terminal colours.
             settings["duration_ms"] = 1200

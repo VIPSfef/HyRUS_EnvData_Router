@@ -199,6 +199,7 @@ class Router:
             "input_mode": "mavlink", "serial_port": stream.endpoint if stream.kind == "serial" else "none",
             "websocket_url": stream.endpoint if stream.kind == "ws" else "",
             "serial_baud": 115200, "auto_scan": 0, "udp_enabled": 1,
+            "qgc_enabled": 0,
             "udp_bind": "127.0.0.1", "udp_port": port,
             "probe_ms": probe_ms, "link_timeout_ms": 450, "reconnect_ms": 100,
             "connect_timeout_ms": 250, "io_timeout_ms": 100,
@@ -228,7 +229,7 @@ class Router:
     def statuses(self, since=0):
         result = []
         for timestamp, line in self.lines:
-            match = re.match(r"source status=(\S+) active=(.*)", line)
+            match = re.fullmatch(r"source status=(\S+) active=(.*?)(?: baud=(\d+))?", line)
             if match and timestamp >= since:
                 result.append((timestamp, match.group(1), match.group(2)))
         return result

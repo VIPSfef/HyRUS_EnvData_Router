@@ -42,6 +42,7 @@ static void test_options(void)
     o.gap_us=0; CHECK(!sp_options_valid(&o));
     o=options(SP_MAX_WIDTH_M+1,1); CHECK(!sp_options_valid(&o));
     sp_init(NULL,NULL); sp_break(NULL,0); sp_take_snapshot(NULL,&batch);
+    sp_prepare_snapshot(NULL,&batch); sp_prepare_snapshot(&state,NULL); sp_commit_snapshot(NULL);
     CHECK(!sp_add(NULL,NULL,0,0));
 }
 static void test_uniform(double speed,unsigned expected_n)
@@ -96,6 +97,47 @@ static void test_pair_and_revisions(void)
     sp_break(&state,SP_FLAG_CONTEXT_CHANGE); sp_take_snapshot(&state,&batch);
     CHECK(batch.n==2 && batch.record[0].status==SP_INTERRUPTED);
     CHECK(batch.record[0].revision==revision+1); CHECK(batch.record[0].flags&SP_FLAG_CONTEXT_CHANGE);
+}
+static void test_transactional_snapshot(void)
+{
+    static sp_state before;
+    static sp_batch prepared;
+    sp_options o=options(1,0);
+    weather_sample w;
+    unsigned i;
+    sp_init(&state,&o);
+    /* Include completed bins and dirty partial revisions in one transaction. */
+    for(i=0;i<=1;++i) {
+        w=sample((uint64_t)i*1000000,(double)i,1);
+        CHECK(sp_add(&state,&w,77,1));
+        w.metric=WEATHER_HUMIDITY; w.value=.5;
+        CHECK(sp_add(&state,&w,77,1));
+    }
+    CHECK(state.completed_n==2 && state.open_n==2);
+    before=state;
+    sp_prepare_snapshot(&state,&prepared);
+    CHECK(prepared.n==4 && prepared.record[0].status==SP_COMPLETE && prepared.record[2].status==SP_PARTIAL);
+    CHECK(!memcmp(&state,&before,sizeof(state)));
+    /* Simulate failed storage: retry without a commit must reproduce all data. */
+    sp_prepare_snapshot(&state,&batch);
+    CHECK(!memcmp(&batch,&prepared,sizeof(batch)));
+    CHECK(!memcmp(&state,&before,sizeof(state)));
+    CHECK(sp_batch_json(&batch,json,sizeof(json))>0);
+    sp_commit_snapshot(&state);
+    CHECK(!state.completed_n && state.completed_head==2 && state.open_n==2);
+    CHECK(state.open[0].emitted_revision==state.open[0].record.revision);
+    CHECK(state.open[1].emitted_revision==state.open[1].record.revision);
+    CHECK(state.open[0].record.n==1 && state.open[1].record.n==1);
+    sp_prepare_snapshot(&state,&batch); CHECK(batch.n==0);
+    /* Future updates still create a fresh cumulative revision after the commit. */
+    w=sample(1100000,1.1,1); CHECK(sp_add(&state,&w,77,1));
+    sp_prepare_snapshot(&state,&batch);
+    CHECK(batch.n==1 && batch.record[0].n==2);
+    CHECK(batch.record[0].revision>prepared.record[2].revision);
+    CHECK(prepared.n==4 && prepared.record[2].n==1);
+    sp_take_snapshot(&state,&batch);
+    CHECK(batch.n==1 && state.open[0].emitted_revision==batch.record[0].revision);
+    sp_prepare_snapshot(&state,&batch); CHECK(batch.n==0);
 }
 static void test_stationary(void)
 {
@@ -272,7 +314,7 @@ int main(int argc,char **argv)
         puts(json); return 0;
     }
     test_options(); test_uniform(1,1000); test_uniform(10,100);
-    test_pair_and_revisions(); test_stationary(); test_unknown_breaks();
+    test_pair_and_revisions(); test_transactional_snapshot(); test_stationary(); test_unknown_breaks();
     test_continuity(); test_same_time_conflict(); test_disagreement(); test_undersampling();
     test_capacity_and_serialization(); test_actual_representative();
     if(argc==2 && strcmp(argv[1],"--bench")==0) benchmark();

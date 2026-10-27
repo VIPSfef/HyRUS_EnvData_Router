@@ -92,6 +92,12 @@ int sp_add(sp_state *state, const weather_sample *sample, uint64_t continuity_ke
 void sp_break(sp_state *state, uint32_t reason);
 /* Changes apply to the next path; invalid settings leave state unchanged. */
 int sp_set_options(sp_state *state, const sp_options *options);
+/* Transactional snapshot: prepare copies pending records without consuming
+ * completed bins or marking partial revisions emitted. Keep the same caller
+ * lock, with no intervening state mutation, through successful storage and
+ * commit. On storage failure omit commit; a later prepare retains the data. */
+void sp_prepare_snapshot(sp_state *state, sp_batch *batch);
+void sp_commit_snapshot(sp_state *state);
 /* Copies completed records plus dirty partial revisions, then consumes that
  * local completed queue. Transport must own an immutable sp_batch copy until
  * ACK. Does NOT reset an open bin or its statistics on a transmission tick.

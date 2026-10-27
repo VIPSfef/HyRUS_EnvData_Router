@@ -217,20 +217,31 @@ int sp_add(sp_state *s,const weather_sample *w,uint64_t context,int velocity_val
     }
     return add_group(s,w);
 }
-void sp_take_snapshot(sp_state *s,sp_batch *b)
+void sp_prepare_snapshot(sp_state *s,sp_batch *b)
 {
     unsigned i;
     if(!s || !b) return;
     memset(b,0,sizeof(*b)); report_path(s); b->options=s->options; b->report=s->report;
-    while(s->completed_n) {
-        b->record[b->n++]=s->completed[s->completed_head];
-        s->completed_head=(s->completed_head+1)%SP_COMPLETED_CAP; --s->completed_n;
-    }
-    for(i=0;i<s->open_n;++i) if(s->open[i].record.revision!=s->open[i].emitted_revision) {
+    for(i=0;i<s->completed_n;++i)
+        b->record[b->n++]=s->completed[(s->completed_head+i)%SP_COMPLETED_CAP];
+    for(i=0;i<s->open_n;++i) if(s->open[i].record.revision!=s->open[i].emitted_revision)
         b->record[b->n++]=s->open[i].record;
+}
+void sp_commit_snapshot(sp_state *s)
+{
+    unsigned i;
+    if(!s) return;
+    s->completed_head=(s->completed_head+s->completed_n)%SP_COMPLETED_CAP;
+    s->completed_n=0;
+    for(i=0;i<s->open_n;++i)
         s->open[i].emitted_revision=s->open[i].record.revision;
-    }
     s->capacity_pressure=0; report_path(s);
+}
+void sp_take_snapshot(sp_state *s,sp_batch *b)
+{
+    if(!s || !b) return;
+    sp_prepare_snapshot(s,b);
+    sp_commit_snapshot(s);
 }
 
 typedef struct { char *out; size_t pos,cap; int failed; } sp_writer;

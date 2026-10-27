@@ -170,7 +170,7 @@ jump = BASE + 10_000_000_000
 p, payloads = run(row(0) + clock(jump) + row(1, t=jump))
 assert p.returncode == 0 and len(windows(payloads)) == 2, p.stderr
 
-# Saturation preserves per-key statistics; queue loss is explicitly accounted.
+# Raw saturation preserves per-key statistics; the RAM backlog grows past eight.
 p, payloads = run("".join(row(i, t=BASE + i * 1000) for i in range(600)))
 b = windows(payloads)[0]
 assert p.returncode == 2 and b["n"] == 600 and b["raw_n"] == 512 and b["raw_dropped"] == 88
@@ -179,9 +179,10 @@ assert int(payloads[-1]["loss"]["raw_samples"]) == 88
 p, payloads = run("".join(clock(BASE + i * 1_000_000) +
                          row(i, t=BASE + i * 1_000_000) for i in range(12)))
 loss = payloads[-1]["loss"]
-assert p.returncode == 2 and int(loss["queue_windows"]) == 4 and int(loss["queue_samples"]) == 4, p.stderr
-assert int(loss["rejected"]) == 0 and len(windows(payloads)) == 8
-print("PASS refreshed-clock long gap/raw capacity/queue overflow accounted")
+assert p.returncode == 0 and int(loss["queue_windows"]) == 0 and int(loss["queue_samples"]) == 0, p.stderr
+assert int(loss["rejected"]) == 0 and len(windows(payloads)) == 12
+assert [batch["raw"][0][1] for batch in windows(payloads)] == list(range(12))
+print("PASS refreshed-clock long gap/raw capacity; all 12 windows retained in RAM")
 
 # Actual HTTP: first ACK fails, immutable batch identities survive retries.
 server = Server(statuses=(500, 204))
@@ -221,8 +222,8 @@ try:
     ws = windows([r[3] for r in server.records])
     raw = [s for b in ws for s in b["raw"]]
     assert [s[1] for s in raw] == list(range(250))
-    assert all(server.records[i][0] - server.records[i - 1][0] >= .95
-               for i in range(1, len(server.records)))
+    # Successful ACKs drain the accumulated prefix through the shared HTTP gap.
+    # The per-observation sequence check above still excludes loss/duplicates.
 finally:
     if child is not None and child.poll() is None:
         child.kill()
@@ -236,6 +237,7 @@ try:
     p = subprocess.run(args(server.url), input=clock() + row(0),
                        capture_output=True, text=True, timeout=15)
     assert p.returncode == 2 and "pending=1" in p.stderr and len(server.records) == 3
+    assert all(later[0] - earlier[0] >= .95 for earlier, later in zip(server.records, server.records[1:])), "503 retries ignored configured interval"
 finally:
     server.close()
 print("PASS persistent HTTP failure retains/reports pending window and exits nonzero")

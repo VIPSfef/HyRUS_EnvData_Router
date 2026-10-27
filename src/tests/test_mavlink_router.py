@@ -37,13 +37,14 @@ def crc_byte(crc, byte):
 
 
 class Wire:
-    def __init__(self):
+    def __init__(self, system=1):
         self.sequence = Counter()
+        self.system = system
 
     def packet(self, message, payload, extra, component=1):
         sequence = self.sequence[component] % 256
         self.sequence[component] += 1
-        header = bytes((len(payload), 0, 0, sequence, 1, component,
+        header = bytes((len(payload), 0, 0, sequence, self.system, component,
                         message & 255, (message >> 8) & 255, message >> 16))
         crc = 0xFFFF
         for byte in header + payload + bytes((extra,)):
@@ -248,6 +249,7 @@ def run_router(source, server, name):
         "url": f"http://127.0.0.1:{server.port}/observations", "stream": "integration",
         "session": name, "origin_lat": 37, "origin_lon": 127, "origin_alt": 100, "origin_auto": 0,
         "input_mode": "mavlink", "udp_enabled": 0, "serial_port": serial, "serial_baud": 115200,
+        "qgc_enabled": 0,
         "websocket_url": f"ws://127.0.0.1:{source.port}/mavlink", "auto_scan": 0,
         "probe_ms": 500, "link_timeout_ms": 1000, "reconnect_ms": 100,
         "duration_ms": 4500, "send_interval_ms": 1000, "connect_timeout_ms": 500,
@@ -276,8 +278,16 @@ def run_router(source, server, name):
     return run
 
 
+def assert_retry_cadence(records, minimum_interval=.90):
+    """Failures wait for the retry interval; ACKs may immediately drain backlog."""
+    for previous, current in zip(records, records[1:]):
+        if previous[1] != 204:
+            assert current[0] - previous[0] >= minimum_interval, "HTTP retry exceeded configured rate"
+
+
 def check_payloads(source, server, retry):
     assert server.records, "observations were received but never posted"
+    assert_retry_cadence(server.records)
     by_identity = {}
     acknowledged = set()
     for index, (timestamp, status, payload) in enumerate(server.records):
@@ -288,8 +298,6 @@ def check_payloads(source, server, retry):
         assert all(int(value) == 0 for value in payload["loss"].values()), payload["loss"]
         batches = payload["batches"]
         assert batches and all(batch["n"] > 0 and batch["raw"] for batch in batches), "empty HTTP batch"
-        if index:
-            assert timestamp - server.records[index - 1][0] >= .90, "HTTP requests exceed configured 1 Hz"
         for batch in batches:
             # Each immutable batch carries the clock snapshot used when it
             # was sealed; the envelope model describes only the first batch.

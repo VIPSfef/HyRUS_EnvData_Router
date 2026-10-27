@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:uaslaboratory:mavlink-telemetry-data-router:0.10.0:ingestion",
-  "title": "mavlink_telemetry_data_router0.10.0 ingestion (default compiled capacities)",
-  "$comment": "Derived from sender/weather/spatial/telemetry/time_sync sources. Unknown object properties allowed. Arithmetic, cross-record consistency, dedup/upsert, physical accuracy and durability require application checks.",
+  "$id": "urn:uaslaboratory:mavlink-telemetry-data-router:0.11.0:ingestion",
+  "title": "mavlink_telemetry_data_router0.11.0 ingestion (default compiled capacities)",
+  "$comment": "Derived from sender/status_report/weather/spatial/telemetry/time_sync sources. Unknown object properties allowed. Arithmetic, cross-record consistency, dedup/upsert, physical accuracy and durability require application checks.",
   "oneOf": [
     {
       "$ref": "#/$defs/TelemetryV3"
@@ -18,6 +18,9 @@
     },
     {
       "$ref": "#/$defs/CsvV2"
+    },
+    {
+      "$ref": "#/$defs/StatusEnvelope"
     }
   ],
   "$defs": {
@@ -2286,6 +2289,457 @@
         }
       ],
       "description": "Mixed live envelopes; spatial stays inside nested weather payloads."
+    },
+    "StatusReceipts": {
+      "type": "object",
+      "properties": {
+        "heartbeat": {
+          "enum": [
+            "WAIT",
+            "LIVE",
+            "LOST"
+          ]
+        },
+        "hb_age_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/U64String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "enum": [
+            "WAIT",
+            "LIVE",
+            "STALE"
+          ]
+        },
+        "data_age_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/U64String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "heartbeat",
+        "hb_age_ms",
+        "data",
+        "data_age_ms"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "heartbeat": {
+                "const": "WAIT"
+              }
+            },
+            "required": [
+              "heartbeat"
+            ]
+          },
+          "then": {
+            "properties": {
+              "hb_age_ms": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "hb_age_ms": {
+                "$ref": "#/$defs/U64String"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "data": {
+                "const": "WAIT"
+              }
+            },
+            "required": [
+              "data"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data_age_ms": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "data_age_ms": {
+                "$ref": "#/$defs/U64String"
+              }
+            }
+          }
+        }
+      ],
+      "description": "Receipt ages in collector monotonic milliseconds. WAIT means never observed and null age. Heartbeat and non-heartbeat data are independent."
+    },
+    "StatusSource": {
+      "type": "object",
+      "properties": {
+        "sysid": {
+          "$ref": "#/$defs/U8"
+        },
+        "compid": {
+          "$ref": "#/$defs/U8"
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "serial_baud": {
+          "$ref": "#/$defs/U32"
+        },
+        "connected": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "sysid",
+        "compid",
+        "endpoint",
+        "state",
+        "serial_baud",
+        "connected"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "$ref": "#/$defs/StatusReceipts"
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "LOCKED"
+              },
+              "heartbeat": {
+                "const": "LIVE"
+              }
+            },
+            "required": [
+              "state",
+              "heartbeat"
+            ]
+          },
+          "then": {
+            "properties": {
+              "connected": {
+                "const": true
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "connected": {
+                "const": false
+              }
+            }
+          }
+        }
+      ],
+      "description": "Selected vehicle state. LOCKED with a live selected heartbeat is connected. WAIT_HEARTBEAT, HEARTBEAT_LOST, transport errors, STOPPED and FAILED are not connected; a live radio/GCS does not substitute for the selected vehicle."
+    },
+    "StatusMetric": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Nonnegative"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unit": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "UNKNOWN",
+            "FRESH",
+            "STALE"
+          ]
+        },
+        "rx_age_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/U64String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observations": {
+          "$ref": "#/$defs/U64String"
+        }
+      },
+      "required": [
+        "value",
+        "unit",
+        "state",
+        "rx_age_ms",
+        "observations"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "UNKNOWN"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "null"
+              },
+              "rx_age_ms": {
+                "type": "null"
+              },
+              "observations": {
+                "const": "0"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "value": {
+                "$ref": "#/$defs/Nonnegative"
+              },
+              "rx_age_ms": {
+                "$ref": "#/$defs/U64String"
+              },
+              "observations": {
+                "$ref": "#/$defs/PositiveU64String"
+              }
+            }
+          }
+        }
+      ],
+      "description": "Last known sensor value, not a new sample. UNKNOWN has no value/age; FRESH or STALE keeps the original receipt age and observation count."
+    },
+    "StatusDevice": {
+      "type": "object",
+      "properties": {
+        "sysid": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 255
+        },
+        "compid": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 255
+        },
+        "rx_age_ms": {
+          "$ref": "#/$defs/U64String"
+        }
+      },
+      "required": [
+        "sysid",
+        "compid",
+        "rx_age_ms"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "$ref": "#/$defs/StatusReceipts"
+        }
+      ],
+      "description": "One discovered sysid/compid. rx_age_ms is age of any received frame; heartbeat and non-heartbeat data retain their own ages. Application checks reject repeated sysid/compid pairs."
+    },
+    "StatusPosition": {
+      "type": "object",
+      "properties": {
+        "source": {"enum": ["GPS", "ESTGPS"]},
+        "state": {"enum": ["LIVE", "STALE", "INVALID"]},
+        "fix": {"$ref": "#/$defs/U8"},
+        "lat_deg": {"type": "number", "minimum": -90, "maximum": 90},
+        "lon_deg": {"type": "number", "minimum": -180, "maximum": 180},
+        "alt_msl_m": {"type": "number"},
+        "rx_age_ms": {"$ref": "#/$defs/U64String"},
+        "stale_after_ms": {"type": "integer", "minimum": 1, "maximum": 4294967295}
+      },
+      "required": ["source", "state", "fix", "lat_deg", "lon_deg", "alt_msl_m", "rx_age_ms"],
+      "additionalProperties": true,
+      "description": "Last accepted navigation coordinate, retained after its measurement-alignment window expires. STALE and INVALID keep the historical coordinate without claiming current validity. rx_age_ms is its own receipt age, not runtime or GPS fix age; stale_after_ms lets displays age the retained point between status reports."
+    },
+    "StatusRecord": {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "$ref": "#/$defs/U64String"
+        },
+        "generation": {
+          "$ref": "#/$defs/U64String"
+        },
+        "session": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reported_monotonic_ms": {
+          "$ref": "#/$defs/U64String"
+        },
+        "run_elapsed_ms": {
+          "$ref": "#/$defs/U64String"
+        },
+        "sample_count": {
+          "const": 0
+        },
+        "source": {
+          "$ref": "#/$defs/StatusSource"
+        },
+        "position": {
+          "anyOf": [{"$ref": "#/$defs/StatusPosition"}, {"type": "null"}],
+          "description": "Optional for older clients. null means no accepted coordinate; a retained coordinate does not become a new measurement."
+        },
+        "weather": {
+          "type": "object",
+          "properties": {
+            "temperature": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/StatusMetric"
+                },
+                {
+                  "properties": {
+                    "unit": {
+                      "const": "K"
+                    }
+                  }
+                }
+              ]
+            },
+            "humidity": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/StatusMetric"
+                },
+                {
+                  "properties": {
+                    "unit": {
+                      "const": "1"
+                    },
+                    "value": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "temperature",
+            "humidity"
+          ],
+          "additionalProperties": true
+        },
+        "packets": {
+          "type": "object",
+          "properties": {
+            "received": {
+              "$ref": "#/$defs/U64String"
+            },
+            "estimated_lost": {
+              "$ref": "#/$defs/U64String"
+            },
+            "duplicates": {
+              "$ref": "#/$defs/U64String"
+            }
+          },
+          "required": [
+            "received",
+            "estimated_lost",
+            "duplicates"
+          ],
+          "additionalProperties": true
+        },
+        "devices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StatusDevice"
+          },
+          "maxItems": 32
+        }
+      },
+      "required": [
+        "seq",
+        "generation",
+        "session",
+        "reported_monotonic_ms",
+        "run_elapsed_ms",
+        "sample_count",
+        "source",
+        "weather",
+        "packets",
+        "devices"
+      ],
+      "additionalProperties": true,
+      "description": "Periodic state snapshot with zero new measurements. Runtime elapsed is separate from receipt ages. All counters and times use lossless uint64 decimal strings. Estimated packet losses are sequence-gap estimates, not proven physical losses."
+    },
+    "StatusEnvelope": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "mavlink_router_status_v1"
+        },
+        "stream": {
+          "type": "string",
+          "minLength": 1
+        },
+        "records": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StatusRecord"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "schema",
+        "stream",
+        "records"
+      ],
+      "additionalProperties": true,
+      "description": "Current router emits one status record every status_interval_ms when enabled (10000 reports every 10 seconds; default 0 disables for API compatibility). Latest-state reporting is independent of measurement queues and does not create weather samples; the diagnostic server accepts up to 64 records per request."
     }
   }
 }

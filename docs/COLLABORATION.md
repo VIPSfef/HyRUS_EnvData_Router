@@ -1,5 +1,9 @@
 # 다른 PC에서 가져오기와 개발자 협업
 
+공용 소스 저장소는 [VIPSfef/HyRUS_EnvData_Router](https://github.com/VIPSfef/HyRUS_EnvData_Router)이며 기본 브랜치는 `main`입니다. 이 저장소에서는 호스트 MAVLink 수신·분석·서버 전송만 개발합니다. I²C 드라이버·PX4 uORB·MAVLink 송신·펌웨어는 `HyRUS_EnvData_Px4`에서 개발하고 [입력 규약](PX4_MAVLINK_CONTRACT.md)으로 연결합니다. 기존 펌웨어 소스는 별도 로컬 작업 폴더로 옮겼으며, 그 저장소의 원격 게시·보드 업로드는 별도 작업입니다.
+
+실행 프로그램을 전달할 때는 [배포 폴더 안내](../release/README.md)의 `release/v0.11.0/assets/`를 사용하세요. 아래 OneDrive bundle 절차는 소스와 Git 이력을 오프라인으로 공유하는 별도 방법입니다.
+
 다른 Windows x64 PC에는 공유용 ZIP 하나만 복사하면 됩니다. 압축을 모두 풀고 `Start-Sync.cmd`를 실행하면 처음에는 소스와 문서, Git 변경 이력을 가져옵니다. 나중에 새 ZIP을 받아 같은 방법으로 실행하면 기존 작업 폴더를 업데이트합니다. 필요한 Git도 ZIP에 들어 있으므로 받는 PC에서 별도 설치나 다운로드를 할 필요가 없습니다.
 
 ## ZIP 하나로 처음 가져오기와 업데이트하기
@@ -39,7 +43,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Sync-MavlinkRouter.ps1
 발행자가 OneDrive의 공유 폴더를 계속 갱신한다면 ZIP을 매번 받을 필요 없이 그 폴더를 지정할 수도 있습니다. OneDrive 동기화와 파일 내려받기가 끝난 뒤 실행하세요. 다음 경로는 이 프로젝트의 예시이므로 이 PC의 실제 공유 폴더로 바꿉니다.
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Sync-MavlinkRouter.ps1 -SharedDirectory 'C:\Users\사용자이름\OneDrive\문서\New project 3\mavlink-server-transfer\build\sharing'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Sync-MavlinkRouter.ps1 -SharedDirectory 'C:\Users\사용자이름\OneDrive\mavlink-router-share'
 ```
 
 `-SharedDirectory`를 생략하면 스크립트가 들어 있는 폴더를 읽습니다. 그곳의 `LATEST.json`에서 최신 bundle과 해시를 확인하고, bundle을 `%LOCALAPPDATA%\mavlink-router\bundles`로 복사한 뒤 Git으로 처리합니다. 로컬 사본의 위치도 바꾸려면 `-CacheDirectory 'D:\cache\mavlink-router'`를 추가하세요. 이 옵션은 소스 작업 폴더의 위치를 바꾸지 않습니다.
@@ -81,7 +85,7 @@ OneDrive는 bundle을 전달하는 용도로 사용합니다. 실제 작업 폴�
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$sharedDir = Join-Path $env:OneDrive '문서\New project 3\mavlink-server-transfer\build\sharing'
+$sharedDir = Join-Path $env:OneDrive 'mavlink-router-share'
 $release = Get-Content -LiteralPath (Join-Path $sharedDir 'LATEST.json') -Raw | ConvertFrom-Json
 $localDir = Join-Path $env:LOCALAPPDATA 'mavlink-router\bundles'
 New-Item -ItemType Directory -Force -Path $localDir | Out-Null
@@ -171,7 +175,7 @@ git stash apply 'stash@{0}'
 아래 예시의 공유 폴더 경로는 실제 위치로 바꾸세요. 첫 명령 묶음은 최신 bundle을 로컬에 복사하고 해시를 검사합니다. `python3`는 `LATEST.json`을 읽는 데 사용합니다.
 
 ```sh
-shared_dir='/PATH/TO/OneDrive/문서/New project 3/mavlink-server-transfer/build/sharing'
+shared_dir='/PATH/TO/OneDrive/mavlink-router-share'
 local_dir="$HOME/.cache/mavlink-router/bundles"
 repo_dir="$HOME/dev/mavlink_telemetry_data_router"
 mkdir -p "$local_dir" "$HOME/dev"
@@ -201,26 +205,34 @@ git -C "$repo_dir" switch main &&
 git -C "$repo_dir" merge --ff-only onedrive/main
 ```
 
-## 개발자와 함께 수정할 때: 비공개 GitLab 또는 GitHub
+## GitHub에서 개발자와 함께 수정하기
 
-bundle은 소스와 변경 이력을 전달하기에 편리합니다. 여러 사람이 수정을 주고받는 단계에서는 회사 GitLab이나 GitHub의 **비공개 저장소**를 공용 원본으로 사용하는 편이 좋습니다. 각 개발자가 자기 PC에 복제하고 작업 브랜치에서 수정한 뒤, PR 또는 MR로 검토를 요청하는 방식입니다.
+bundle은 소스와 변경 이력을 오프라인으로 전달하는 방법입니다. 온라인 협업은 지정된 GitHub 저장소를 각 개발자의 PC에 복제하고 작업 브랜치에서 수정한 뒤 PR로 검토합니다. 저장소 공개 여부와 협업 권한은 GitHub에서 소유자가 관리합니다.
 
-현재 원본 소스는 `C:\Users\pjs20\OneDrive\문서\New project 3\mavlink-server-transfer`에 있으며 기본 브랜치는 `main`입니다. 이 문서를 작성할 때 원격 저장소는 아직 연결하지 않았습니다. `prj.uaslaboratory.synology.me`의 Git 경로는 실제 서비스에서 발급한 주소를 확인해야 합니다.
+기본 브랜치는 `main`입니다. 아래 명령의 작업 폴더는 본인의 경로로 바꾸세요. 저장소 URL은 `https://github.com/VIPSfef/HyRUS_EnvData_Router.git`입니다.
 
 ### 소유자가 처음 한 번 할 일
 
-비공개 빈 저장소를 만들고 개발자를 초대하세요. 기존 이력을 올릴 것이므로 웹 화면에서 README나 라이선스를 새로 만들지 않습니다. 아래 주소는 **예시**입니다. 실제 저장소 URL로 바꾸고, 토큰을 URL에 넣지 말고 Git 자격증명 관리자나 SSH 인증을 사용하세요. [GitHub 저장소 만들기](https://docs.github.com/en/repositories/creating-and-managing-repositories/creating-a-new-repository)
+기존 로컬 이력을 연결할 때는 원격의 초기 README·라이선스와 충돌하는지 먼저 확인합니다. 토큰을 URL에 넣지 말고 Git 자격증명 관리자나 SSH 인증을 사용하세요. 아래 `remote add`는 origin이 없는 경우에만 실행합니다.
 
 ```powershell
-Set-Location 'C:\Users\pjs20\OneDrive\문서\New project 3\mavlink-server-transfer'
+Set-Location 'C:\dev\mavlink_telemetry_data_router'
 git status --short
 git remote -v
 # origin이 아직 없을 때 실행합니다.
-git remote add origin 'https://gitlab.example.com/TEAM/mavlink_telemetry_data_router.git'
+git remote add origin 'https://github.com/VIPSfef/HyRUS_EnvData_Router.git'
 git push -u origin main
 ```
 
-GitHub를 사용한다면 `https://github.com/YOUR_ORG/mavlink_telemetry_data_router.git`와 같은 실제 저장소 주소를 사용합니다. 이미 `origin`이 있으면 기존 주소부터 확인하세요. 이 문서의 명령은 게시 방법을 설명한 것이며, 작성 과정에서 원격 게시를 실행하지는 않았습니다.
+이미 `origin`이 있으면 `git remote -v`로 지정한 저장소인지 확인하세요. 원격 이력을 덮어쓰는 강제 push는 사용하지 않습니다.
+
+### GitHub에 소스와 실행 파일을 구분해 올리기
+
+소스 변경을 검토하고 커밋한 뒤 `main`을 원격 저장소에 올립니다. 운영용 `telemetry.ini`, 실제 토큰, 수집 자료와 빌드 폴더는 커밋하지 않습니다. 생성한 `release/v0.11.0/`도 소스 이력에 넣는 대신 GitHub Release의 첨부 파일로 전달합니다. 소스 ZIP은 해당 배포 시점의 소스 사본이며 `.git` 이력을 포함하지 않습니다.
+
+GitHub Release 본문은 [0.11.0 릴리스 노트](releases/v0.11.0.md)를 사용하고, `release/v0.11.0/assets/`의 Windows ZIP·Linux TAR.GZ·소스 ZIP·`SHA256SUMS.txt`·`manifest.json`을 첨부합니다. 태그와 게시 대상 커밋을 확정한 뒤 게시하세요. 빌드 당시 미커밋 수정이 있었다면 manifest의 소스 상태를 확인하고, 태그용 커밋을 만든 후 동일한 소스로 다시 묶어야 합니다.
+
+프로젝트 자체의 라이선스는 소유자가 결정해야 합니다. 배포본의 제3자 라이선스 고지는 프로젝트 전체에 대한 라이선스 선택을 대신하지 않습니다.
 
 읽기와 코드 수정에 필요한 권한은 다음처럼 구분할 수 있습니다.
 
@@ -238,7 +250,7 @@ GitHub를 사용한다면 `https://github.com/YOUR_ORG/mavlink_telemetry_data_ro
 
 ```powershell
 New-Item -ItemType Directory -Force -Path 'C:\dev' | Out-Null
-git clone 'https://gitlab.example.com/TEAM/mavlink_telemetry_data_router.git' 'C:\dev\mavlink_telemetry_data_router'
+git clone 'https://github.com/VIPSfef/HyRUS_EnvData_Router.git' 'C:\dev\mavlink_telemetry_data_router'
 Set-Location 'C:\dev\mavlink_telemetry_data_router'
 git log -5 --oneline
 ```
@@ -281,7 +293,7 @@ python support/sharing/package_handoff.py `
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-Set-Location 'C:\Users\pjs20\OneDrive\문서\New project 3\mavlink-server-transfer'
+Set-Location 'C:\dev\mavlink_telemetry_data_router'
 if (git status --porcelain) { throw '먼저 변경 내용을 검토하고 커밋하세요.' }
 $commit = (git rev-parse main).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'main 커밋을 확인하지 못했습니다.' }
@@ -333,6 +345,6 @@ Move-Item -LiteralPath $tempLatest -Destination (Join-Path $shareDir 'LATEST.jso
 | [검증 기록](REVIEW.md) | 실행한 검사와 아직 확인하지 못한 범위 |
 | `src/`, `CMakeLists.txt`, `CMakePresets.json` | 구현과 Windows/Linux x64 빌드 구성 |
 | `src/tests/`와 CI 설정 | 회귀 검사와 자동 빌드 구성 |
-| [PX4 추가 모듈](../support/px4/) | 센서 드라이버와 MAVLink 송신 변경, 적용 기준 커밋 |
+| [PX4 → Router 입력 규약](PX4_MAVLINK_CONTRACT.md) | 별도 `HyRUS_EnvData_Px4`의 송신 구현과 합의할 메시지·단위·시각·소스·결측 처리 |
 
-공유하는 bundle과 ZIP에는 커밋된 소스와 문서가 들어갑니다. bundle에는 Git 이력도 포함됩니다. 실행 파일이 필요하다면 `build/packages/`의 해당 OS용 배포물을 별도로 전달하세요. 로컬 운용 설정, 인증 토큰과 관측 자료는 공유 대상에 넣지 않습니다. 과거에 커밋한 내용은 Git 이력에 남으므로, 처음 외부 개발자에게 전달할 때는 이력까지 포함해 공유 범위를 확인하세요.
+공유하는 bundle과 ZIP에는 커밋된 소스와 문서가 들어갑니다. bundle에는 Git 이력도 포함됩니다. 실행 파일이 필요하다면 `release/v0.11.0/assets/`의 해당 OS용 배포물을 별도로 전달하세요. 로컬 운용 설정, 인증 토큰과 관측 자료는 공유 대상에 넣지 않습니다. 과거에 커밋한 내용은 Git 이력에 남으므로, 처음 외부 개발자에게 전달할 때는 이력까지 포함해 공유 범위를 확인하세요.

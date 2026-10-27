@@ -3,6 +3,7 @@
 #define _DEFAULT_SOURCE
 #endif
 #include "input_transport.h"
+#include "serial_baud.h"
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -197,20 +198,9 @@ size_t it_enumerate(char endpoints[][IT_ENDPOINT_BYTES], size_t capacity) {
 }
 static speed_t serial_speed(unsigned baud) {
     switch (baud) {
-    case 9600: return B9600;
-    case 19200: return B19200;
-    case 38400: return B38400;
-    case 57600: return B57600;
-    case 115200: return B115200;
-#ifdef B230400
-    case 230400: return B230400;
-#endif
-#ifdef B460800
-    case 460800: return B460800;
-#endif
-#ifdef B921600
-    case 921600: return B921600;
-#endif
+#define SERIAL_BAUD_NATIVE(rate) case SERIAL_BAUD_##rate: return B##rate;
+    SERIAL_BAUD_RATES(SERIAL_BAUD_NATIVE)
+#undef SERIAL_BAUD_NATIVE
     default: return (speed_t)0;
     }
 }

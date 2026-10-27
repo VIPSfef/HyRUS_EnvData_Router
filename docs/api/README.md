@@ -1,13 +1,18 @@
-# 서버 연동 규격과 검증 도구 · 0.10.0
+# 서버 연동 규격과 검증 도구 · 0.11.0
 
-이 폴더에는 수집기가 서버로 보내는 데이터를 설명하는 규격 파일과 검증 도구가 들어 있습니다. 규격은 `src/sender.c`, `weather.c`, `spatial.c`, `telemetry.c`, `time_sync.h`의 실제 출력에 맞추었습니다. 서버를 처음 구현한다면 먼저 [서버 API 문서](../SERVER_API.md)를 읽고, 이 폴더의 파일을 구현과 검증에 활용하세요.
+이 폴더에는 수집기가 서버로 보내는 데이터를 설명하는 규격 파일과 검증 도구가 들어 있습니다. 규격은 `src/sender.c`, `status_report.c`, `weather.c`, `spatial.c`, `telemetry.c`, `time_sync.h`의 실제 출력에 맞추었습니다. 서버를 처음 구현한다면 먼저 [서버 API 문서](../SERVER_API.md)를 읽고, 이 폴더의 파일을 구현과 검증에 활용하세요.
+
+이 규격은 `HyRUS_EnvData_Router` → 수신 서버의 계약입니다. 별도 `HyRUS_EnvData_Px4`가 I²C 관측을 발행하는 MAVLink 입력 계약은 [PX4 → Router 규약](../PX4_MAVLINK_CONTRACT.md)에 있습니다.
 
 | 파일 | 용도 |
 |---|---|
-| [ingestion.schema.json](ingestion.schema.json) | JSON Schema 2020-12로 작성한 데이터 구조입니다. 일반 MAVLink3, 온습도, 혼합 bundle, 하트비트 시험, 개발용 CSV2의 다섯 가지 최상위 형식을 정의합니다. |
+| [ingestion.schema.json](ingestion.schema.json) | JSON Schema 2020-12로 작성한 데이터 구조입니다. 일반 MAVLink3, 온습도, 혼합 bundle, 하트비트 시험, 개발용 CSV2, 주기적 상태 보고의 여섯 가지 최상위 형식을 정의합니다. |
 | [openapi.json](openapi.json) | OpenAPI 3.1.1로 작성한 HTTP API 규격입니다. POST `/ingest`, 선택적으로 사용하는 bearer 인증, 수신 확인 응답 204를 정의합니다. |
-| [examples](examples/README.md) | 실제 C 인코더로 만든 합성 예제 3개입니다. 실제 센서에서 수집한 관측 파일은 아닙니다. |
+| [UDP_BACKUP.md](../UDP_BACKUP.md) | UDP 주소 설정, 40바이트 헤더, JSON 조각 재조립, 두 전송 경로의 중복 처리와 보존 범위입니다. |
+| [examples](examples/README.md) | 실제 C 인코더로 만든 관측 합성 예제 3개와 상태 계약에 맞춘 합성 예제 1개입니다. 실제 센서에서 수집한 관측 파일은 아닙니다. |
 | [validate.py](validate.py) | 설치된 Python jsonschema를 사용해 메타스키마와 예제를 검사합니다. 잘못된 입력을 거부하는지, 경계값을 올바르게 처리하는지도 확인합니다. |
+
+OpenAPI는 HTTP만 설명합니다. UDP는 기본적으로 같은 호스트의 TCP 포트+1로 보내며, `MTRU` 헤더의 조각을 모두 재조립한 JSON에 `ingestion.schema.json`을 적용합니다. UDP 헤더·조각 길이·만료 검사는 JSON Schema 검사 전에 별도로 수행해야 합니다.
 
 ## 규격을 검증하는 방법
 
@@ -27,12 +32,13 @@ Ubuntu에서는 `python3 docs/api/validate.py`를 실행하면 됩니다. C 시�
 - 온습도 데이터: raw 128개, 그룹 16개
 - 공간 데이터: snapshot 144개
 - 요청에 묶는 항목: 4개
+- 상태 보고의 발견 장치: 32개. 현재 송신기는 요청마다 상태 1개를 보내며, 시험 서버는 요청당 상태 64개까지 검증합니다.
 
 이 상한을 바꿔 빌드한다면 규격도 함께 검토해야 합니다.
 
 ## 큰 정수와 시각의 미상값을 처리할 때
 
-64비트 정수는 현재 규격의 표현 방식을 유지해야 합니다. 일반 데이터의 batch_id, window, t_us, UTC, 누적 loss와 공간 데이터의 식별자, revision은 십진 문자열입니다. 반면 온습도의 record.seq와 하트비트의 seq, source_generation, 단조 시각은 현재 코드에서 **JSON 숫자**로 보냅니다. JavaScript Number로 큰 정수가 반올림되지 않도록 손실 없는 파서를 사용하세요.
+64비트 정수는 현재 규격의 표현 방식을 유지해야 합니다. 일반 데이터의 batch_id, window, t_us, UTC, 누적 loss와 공간 데이터의 식별자, revision은 십진 문자열입니다. 상태 보고의 seq, generation, 모든 시각·경과 시간·누적 카운터도 십진 문자열입니다. 반면 온습도의 record.seq와 하트비트의 seq, source_generation, 단조 시각은 현재 코드에서 **JSON 숫자**로 보냅니다. JavaScript Number로 큰 정수가 반올림되지 않도록 손실 없는 파서를 사용하세요.
 
 일반 raw에서 허용하는 시각 오차는 0..20000µs이고, 항법 간격은 0..200000µs입니다. 온습도의 시각 오차와 raw_clock_anchor.uncert_us는 값을 모를 때 null로 보냅니다. 일반 raw의 UTC가 알려진 경우에는 utc_uncert_us에 uint32 값이 들어갈 수 있으며, 여기에는 미상 sentinel도 포함됩니다. UTC가 없으면 두 열 모두 null입니다.
 
@@ -46,13 +52,36 @@ Ubuntu에서는 `python3 docs/api/validate.py`를 실행하면 됩니다. C 시�
 - 평균, M2, 분산의 재계산, n과 배열 길이의 일치 여부, 품질 비트의 의미, 필드 간 수치 비교
 - 세션과 소스별 중복 제거, 공간 revision의 증가 확인과 최신값 교체, transaction과 영속 저장
 - 좌표, 시계, 센서의 실제 정확도와 기상장을 복원할 수 있는지 여부
+- 상태 보고 장치 배열의 sysid/compid 중복 여부. JSON Schema는 서로 다른 객체가 같은 장치 ID를 사용하는지 비교하지 못하며, C 시험 서버는 중복을 거부합니다.
+
+## 새 표본이 없을 때의 상태 보고
+
+`status_interval_ms=10000`으로 설정하면 `mavlink_router_status_v1`을 10초마다 별도로 전송하며 `sample_count`는 항상 0입니다. 기본값 `0`은 기존 API와의 호환성을 위해 비활성화입니다. 마지막 온습도 값은 상태의 참고값으로 보존하고, 새로운 측정 표본이나 평균·표본 수에 더하지 마세요.
+
+`source.connected`는 선택한 기기의 `state=LOCKED`와 `heartbeat=LIVE`가 모두 성립할 때만 true입니다. COM 포트가 열려 있거나 GCS에서 프레임이 계속 들어와도 선택한 기기의 하트비트가 끊기면 false입니다. `WAIT_HEARTBEAT`, `HEARTBEAT_LOST`, 연결 실패와 중지·실패 상태를 함께 전달합니다. 각 발견 장치도 별도의 하트비트·데이터 수신 경과 시간을 가집니다.
+
+`run_elapsed_ms`는 프로세스 실행 경과 시간입니다. `hb_age_ms`, `data_age_ms`, 온습도의 `rx_age_ms`는 각각 마지막 수신 이후 경과 시간입니다. `WAIT`와 `UNKNOWN`에는 경과 시간이 없으므로 null이며, 오래된 센서 값은 `STALE`과 원래 수신 경과 시간을 유지합니다. `estimated_lost`는 시퀀스 간격으로 추정한 누락 수입니다.
+
+선택 필드 `position`은 마지막 GPS/ESTGPS의 위도·경도·해발고도, fix, LIVE/STALE/INVALID, 자체 `rx_age_ms`를 전합니다. 정렬 허용 시간이 지나도 마지막 좌표는 유지하며, 유효하지 않은 과거 좌표를 새 측정값으로 사용하면 안 됩니다. 미수신은 null입니다. `stale_after_ms`가 있으면 서버는 보고 후 경과 시간까지 더해 마지막 좌표의 경과를 표시할 수 있습니다.
+
+상태 보고의 204는 그 상태를 수락했다는 뜻입니다. 실패한 상태 보고는 측정 대기열에 쌓이지 않고 다음 주기의 최신 상태로 대체됩니다. 서버가 상태를 저장한다면 `(stream, session, generation, seq)`로 식별하고 측정 데이터와 별도로 다루세요. 시험 서버 화면도 `statuses`와 `records`를 따로 집계합니다.
 
 ## 재전송과 수신 확인
 
-전송 대기열에서 확정된 개별 항목(sealed ID)의 관측값, 원점, 시계 정보는 재시도 중에도 바뀌지 않습니다. 다만 뒤에 대기 중인 항목이 추가되거나 bundle로 묶이는 방식, 누적 loss가 바뀌면 전체 요청 내용은 달라질 수 있습니다. 따라서 요청 본문의 hash를 중복 제거 키로 사용하면 안 됩니다.
+이 절의 대기열·재시도 계약은 측정 요청에 적용합니다. 상태 보고는 위에 설명한 주기적 최신 상태 전송 규칙을 따릅니다.
+
+UDP를 켜면 수락한 일반 관측·온습도 표본마다 같은 ID의 레코드를 UDP로 바로 보내고 TCP용 RAM FIFO에도 넣습니다. HTTP는 `send_interval_ms`에 맞춰 여러 레코드를 묶어 전송합니다. `tcp_buffer_max_mb=1024`는 기본1GiB이며, 보류 JSON과 노드 관리 정보만 제한합니다. 프로세스 전체 메모리 한도가 아니며 미리1GiB를 할당하지 않습니다. 설정 변경과 재시작으로 한도를 바꿀 수 있습니다. 한도 도달·할당 실패 시 새 TCP용 항목은 거부하고 손실 수를 표시하지만 UDP 송신 시도는 계속됩니다.
+
+`http_min_interval_ms=500`은 측정·상태·재시도·종료와 설정 재시작 전송 전체에 적용하는 요청 완료 후 최소 간격입니다. 기본값에서 초당 최대2회 수준으로 요청을 분산하며, 응답이 느리면 더 낮아집니다. 401·403·429에는1,2,4,8,16,30초의 공통 재시도 대기를 적용하고 204 성공만 이 추가 대기를 초기화합니다. 다른 오류는 기존 추가 대기를 유지하며, 측정 실패에는 `send_interval_ms`도 적용합니다. 403의 실제 거부 이유는 서버 로그로 확인합니다. `Retry-After`는 해석하지 않으며 UDP 백업에는 이 HTTP 제한을 적용하지 않습니다.
+
+표본별 즉시 확정은 실시간 `schema:3`과 온습도에 적용합니다. CSV `schema:2`는 `window_us` 중복 키를 유지하기 위해 측정 시간 구간 단위로 묶고, 확정된 배치를 UDP로 보냅니다. HTTP 온습도 `records[]`에도 여러 레코드가 올 수 있으므로 첫 원소만 처리하지 마세요.
+
+전송 대기열에서 확정된 개별 항목(sealed ID)의 관측값, 원점, 시계 정보와 인코딩 JSON은 재시도 중에도 바뀌지 않습니다. 다만 뒤에 대기 중인 항목이 추가되거나 bundle로 묶이는 방식이 바뀌면 전체 요청 내용은 달라질 수 있습니다. 따라서 요청 본문의 hash를 중복 제거 키로 사용하면 안 됩니다.
 
 서버가 요청에 들어 있는 모든 ID를 수락한 뒤 204로 응답해야 수집기가 해당 데이터를 메모리에서 해제합니다. 200, 202, 그 밖의 응답을 받거나 연결이 끊기면 데이터는 계속 전송 대기 상태로 남습니다.
 
-C 시험 서버는 받은 내용을 RAM에서 표시하며 통신을 확인하는 용도입니다. DB 저장, 인증, 중복 제거 기능은 제공하지 않습니다. 일반 schema3, bundle, CSV2를 처리하는 운영 서버 구현도 포함하지 않습니다.
+UDP는 ACK나 재시도가 없으므로 수신·저장 확인을 HTTP에 대신 전달하지 않습니다. UDP로 먼저 저장한 개별 ID가 나중에 HTTP로 다시 오면 중복 저장을 피하고, 요청 전체를 확인한 뒤204를 반환합니다. 두 전송 경로에서 공통 수신 원장을 사용해야 합니다. RAM의 자료는 종료·전원 차단 뒤 복구되지 않습니다.
+
+C 시험 서버는 온습도·하트비트·상태 보고를 RAM에서 표시하며 통신을 확인하는 용도입니다. 최근의 제한된 기록으로 HTTP·UDP 사이의 같은 레코드 화면 중복을 억제하지만, DB 저장·인증·영속 수신 원장은 제공하지 않습니다. 일반 schema3, bundle, CSV2를 처리하는 운영 서버 구현도 포함하지 않습니다.
 
 규격의 문법은 [JSON Schema 2020-12의 tuple 규칙](https://json-schema.org/draft/2020-12/release-notes)과 [OpenAPI 3.1.1](https://spec.openapis.org/oas/v3.1.1.html)을 따릅니다.

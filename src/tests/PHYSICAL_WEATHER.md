@@ -9,11 +9,19 @@
 - QGC 등 다른 COM 소유자가 포트를 해제한 상태여야 합니다. TCP 21000의 다른 서버도 종료해야 합니다. 다른 프로세스를 찾아 강제로 종료하지 않습니다.
 - 실제 관측값은 RAM에서만 처리합니다. **실제 관측값이 들어 있는 자식 프로그램 stdout·TUI 프레임을 파일로 리다이렉트하거나 로그·화면 캡처로 저장하지 마세요.** 아래 도구는 최종 상태·개수만 출력합니다. 임시 파일은 접속 설정 INI만 만들고 종료 시 지웁니다.
 
-옵션 없는 실행은 계획만 표시하며 COM 포트와 서버를 열지 않습니다.
+옵션 없는 실행은 계획만 표시하며 COM 포트와 서버를 열지 않습니다. 기본 포트는 지정되어 있지 않아 계획의 포트 값은 `null`입니다. `--baud` 기본값은 115200이며 실제 센서 링크에 맞게 바꿀 수 있습니다.
 
 ```powershell
 python src/tests/physical_weather_check.py
 python src/tests/physical_weather_tui_check.py
+```
+
+제품 수집기의 자동 탐색과 달리 이 수동 검사는 사용자가 선택한 포트와 속도 하나만 사용합니다. 실행할 터미널에서 실제 장치의 값을 입력하고 계획을 확인합니다. `--run` 없이 아래 명령을 실행하면 입력한 설정을 표시하기만 합니다.
+
+```powershell
+$weatherSerialPort = Read-Host '검사할 실제 COM 포트 이름'
+$weatherSerialBaud = [int](Read-Host '해당 링크의 baud (예: 115200)')
+python src/tests/physical_weather_check.py --serial $weatherSerialPort --baud $weatherSerialBaud
 ```
 
 ## 원본 JSON과 통계 검사
@@ -21,10 +29,10 @@ python src/tests/physical_weather_tui_check.py
 다음은 GPS·UTC가 없는 실내 조건의 예입니다. 위치 정보가 제공되는 조건에서는 `--position unknown --clock-model unknown`을 생략하거나 조건에 맞춰 선택합니다.
 
 ```powershell
-python src/tests/physical_weather_check.py --run --serial COM5 --duration-ms 12000 --position unknown --clock-model unknown
+python src/tests/physical_weather_check.py --run --serial $weatherSerialPort --baud $weatherSerialBaud --duration-ms 12000 --position unknown --clock-model unknown
 ```
 
-`--run`을 명시한 경우에만 실제 C 서버와 수집기를 자식으로 실행합니다. COM5 고정 입력·자동 탐색 OFF·UDP OFF·1초 전송을 사용합니다. 6~20초의 유한 시험이며 종료 시 자신이 시작한 자식만 정리합니다.
+`--run`과 `--serial`을 명시한 경우에만 실제 C 서버와 수집기를 자식으로 실행합니다. `--run`에 포트가 없으면 자식을 실행하기 전에 `explicit_com_port_required`로 실패합니다. 사용자가 지정한 포트·baud, 자동 탐색 OFF·UDP OFF·1초 전송을 사용합니다. 지원 baud의 최종 검증은 수집기가 수행합니다. 6~20초의 유한 시험이며 종료 시 자신이 시작한 자식만 정리합니다.
 
 원본은 C 서버 stdout에서 RAM으로 받아 다음을 독립 검사합니다.
 
@@ -41,7 +49,7 @@ python src/tests/physical_weather_check.py --run --serial COM5 --duration-ms 120
 원본 통계 검사가 끝난 뒤 별도로 실행합니다.
 
 ```powershell
-python src/tests/physical_weather_tui_check.py --run --serial COM5 --duration-ms 12000 --position unknown
+python src/tests/physical_weather_tui_check.py --run --serial $weatherSerialPort --baud $weatherSerialBaud --duration-ms 12000 --position unknown
 ```
 
 `physical_weather_conpty.py`가 Windows 가상 콘솔을 만들어 실제 C 서버의 ANSI TUI 프레임을 RAM에서 받습니다. 온습도·SI 라벨·평균/분산·측정시각·위치 미상 표시와 수락/큐 상태를 검사합니다. 창을 띄우거나 화면 파일을 저장하지 않습니다. 원본 통계 계산은 앞의 JSON 검사 역할이며, 이 검사는 실제 TUI 표시 내용 확인입니다.

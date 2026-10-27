@@ -14,7 +14,7 @@ CMakeLists.txt text eol=lf
 *.cmake text eol=lf
 *.json text eol=lf
 
-# SHA256-verified PX4 overlay payloads must be byte-stable on Windows.
+# Keep vendored sources, schemas, and patch text byte-stable on Windows.
 *.cpp text eol=lf
 *.hpp text eol=lf
 *.yaml text eol=lf

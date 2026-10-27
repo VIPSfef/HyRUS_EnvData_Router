@@ -19,7 +19,7 @@ import tempfile
 import threading
 import time
 
-from test_mavlink_router import Wire
+from test_mavlink_router import Wire, assert_retry_cadence
 from test_test_stream import CaptureServer, record_bytes, request, response_status
 
 SAMPLE_COUNT = 60
@@ -87,17 +87,17 @@ def bin_key(record, item):
 
 def validate_capture(capture, speed, stderr):
     assert not capture.errors, capture.errors
-    assert len(capture.requests) >= 5, "too few 1 Hz requests"
+    assert len(capture.requests) >= 5, "too few collection intervals reached HTTP"
     assert sum(len(entry[2]) for entry in capture.requests) + len(stderr) < RAM_LIMIT, "test capture RAM budget exceeded"
     first, second = capture.requests[:2]
     assert first[1] == 202 and second[1] == 204, "retry fixture did not issue 202 then 204"
-    assert first[2] == second[2], "retry recomputed weather/spatial body bytes"
+    original, retried = record_bytes(first[2]), record_bytes(second[2])
+    assert original and all(retried.get(key) == value for key, value in original.items()), "retry changed original weather/spatial record bytes"
+    assert_retry_cadence(capture.requests)
     lexical, acknowledged, records = {}, set(), []
     for ordinal, (received, status, body, payload) in enumerate(capture.requests):
-        if ordinal:
-            assert received - capture.requests[ordinal - 1][0] >= .90, "HTTP request start exceeded configured 1 Hz"
         assert payload["schema"] == "mavlink_weather_v1" and payload["stream"] == "spatial-test"
-        assert len(payload["records"]) == 1
+        assert 1 <= len(payload["records"]) <= 4
         encoded = record_bytes(body)
         for record in payload["records"]:
             identity = record["session"], record["seq"]

@@ -1,7 +1,0 @@
-menuconfig SYSTEMCMDS_SHTC3_PROBE
-    bool "shtc3_probe"
-    default n
-    ---help---
-        One-shot SHTC3 product-ID diagnostic at address 0x70.
-        No scan, reset, measurements, parameters or topic publication.
-        Requires the SHTC3Protocol.hpp header from the SHTC3 overlay.

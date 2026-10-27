@@ -1,9 +1,9 @@
 {
   "openapi": "3.1.1",
   "info": {
-    "title": "MAVLink telemetry router ingestion contract",
-    "version": "0.10.0",
-    "description": "Implementation contract for a receiving server. The repository diagnostic server supports only weather and heartbeat envelopes, lacks authentication/dedup/database, and rejects general schema3/bundle/CSV2. This document does not claim that full backend exists."
+    "title": "HyRUS EnvData Router ingestion contract",
+    "version": "0.11.0",
+    "description": "Implementation contract for a receiving server. The repository diagnostic server supports weather, heartbeat and periodic status envelopes, lacks authentication/dedup/database, and rejects general schema3/bundle/CSV2. This document does not claim that full backend exists. HyRUS_EnvData_Router owns host MAVLink reception, analysis and server forwarding. I2C acquisition and PX4 MAVLink publication belong to the separate HyRUS_EnvData_Px4 repository."
   },
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "servers": [
@@ -17,7 +17,7 @@
       "post": {
         "operationId": "ingestTelemetry",
         "summary": "Accept all enclosed record IDs; reply204 only after acceptance",
-        "description": "Request Content-Type is application/json over HTTP/HTTPS TCP. Authentication may be absent in local tests or use Authorization: Bearer from the configured token_env. No HMAC, JWT format, request hash, or Idempotency-Key header is implemented. Retry bodies can add later queued records, change bundle wrapping, and update cumulative loss diagnostics; the full request bytes are not an identity. Deduplicate immutable records by schema-specific IDs before applying data. General schema3 uses(stream,session,batch_id); weather uses(stream,record.session,record.seq); heartbeat uses(stream,record.session,record.seq); development CSV2 uses(stream,session,window_us). Separately upsert spatial cumulative revisions by sender/session+continuity_key+path_id+bin_index+metric/message_id/sensor_id/sensor_instance/source_kind; replace with a newer revision rather than summing partials. Only204 releases client RAM items. TCP ACK and other2xx do not. Unknown object fields must be tolerated/preserved; an unknown top-level schema version needs an explicit server upgrade.",
+        "description": "Request Content-Type is application/json over HTTP/HTTPS TCP. Authentication may be absent in local tests or use Authorization: Bearer from directly configured token, or token_env when token is empty. No HMAC, JWT format, request hash, or Idempotency-Key header is implemented. Retry bodies can add later queued records, change bundle wrapping, and update cumulative loss diagnostics; the full request bytes are not an identity. Deduplicate immutable records by schema-specific IDs before applying data. General schema3 uses(stream,session,batch_id); weather uses(stream,record.session,record.seq); heartbeat uses(stream,record.session,record.seq); development CSV2 uses(stream,session,window_us). Separately upsert spatial cumulative revisions by sender/session+continuity_key+path_id+bin_index+metric/message_id/sensor_id/sensor_instance/source_kind; replace with a newer revision rather than summing partials. Only204 releases client RAM items. TCP ACK and other2xx do not. Unknown object fields must be tolerated/preserved; an unknown top-level schema version needs an explicit server upgrade. Periodic mavlink_router_status_v1 reports are latest-state snapshots, have sample_count=0 and carry all uint64 fields as decimal strings. Keep them separate from measurement ingestion; key reports by (stream,session,generation,seq) if storing them. Failed status reports are replaced by the next fresh snapshot rather than retained in the measurement queue. connected describes the selected vehicle heartbeat, not merely an open COM port or active GCS. All HTTP POSTs, including measurements, status reports, retries and final/restart draining, share a completion-to-next-start minimum gap configured by http_min_interval_ms (default 500ms, range 500..60000ms). Thus the default maximum rate is about two requests per second per router process, lower when responses are slow. Pending measurements remain queued between slots. Ready status and measurement work alternate. Responses 401, 403 and 429 introduce a shared exponential cooldown of 1, 2, 4, 8, 16 then at most 30 seconds. Only HTTP204 resets the extra cooldown. Other failures retain an existing cooldown without increasing it, and failed measurement requests also respect send_interval_ms. The next request waits for the larger of the configured gap and current cooldown. Retry-After is not interpreted. This pacing does not pause MAVLink reception or UDP backup.",
         "security": [
           {},
           {
@@ -26,7 +26,7 @@
         ],
         "requestBody": {
           "required": true,
-          "description": "Default0.10.0 compiled capacities. General key/value unit_map is display metadata, not SI conversion. Weather SI registry1 fixes temperature K and relative-humidity ratio. All stored examples are synthetic fixtures, not observations.",
+          "description": "Default0.11.0 compiled capacities. General key/value unit_map is display metadata, not SI conversion. Weather SI registry1 fixes temperature K and relative-humidity ratio. All stored examples are synthetic fixtures, not observations.",
           "content": {
             "application/json": {
               "schema": {
@@ -957,6 +957,86 @@
                       }
                     ]
                   }
+                },
+                "disconnectedStatus": {
+                  "summary": "Vehicle heartbeat lost while GCS remains live; previous temperature is stale and humidity unknown",
+                  "value": {
+                    "schema": "mavlink_router_status_v1",
+                    "stream": "synthetic",
+                    "records": [
+                      {
+                        "seq": "7",
+                        "generation": "2",
+                        "session": "synthetic.fixture",
+                        "reported_monotonic_ms": "15000",
+                        "run_elapsed_ms": "10000",
+                        "sample_count": 0,
+                        "source": {
+                          "sysid": 1,
+                          "compid": 1,
+                          "endpoint": "COM4",
+                          "state": "HEARTBEAT_LOST",
+                          "serial_baud": 57600,
+                          "connected": false,
+                          "heartbeat": "LOST",
+                          "hb_age_ms": "6000",
+                          "data": "STALE",
+                          "data_age_ms": "5500"
+                        },
+                        "weather": {
+                          "temperature": {
+                            "value": 298.15,
+                            "unit": "K",
+                            "state": "STALE",
+                            "rx_age_ms": "7000",
+                            "observations": "12"
+                          },
+                          "humidity": {
+                            "value": null,
+                            "unit": "1",
+                            "state": "UNKNOWN",
+                            "rx_age_ms": null,
+                            "observations": "0"
+                          }
+                        },
+                        "packets": {
+                          "received": "240",
+                          "estimated_lost": "3",
+                          "duplicates": "1"
+                        },
+                        "devices": [
+                          {
+                            "sysid": 1,
+                            "compid": 1,
+                            "heartbeat": "LOST",
+                            "hb_age_ms": "6000",
+                            "data": "STALE",
+                            "data_age_ms": "5500",
+                            "rx_age_ms": "5500"
+                          },
+                          {
+                            "sysid": 255,
+                            "compid": 190,
+                            "heartbeat": "LIVE",
+                            "hb_age_ms": "100",
+                            "data": "WAIT",
+                            "data_age_ms": null,
+                            "rx_age_ms": "100"
+                          }
+                        ],
+                        "position": {
+                          "source": "ESTGPS",
+                          "state": "STALE",
+                          "fix": 0,
+                          "lat_deg": 37.0,
+                          "lon_deg": 127.0,
+                          "alt_msl_m": 100.0,
+                          "rx_age_ms": "5500",
+                          "stale_after_ms": 5000
+                        }
+                      }
+                    ]
+                  }
                 }
               }
             }
@@ -964,28 +1044,28 @@
         },
         "responses": {
           "204": {
-            "description": "Only application ACK: every enclosed immutable ID has been accepted durably by the deployment, or an existing duplicate is already accepted. Sender releases those queued items. The bundled diagnostic server only confirms RAM parsing/display; it provides no durable storage."
+            "description": "Only application ACK: every enclosed immutable ID has been accepted durably by the deployment, or an existing duplicate is already accepted. Sender releases those queued items. The bundled diagnostic server only confirms RAM parsing/display; it provides no durable storage. For status-only reports, this acknowledges the state snapshot and releases no measurement records."
           },
           "200": {
-            "description": "Not an ACK for this router. The sender retains queued items and retries."
+            "description": "Not an ACK for this router. Measurement items remain queued and retry; a failed status snapshot is replaced by the next periodic snapshot."
           },
           "202": {
-            "description": "Not an ACK, even if processing was accepted asynchronously. The sender retains queued items and retries until204."
+            "description": "Not an ACK, even if accepted asynchronously. Measurement items remain queued until 204; status-only reports use the next fresh periodic snapshot."
           },
           "400": {
-            "description": "Invalid request; sender retains/retries subject to its bounded queue and failure policy. Server must not ACK malformed data."
+            "description": "Invalid request; server must not ACK malformed data. Measurement items retain/retry subject to bounded queue policy; status failures wait for the next fresh periodic snapshot."
           },
           "401": {
-            "description": "Deployment requires or rejects authentication. Sender retains/retries; configure the token environment variable."
+            "description": "Authentication rejected; not an ACK. Configure token or token_env. Measurements remain queued. Shares the 1..30 second exponential cooldown with 403 and 429; status failures use a fresh periodic snapshot."
           },
           "403": {
-            "description": "Authorization rejected; not an ACK."
+            "description": "Forbidden by deployment policy; not an ACK. Do not infer invalid credentials versus deployment rate limiting from this code alone. Confirm the reason in server logs. Measurements remain queued and a shared 1..30 second exponential cooldown applies."
           },
           "413": {
             "description": "Deployment request-size limit exceeded; not an ACK. Current sender wire body can reach1,110,015 bytes; diagnostic server limit is512KiB."
           },
           "429": {
-            "description": "Rate limited; not an ACK. No Retry-After-specific scheduling behavior is promised by the current client."
+            "description": "Rate limited; not an ACK. Measurements remain queued and a shared 1..30 second exponential cooldown applies. Retry-After is not interpreted."
           },
           "500": {
             "description": "Server failure; not an ACK."
@@ -994,7 +1074,7 @@
             "description": "Service unavailable; not an ACK."
           },
           "default": {
-            "description": "Every status except204, connection failure and lost response leaves unconfirmed immutable items queued. Queues are finite, RAM-only and can lose later input on overflow/restart."
+            "description": "Every status except 204, connection failure and lost response leaves unconfirmed measurement items queued. Measurement queues are finite, RAM-only and can lose later input on overflow/restart. Status-only reports do not enter that queue: the next period sends a fresh state snapshot."
           }
         },
         "x-router-max-body-bytes": 1110015,

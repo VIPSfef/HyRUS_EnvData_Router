@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 
-from test_mavlink_router import Wire
+from test_mavlink_router import Wire, assert_retry_cadence
 from test_test_stream import CaptureServer, record_bytes, request, response_status
 
 SCHEMA = "mavlink_weather_v1"
@@ -139,12 +139,11 @@ def validate_samples(record, mode, expected, actual):
 def validate_mixed_requests(capture, expected, stderr):
     known, acknowledged, weather_records, telemetry_batches = {}, set(), [], []
     mixed_seen = False
+    assert_retry_cadence(capture.requests)
     for ordinal, (host_time, status, body, root) in enumerate(capture.requests):
-        if ordinal:
-            assert host_time - capture.requests[ordinal - 1][0] >= .90, "mixed HTTP exceeded configured1Hz"
         if root["schema"] == "mavlink_router_bundle_v1":
             mixed_seen = True
-            assert 1 <= len(root["records"]) <= 4, root
+            assert 1 <= len(root["records"]) <= 2, root
             payloads = []
             for entry in root["records"]:
                 assert entry["kind"] in ("weather", "telemetry"), entry
@@ -186,7 +185,7 @@ def validate_mixed_requests(capture, expected, stderr):
             legacy[index] = row
     assert set(legacy) == set(range(100)), ("mixed legacy loss", len(legacy), stderr[-3000:])
     assert b"queue_windows_dropped=0 queue_samples_dropped=0 pending=0" in stderr, stderr
-    print("Normal mixed mode: 200 atmospheric +100 legacy samples, max_windows1,1Hz bundle, no drops,202 retry/204 release: PASS")
+    print("Normal mixed mode: 200 atmospheric +100 legacy samples, max_windows1 mixed exception, interval retries/ACK backlog drain, no drops: PASS")
 
 
 def client_case(executable, directory, mode, normal=False):
@@ -272,11 +271,11 @@ def client_case(executable, directory, mode, normal=False):
         if normal:
             validate_mixed_requests(capture, expected, stderr); return None
         lexical, acknowledged, records = {}, set(), []
+        assert_retry_cadence(capture.requests)
         for ordinal, (host_time, status, body, payload) in enumerate(capture.requests):
             assert payload["schema"] == SCHEMA and payload["stream"] == "weather-test", payload
-            assert len(payload["records"]) == 1, payload
+            assert 1 <= len(payload["records"]) <= 4, payload
             raw = record_bytes(body)
-            if ordinal: assert host_time - capture.requests[ordinal - 1][0] >= .90, "HTTP exceeded configured1Hz"
             for record in payload["records"]:
                 identity = record["session"], record["seq"]
                 assert identity not in acknowledged, ("confirmed record sent again", identity)
@@ -284,7 +283,8 @@ def client_case(executable, directory, mode, normal=False):
                 else: lexical[identity] = raw[identity]
                 if status == 204: acknowledged.add(identity); records.append(record)
         assert capture.requests[0][1] == 202 and capture.requests[1][1] == 204, capture.requests[:2]
-        assert record_bytes(capture.requests[0][2]) == record_bytes(capture.requests[1][2]), "202 batch forgotten/recomputed"
+        original, retried = record_bytes(capture.requests[0][2]), record_bytes(capture.requests[1][2])
+        assert original and all(retried.get(key) == value for key, value in original.items()), "202 batch forgotten/recomputed"
         assert set(lexical) == acknowledged, "healthy204 server left data unconfirmed"
         actual = {}
         for record in records: validate_samples(record, mode, expected, actual)

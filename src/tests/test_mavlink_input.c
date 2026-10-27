@@ -78,11 +78,13 @@ static void feed(uint32_t id, const uint8_t *p, size_t n, uint8_t extra,
     uint8_t frame[280]; size_t count=make_frame(frame,id,p,n,extra,2,sysid,compid,seq++,0);
     mi_feed(&input,frame,count,now);
 }
-static void heartbeat(uint8_t sysid, uint8_t compid, uint8_t type, uint8_t autopilot)
+static void heartbeat_at(uint8_t sysid, uint8_t compid, uint8_t type, uint8_t autopilot, uint64_t now)
 {
     uint8_t p[9]={0}; p[4]=type; p[5]=autopilot; p[6]=128; p[7]=4; p[8]=3;
-    feed(0,p,sizeof(p),50,sysid,compid,100);
+    feed(0,p,sizeof(p),50,sysid,compid,now);
 }
+static void heartbeat(uint8_t sysid, uint8_t compid, uint8_t type, uint8_t autopilot)
+{ heartbeat_at(sysid,compid,type,autopilot,100); }
 static void navigation_at(uint32_t t, int32_t lat_delta, uint8_t sysid, uint64_t now)
 {
     uint8_t p[28]={0};
@@ -130,6 +132,169 @@ static void trusted_anchor(uint32_t t, float north, float east, float down)
 {
     initialize(); heartbeat(1,1,2,12);
     estimator(t,54,t); local_velocity(t,north,east,down,t); gps(3,t); navigation(t,0,1);
+}
+static void battery_payload(uint8_t *p, uint8_t id, uint16_t voltage, uint8_t remaining)
+{
+    unsigned i;
+    memset(p, 0, 54);
+    for (i = 0; i < 10; ++i) put16(p + 10 + i * 2, UINT16_MAX);
+    put16(p + 10, voltage); p[32] = id; p[35] = remaining;
+}
+static void system_battery(uint16_t voltage, uint8_t remaining, uint64_t now)
+{
+    uint8_t p[31] = {0};
+    put16(p + 14, voltage); p[30] = remaining;
+    feed(1, p, sizeof(p), 124, 1, 1, now);
+}
+static int check_battery_system_and_freshness(void)
+{
+    const mi_battery *b = &input.report.battery;
+    uint8_t p[31] = {0}, frame[280];
+    size_t n;
+    initialize();
+    CHECK(b->source == MI_BATTERY_SOURCE_NONE && !b->flags);
+    system_battery(16800, 100, 0); /* No selected vehicle yet. */
+    CHECK(b->source == MI_BATTERY_SOURCE_NONE);
+    heartbeat_at(1, 1, 2, 12, 0);
+    system_battery(16800, 100, 0);
+    CHECK(b->source == MI_BATTERY_SOURCE_SYS_STATUS && b->voltage_mv == 16800);
+    CHECK(b->flags == (MI_BATTERY_HAVE_VOLTAGE | MI_BATTERY_HAVE_REMAINING));
+    CHECK(b->remaining_percent == 100 && b->voltage_received_ms == 0 && b->remaining_received_ms == 0);
+    CHECK(mi_battery_field_fresh(b, MI_BATTERY_HAVE_VOLTAGE, MI_BATTERY_FRESH_MS));
+    CHECK(!mi_battery_field_fresh(b, MI_BATTERY_HAVE_VOLTAGE, MI_BATTERY_FRESH_MS + 1));
+    CHECK(!mi_battery_field_fresh(NULL, MI_BATTERY_HAVE_VOLTAGE, 0));
+    CHECK(!mi_battery_field_fresh(b, MI_BATTERY_HAVE_VOLTAGE | MI_BATTERY_HAVE_REMAINING, 0));
+    heartbeat_at(1, 1, 2, 12, 4000);
+    CHECK(b->received_ms == 0 && b->voltage_received_ms == 0);
+    system_battery(UINT16_MAX, 25, 5000);
+    CHECK(b->flags == MI_BATTERY_HAVE_REMAINING && b->remaining_percent == 25);
+    CHECK(b->voltage_received_ms == 0 && b->remaining_received_ms == 5000);
+    CHECK(!mi_battery_field_fresh(b, MI_BATTERY_HAVE_REMAINING, 4999));
+    system_battery(12000, UINT8_MAX, 5500);
+    CHECK(b->flags == MI_BATTERY_HAVE_VOLTAGE && b->voltage_mv == 12000);
+    CHECK(b->voltage_received_ms == 5500 && b->remaining_received_ms == 5000);
+    system_battery(12001, 101, 5600);
+    CHECK(b->flags == MI_BATTERY_HAVE_VOLTAGE && b->remaining_received_ms == 5000);
+    system_battery(0, 0, 5700);
+    CHECK(b->voltage_mv == 0 && b->remaining_percent == 0 &&
+          b->flags == (MI_BATTERY_HAVE_VOLTAGE | MI_BATTERY_HAVE_REMAINING));
+    system_battery(UINT16_MAX, UINT8_MAX, 5800);
+    CHECK(!b->flags && b->received_ms == 5800);
+    /* MAVLink 1 full base payload and MAVLink 2 truncated zero percent. */
+    put16(p + 14, 12600); p[30] = 40;
+    n = make_frame(frame, 1, p, sizeof(p), 124, 1, 1, 1, seq++, 0);
+    mi_feed(&input, frame, n, 5900);
+    CHECK(b->voltage_mv == 12600 && b->remaining_percent == 40);
+    n = make_frame(frame, 1, p, 16, 124, 2, 1, 1, seq++, 0);
+    mi_feed(&input, frame, n, 6000);
+    CHECK(b->voltage_mv == 12600 && b->remaining_percent == 0 && b->remaining_received_ms == 6000);
+    mi_tick(&input, 11001);
+    CHECK(b->received_ms == 6000 && !mi_battery_field_fresh(b, MI_BATTERY_HAVE_REMAINING, 11001));
+    return 1;
+}
+static int check_battery_cells_identity_and_sources(void)
+{
+    const mi_battery *b = &input.report.battery;
+    uint8_t p[54], frame[280];
+    unsigned i;
+    size_t n;
+    initialize(); heartbeat(1, 1, 2, 12);
+    system_battery(15000, 90, 1000);
+    battery_payload(p, 2, 4100, 80);
+    for (i = 1; i < 4; ++i) put16(p + 10 + i * 2, 4100);
+    feed(147, p, sizeof(p), 154, 1, 1, 2000);
+    CHECK(b->source == MI_BATTERY_SOURCE_BATTERY_STATUS && b->id == 2);
+    CHECK(b->voltage_mv == 16400 && b->remaining_percent == 80);
+    system_battery(14500, 85, 2500);
+    CHECK(b->voltage_mv == 16400 && b->remaining_percent == 80 && b->received_ms == 2000);
+    battery_payload(p, 1, 22200, 60);
+    feed(147, p, sizeof(p), 154, 1, 1, 2600);
+    CHECK(b->id == 2 && b->voltage_mv == 16400 && b->received_ms == 2000);
+    battery_payload(p, 0, 24000, 50);
+    feed(147, p, sizeof(p), 154, 1, 1, 2700);
+    CHECK(b->id == 0 && b->voltage_mv == 24000 && b->remaining_percent == 50);
+    battery_payload(p, 2, 16100, 75);
+    feed(147, p, sizeof(p), 154, 1, 1, 2800);
+    CHECK(b->id == 0 && b->voltage_mv == 24000 && b->received_ms == 2700);
+    battery_payload(p, 0, UINT16_MAX, 49);
+    feed(147, p, sizeof(p), 154, 1, 1, 2900);
+    CHECK(b->flags == MI_BATTERY_HAVE_REMAINING && b->remaining_percent == 49);
+    CHECK(b->source == MI_BATTERY_SOURCE_BATTERY_STATUS); /* No SYS voltage mixed in. */
+    battery_payload(p, 0, 23800, UINT8_MAX);
+    feed(147, p, sizeof(p), 154, 1, 1, 3000);
+    CHECK(b->flags == MI_BATTERY_HAVE_VOLTAGE && b->remaining_received_ms == 2900);
+    system_battery(14000, 70, 4000);
+    CHECK(b->source == MI_BATTERY_SOURCE_BATTERY_STATUS && b->flags == MI_BATTERY_HAVE_VOLTAGE);
+    mi_tick(&input, 8000);
+    CHECK(b->source == MI_BATTERY_SOURCE_BATTERY_STATUS);
+    mi_tick(&input, 8001);
+    CHECK(b->source == MI_BATTERY_SOURCE_SYS_STATUS && b->voltage_mv == 14000 && b->remaining_percent == 70);
+    battery_payload(p, 0, UINT16_MAX, UINT8_MAX);
+    feed(147, p, sizeof(p), 154, 1, 1, 8100);
+    CHECK(b->source == MI_BATTERY_SOURCE_SYS_STATUS && b->received_ms == 4000);
+    battery_payload(p, 0, 65534, 20); put16(p + 12, 10000);
+    feed(147, p, sizeof(p), 154, 1, 1, 8200);
+    CHECK(b->source == MI_BATTERY_SOURCE_BATTERY_STATUS && b->voltage_mv == 75534);
+    battery_payload(p, 0, 4000, 10);
+    for (i = 1; i < 10; ++i) put16(p + 10 + i * 2, 4000);
+    for (i = 0; i < 4; ++i) put16(p + 41 + i * 2, 4000);
+    feed(147, p, sizeof(p), 154, 1, 1, 8300);
+    CHECK(b->voltage_mv == 56000 && b->remaining_percent == 10);
+    /* Extension zero is absent; UINT16_MAX is only a base-array sentinel. */
+    put16(p + 41, UINT16_MAX); put16(p + 43, 1); put16(p + 45, 0); put16(p + 47, 0);
+    feed(147, p, sizeof(p), 154, 1, 1, 8400);
+    CHECK(b->voltage_mv == 105536);
+    battery_payload(p, 0, 12000, 0);
+    n = make_frame(frame, 147, p, 35, 154, 2, 1, 1, seq++, 0);
+    mi_feed(&input, frame, n, 8500);
+    CHECK(b->voltage_mv == 12000 && b->remaining_percent == 0 &&
+          b->flags == (MI_BATTERY_HAVE_VOLTAGE | MI_BATTERY_HAVE_REMAINING));
+    /* The low byte of a nonzero extension may be the last transmitted byte. */
+    p[35] = 1; put16(p + 41, 123);
+    n = make_frame(frame, 147, p, 42, 154, 2, 1, 1, seq++, 0);
+    mi_feed(&input, frame, n, 8600);
+    CHECK(b->voltage_mv == 12123 && b->remaining_percent == 1);
+    return 1;
+}
+static int check_battery_isolation_and_resets(void)
+{
+    const mi_battery *b = &input.report.battery;
+    uint8_t p[54], frame[280];
+    size_t n;
+    initialize(); heartbeat(1, 1, 2, 12);
+    battery_payload(p, 0, 16000, 70);
+    feed(147, p, sizeof(p), 154, 1, 1, 1000);
+    battery_payload(p, 0, 5000, 5);
+    feed(147, p, sizeof(p), 154, 2, 1, 1100);
+    feed(147, p, sizeof(p), 154, 1, 100, 1200);
+    feed(147, p, sizeof(p), 154, 255, 190, 1300);
+    CHECK(b->received_ms == 1000 && b->voltage_mv == 16000 && b->remaining_percent == 70);
+    n = make_frame(frame, 147, p, sizeof(p), 154, 2, 1, 1, seq++, 0);
+    frame[20] ^= 1; mi_feed(&input, frame, n, 1400);
+    CHECK(input.report.bad_crc == 1 && b->received_ms == 1000);
+    n = make_frame(frame, 147, p, sizeof(p), 154, 2, 1, 1, seq++, 1);
+    mi_feed(&input, frame, n, 1500);
+    CHECK(input.report.signed_rejected == 1 && b->received_ms == 1000);
+    input.options.allow_signed_unverified = 1;
+    mi_feed(&input, frame, n, 1600);
+    CHECK(b->received_ms == 1600 && b->voltage_mv == 5000);
+    mi_feed(&input, frame, n, 1700);
+    CHECK(b->received_ms == 1600); /* Duplicate data never refreshes battery age. */
+    mi_finish(&input, 1800); mi_link_reset(&input);
+    CHECK(b->source == MI_BATTERY_SOURCE_NONE && !b->flags);
+    CHECK(!input.battery_status.source && !input.system_battery.source);
+    system_battery(13000, 50, 1900);
+    CHECK(b->source == MI_BATTERY_SOURCE_SYS_STATUS);
+    battery_payload(p, 3, 14000, 55);
+    feed(147, p, sizeof(p), 154, 1, 1, 2000);
+    CHECK(b->source == MI_BATTERY_SOURCE_BATTERY_STATUS && b->id == 3);
+    navigation_at(20000, 0, 1, 2100); navigation_at(1000, 0, 1, 2200);
+    CHECK(input.report.reboots == 1 && b->source == MI_BATTERY_SOURCE_NONE && !b->flags);
+    CHECK(!input.battery_status.source && !input.system_battery.source);
+    system_battery(12800, 40, 2300);
+    CHECK(b->source == MI_BATTERY_SOURCE_SYS_STATUS && b->received_ms == 2300);
+    CHECK(sample_count == 0 && clock_count == 0); /* Battery is display metadata only. */
+    return 1;
 }
 static int check_discovery_and_fragmentation(void)
 {
@@ -390,6 +555,41 @@ static int check_estgps_missing_evidence(void)
     trusted_anchor(1000,0,0,0); gps(1,1100); mi_tick(&input,1600);
     CHECK(!input.report.have_navigation && input.report.estimate_source==MI_ESTIMATE_EKF);
     CHECK(input.estimate_p[0]==0 && input.estimate_p[1]==0);
+    return 1;
+}
+static int check_last_position_is_not_alignment_eligibility(void)
+{
+    double latitude;
+    initialize(); heartbeat(1,1,2,12); navigation(1000,0,1);
+    CHECK(input.report.have_navigation && input.report.have_last_geodetic);
+    CHECK(input.report.last_position_kind==WEATHER_POSITION_ESTGPS);
+    latitude=input.report.lat;
+    /* A 1 Hz position remains the last observation during the 500 ms gap.
+     * Its display metadata must never extend strict sample alignment. */
+    mi_tick(&input,1999);
+    CHECK(!input.report.have_navigation && input.report.position_kind==WEATHER_POSITION_UNKNOWN);
+    CHECK(input.report.have_last_geodetic && input.report.last_position_kind==WEATHER_POSITION_ESTGPS);
+    CHECK(input.report.navigation_received_ms==1000 && input.report.lat==latitude);
+    CHECK(!input.report.navigation_invalid);
+    navigation(2000,1000,1);
+    CHECK(input.report.have_navigation && input.report.navigation_received_ms==2000);
+    CHECK(input.report.lat>latitude && input.report.last_position_kind==WEATHER_POSITION_ESTGPS);
+    latitude=input.report.lat;
+    mi_tick(&input,20000);
+    CHECK(!input.report.have_navigation && input.report.have_last_geodetic);
+    CHECK(input.report.navigation_received_ms==2000 && input.report.lat==latitude);
+    /* Explicit estimator invalidity is distinct from silence and cannot
+     * erase the old coordinate or refresh its receipt timestamp. */
+    estimator(2100,6,20001); navigation_at(2100,2000,1,20002);
+    CHECK(input.report.navigation_invalid && !input.report.have_navigation);
+    CHECK(input.report.have_last_geodetic && input.report.lat==latitude);
+    CHECK(input.report.navigation_received_ms==2000);
+    estimator(2200,54,20100); navigation_at(2200,3000,1,20101);
+    CHECK(input.report.have_navigation && !input.report.navigation_invalid);
+    CHECK(input.report.navigation_received_ms==20101 && input.report.lat>latitude);
+    mi_link_reset(&input);
+    CHECK(!input.report.have_last_geodetic && !input.report.navigation_invalid);
+    CHECK(input.report.last_position_kind==WEATHER_POSITION_UNKNOWN);
     return 1;
 }
 static int check_estgps_validity_and_gaps(void)
@@ -675,6 +875,53 @@ static int check_weather_acquisition_order(void)
     }
     return 1;
 }
+static int check_receipt_freshness_and_sequence_estimates(void)
+{
+    const mi_device *d;
+    uint8_t corrupt[32]; size_t n;
+    initialize();
+    CHECK(mi_selected_device(&input.report)==NULL);
+    seq=10; heartbeat_at(1,1,2,12,0);
+    d=mi_selected_device(&input.report);
+    CHECK(d && d->have_heartbeat && d->last_heartbeat_ms==0 && !d->have_data);
+    CHECK(d->packets==1 && !d->duplicates && !d->sequence_gaps);
+    mi_tick(&input,1000);
+    CHECK(d->last_heartbeat_ms==0 && d->last_seen_ms==0);
+    /* The same sequence after silence is still a fresh wire receipt. */
+    seq=10; heartbeat_at(1,1,2,12,1100);
+    CHECK(d->last_heartbeat_ms==1100 && d->last_seen_ms==1100);
+    CHECK(d->duplicates==1 && input.report.duplicates==1 && d->packets==2);
+    navigation_at(1000,0,1,1200);
+    CHECK(d->have_data && d->last_data_ms==1200 && d->last_heartbeat_ms==1100);
+    CHECK(d->packets==3 && d->sequence_gaps==0);
+    heartbeat_at(255,190,6,8,1300);
+    heartbeat_at(51,68,18,8,1400);
+    CHECK(mi_selected_device(&input.report)==d && d->last_seen_ms==1200);
+    CHECK(d->last_heartbeat_ms==1100 && d->last_data_ms==1200 && d->packets==3);
+    seq=15; heartbeat_at(1,1,2,12,1500);
+    CHECK(d->sequence_gaps==3 && d->packets==4 && d->duplicates==1);
+    CHECK(d->last_heartbeat_ms==1500 && d->last_data_ms==1200);
+    n=mi_heartbeat(corrupt,sizeof(corrupt),1,1,16); CHECK(n>0);
+    corrupt[n-1]^=1u; mi_feed(&input,corrupt,n,1600);
+    CHECK(d->last_seen_ms==1500 && d->last_heartbeat_ms==1500 && d->packets==4);
+    mi_tick(&input,60000);
+    seq=0; heartbeat_at(1,1,2,12,60010);
+    CHECK(d->last_heartbeat_ms==60010 && d->last_seen_ms==60010 && d->last_data_ms==1200);
+    initialize(); seq=254; heartbeat_at(1,1,2,12,0);
+    seq=1; heartbeat_at(1,1,2,12,1000);
+    d=mi_selected_device(&input.report);
+    CHECK(d && d->sequence_gaps==2 && d->packets==2 && !d->duplicates);
+    /* A first heartbeat can reuse a previously received non-HB sequence. It
+     * still identifies the source and carries current heartbeat metadata. */
+    initialize(); seq=7; navigation_at(1000,0,1,1000);
+    CHECK(!mi_selected_device(&input.report));
+    seq=7; heartbeat_at(1,1,2,12,1200);
+    d=mi_selected_device(&input.report);
+    CHECK(d && d->have_heartbeat && d->last_heartbeat_ms==1200 && d->duplicates==1);
+    CHECK(d->type==2 && d->autopilot==12);
+    return 1;
+}
+
 static double seconds(void)
 {
 #ifdef _WIN32
@@ -718,12 +965,15 @@ int main(int argc, char **argv)
     if(argc==2 && !strcmp(argv[1],"--bench-estgps")) return benchmark_estgps()?0:1;
     if(argc==2 && !strcmp(argv[1],"--bench")) return benchmark()?0:1;
     if(argc!=1) return 2;
-    if(!check_discovery_and_fragmentation() || !check_parser_recovery() ||
+    if(!check_battery_system_and_freshness() || !check_battery_cells_identity_and_sources() ||
+       !check_battery_isolation_and_resets() || !check_receipt_freshness_and_sequence_estimates() ||
+       !check_discovery_and_fragmentation() || !check_parser_recovery() ||
        !check_navigation_and_named_data() || !check_finish_and_missing_nav() || !check_watermark_boundary() ||
        !check_clocks_and_wrap() || !check_environment_and_future_fields() ||
        !check_bounded_memory() || !check_high_rate_navigation() || !check_automatic_origin() ||
        !check_estgps_trapezoid_and_weather() || !check_estgps_ekf_preference_and_partial_anchor() ||
-       !check_estgps_missing_evidence() || !check_estgps_validity_and_gaps() || !check_estgps_expiry_and_resets() ||
+       !check_estgps_missing_evidence() || !check_last_position_is_not_alignment_eligibility() ||
+       !check_estgps_validity_and_gaps() || !check_estgps_expiry_and_resets() ||
        !check_estgps_status_is_not_clock_owner() || !check_estgps_stale_and_known_invalid_global() ||
        !check_estgps_local_before_delayed_global() || !check_estgps_raw_gps_source_clock() ||
        !check_estgps_invalid_interval_and_origin() || !check_weather_velocity_metadata() ||

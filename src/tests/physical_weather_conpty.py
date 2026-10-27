@@ -82,6 +82,7 @@ class PseudoConsole:
             "DeleteProcThreadAttributeList": ([w.LPVOID], None),
             "CreateProcessW": ([w.LPCWSTR, w.LPWSTR, w.LPVOID, w.LPVOID, w.BOOL, w.DWORD, w.LPVOID, w.LPCWSTR, w.LPVOID, c.POINTER(PROCESS_INFORMATION)], w.BOOL),
             "ReadFile": ([w.HANDLE, w.LPVOID, w.DWORD, c.POINTER(w.DWORD), w.LPVOID], w.BOOL),
+            "WriteFile": ([w.HANDLE, w.LPCVOID, w.DWORD, c.POINTER(w.DWORD), w.LPVOID], w.BOOL),
             "WaitForSingleObject": ([w.HANDLE, w.DWORD], w.DWORD),
             "GetExitCodeProcess": ([w.HANDLE, c.POINTER(w.DWORD)], w.BOOL),
             "TerminateProcess": ([w.HANDLE, w.UINT], w.BOOL),
@@ -129,6 +130,17 @@ class PseudoConsole:
 
     def text(self):
         return b"".join(self.parts).decode("utf-8", errors="replace")
+
+    def write(self, data):
+        """Send input only to this test-owned pseudoconsole's child process."""
+        offset = 0
+        while offset < len(data):
+            chunk = c.create_string_buffer(data[offset:])
+            written = w.DWORD()
+            self._check(self.k.WriteFile(self.input_write, chunk, len(data) - offset, c.byref(written), None))
+            if not written.value:
+                raise OSError("ConPTY input write made no progress")
+            offset += written.value
 
     def close(self):
         if self.closed:

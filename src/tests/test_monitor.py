@@ -20,6 +20,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from test_mavlink_router import assert_retry_cadence
+
 ROOT = Path(__file__).resolve().parents[2]
 BUILD = ROOT / "build" / ("windows-x64" if os.name == "nt" else "linux-x64")
 UTC = 1_800_000_000_000_000
@@ -68,7 +70,7 @@ def parse_frames(text: str) -> list[dict[str, str]]:
         elif frames and line:
             prefix = line.split(maxsplit=1)[0]
             if prefix in {"input", "loss", "queue", "network", "HTTP", "health", "auth",
-                          "clock", "alignment", "keys", "config", "endpoint"}:
+                          "clock", "alignment", "keys", "config", "endpoint", "tcp_buffer"}:
                 frames[-1][prefix] = line
     return frames
 
@@ -95,8 +97,11 @@ def assert_final(text: str, accepted: int, dry: bool) -> dict[str, str]:
     assert number(last, "loss", "gaps") == 0, text
     assert number(last, "loss", "raw") == 0, text
     assert number(last, "loss", "queue_windows") == 0, text
-    assert number(last, "queue", "windows") == 0, text
+    assert number(last, "queue", "records") == 0, text
     assert number(last, "queue", "inflight") == 0, text
+    assert number(last, "tcp_buffer", "bytes") == 0, text
+    assert number(last, "tcp_buffer", "limit") == 1024 * 1024 * 1024, text
+    assert 0 < number(last, "tcp_buffer", "high_water") < number(last, "tcp_buffer", "limit"), text
     if dry:
         assert number(last, "network", "acks") == 0, text
         assert number(last, "network", "dry_releases") > 0, text
@@ -254,8 +259,7 @@ def slow_http_progress(executable: Path, folder: Path) -> None:
             assert number(final, "network", "attempts") == len(records), text
             assert number(final, "network", "failures") == 1, text
             assert number(final, "network", "acks") == len(records) - 1, text
-            for a, b in zip(records, records[1:]):
-                assert b["at"] - a["at"] >= .95
+            assert_retry_cadence([(record["at"], record["status"]) for record in records], minimum_interval=.95)
             # A 202 retains the original immutable windows for the next request.
             first = {batch_id(records[0]["payload"], b): b
                      for b in records[0]["payload"]["batches"]}
@@ -360,7 +364,7 @@ def standalone_offline_monitor(executable: Path, folder: Path) -> None:
                     if all(key in frame for key in ("input", "queue", "network")):
                         if (number(frame, "input", "accepted") == accepted
                                 and number(frame, "network", "failures") >= failures
-                                and number(frame, "queue", "windows") >= queued):
+                                and number(frame, "queue", "records") >= queued):
                             assert number(frame, "network", "acks") == 0, text
                             return
                 assert time.monotonic() < deadline, text
@@ -390,7 +394,9 @@ def standalone_offline_monitor(executable: Path, folder: Path) -> None:
             assert number(final, "loss", "gaps") == 0, text
             assert number(final, "loss", "raw") == 0, text
             assert number(final, "loss", "queue_windows") == 0, text
-            assert number(final, "queue", "windows") == 3, text
+            assert number(final, "queue", "records") == 3, text
+            assert 0 < number(final, "tcp_buffer", "bytes") <= number(final, "tcp_buffer", "high_water"), text
+            assert number(final, "tcp_buffer", "high_water") <= number(final, "tcp_buffer", "limit"), text
             assert number(final, "network", "attempts") >= 3, text
             assert number(final, "network", "acks") == 0, text
             assert number(final, "network", "dry_releases") == 0, text

@@ -3,6 +3,7 @@
 /dist/
 /install/
 /stage/
+/release/v*/
 /_CPack_Packages/
 __pycache__/
 *.pyc
@@ -19,5 +20,18 @@ __pycache__/
 *.zip
 *.tar.gz
 telemetry.ini
+*.ini
 *.ini.tmp.*
+*.log
+*.bundle
+*.pcap
+*.pcapng
+*.tlog
+*.ulg
+*.pem
+*.key
+*.pfx
+*.p12
+.env
+.env.*
 /CMakeUserPresets.json

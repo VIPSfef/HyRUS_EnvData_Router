@@ -7,6 +7,8 @@
 #ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include "monitor_frame.h"
+#include "udp_backup.h"
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -17,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "tb_version.h"
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
@@ -42,23 +45,72 @@ typedef int ts_socket;
 #define TS_HEADER_CAP 8192u
 #define TS_BODY_CAP (512u*1024u)
 #define TS_TOKEN_CAP 32768u
-#define TS_LOG_CAP 64u
+#define TS_LOG_CAP 8u
 #define TS_RECORD_CAP 64u
 #define TS_NONE UINT32_MAX
+enum { TS_REFRESH_MS=250, TS_STATUS_DEVICE_CAP=32, TS_KEY_CAP=64,
+       TS_KEY_VISIBLE=12, TS_ID_BITS=256*256, TS_ID_BYTES=TS_ID_BITS/8,
+       TS_RECENT_CAP=8, TS_STREAM_CAP=256 };
+typedef enum { TS_METRIC_TEMPERATURE, TS_METRIC_HUMIDITY, TS_METRIC_COUNT } ts_metric_kind;
+typedef enum { TS_HTTP,TS_UDP } ts_transport;
+static const char *const metric_fields[TS_METRIC_COUNT]={"temperature","humidity"};
 
 typedef struct { uint32_t start,end,next; char kind; } ts_token;
 typedef struct { const char *text; size_t size,pos; unsigned count; ts_token token[TS_TOKEN_CAP]; } ts_json;
 typedef struct { char text[192]; } ts_log;
 typedef struct {
-    uint64_t started,end_ms,requests,accepted,records,rejected,max_requests;
+    double value;
+    uint64_t received_ms,source_age_ms;
+    int known,age_known;
+} ts_metric;
+typedef struct {
+    unsigned sysid,compid,message,sensor,instance;
+    ts_metric_kind metric;
+    double value;
+    uint64_t seq,received_ms,observations;
+} ts_key;
+typedef struct {
+    double latitude,longitude,altitude;
+    uint64_t received_ms,source_age_ms;
+    unsigned fix;
+    int known,age_known;
+    char source[8],state[8];
+} ts_position;
+/* Exact received bytes, not a hash: matching immutable IDs with different
+ * payloads must not disappear as a backup duplicate. This bounded diagnostic
+ * cache only skips a delivery arriving through the other transport. */
+typedef struct {
+    size_t length,stream_length;
+    unsigned schema;
+    ts_transport transport;
+    char stream[TS_STREAM_CAP];
+    char record[TS_BODY_CAP];
+} ts_recent;
+typedef struct {
+    uint64_t started,end_ms,requests,accepted,records,statuses,rejected,max_requests;
+    uint64_t order,last_received_ms,status_received_ms;
     unsigned port,ansi,log_n,log_next;
+    unsigned udp_port,udp_error,recent_next;
+    uint64_t udp_messages,udp_accepted,udp_rejected,cross_duplicates;
+    ub_receiver *udp;
+    ts_transport transport;
+    ts_recent recent[TS_RECENT_CAP];
+    unsigned key_n,id_n,keys_overflow,link_sysid,link_compid;
+    int have_status,connected;
     char bind[64];
+    char link_state[32];
+    unsigned char ids[TS_ID_BYTES];
+    ts_key keys[TS_KEY_CAP];
+    ts_metric metrics[TS_METRIC_COUNT];
+    ts_position position;
     ts_log log[TS_LOG_CAP];
     char request[TS_HEADER_CAP+TS_BODY_CAP+1u];
     ts_json json;
 } ts_server;
 static ts_server server;
 static volatile sig_atomic_t stop_requested;
+static int dashboard(int force);
+static void udp_message(void *context,const char *body,size_t length);
 
 static uint64_t now_ms(void) {
 #ifdef _WIN32
@@ -100,9 +152,12 @@ static int socket_ready(ts_socket socket_fd,int writing) {
 #ifndef _WIN32
     if(socket_fd<0 || socket_fd>=FD_SETSIZE) return -1;
 #endif
+    if(server.udp) ub_receiver_poll(server.udp,now_ms());
     FD_ZERO(&set); FD_SET(socket_fd,&set);
     rc=select((int)(socket_fd+1),writing ? NULL : &set,writing ? &set : NULL,NULL,&tv);
-    if(rc<0 && would_block()) return 0;
+    if(rc<0 && would_block()) rc=0;
+    if(server.udp) ub_receiver_poll(server.udp,now_ms());
+    (void)dashboard(0);
     return rc;
 }
 static int send_all(ts_socket client,const char *data,size_t length,uint64_t deadline) {
@@ -364,6 +419,84 @@ static int nullable_nonnegative(const ts_json *j,unsigned token) {
     double value;
     return null_token(j,token) || (token_double(j,token,&value) && value>=0.0);
 }
+/* A status is an observation of receiver state, never another measurement.
+ * Freshness has its own nullable monotonic age; elapsed runtime cannot stand in
+ * for an age when a heartbeat or weather value has never been observed. */
+static int status_age(const ts_json *j,unsigned object,const char *state_key,
+                      const char *age_key,const char *waiting,const char *live,const char *old) {
+    unsigned state=field(j,object,state_key),age=field(j,object,age_key);
+    uint64_t value;
+    if(token_text(j,state,waiting)) return null_token(j,age);
+    return (token_text(j,state,live) || token_text(j,state,old)) && token_u64_string(j,age,&value);
+}
+static int status_link(const ts_json *j,unsigned object,int device) {
+    uint64_t sysid,compid;
+    return token_uint(j,field(j,object,"sysid"),&sysid) && sysid<=255 && (!device || sysid) &&
+           token_uint(j,field(j,object,"compid"),&compid) && compid<=255 && (!device || compid) &&
+           status_age(j,object,"heartbeat","hb_age_ms","WAIT","LIVE","LOST") &&
+           status_age(j,object,"data","data_age_ms","WAIT","LIVE","STALE");
+}
+static int status_weather(const ts_json *j,unsigned object,int humidity) {
+    unsigned state=field(j,object,"state"),value=field(j,object,"value");
+    uint64_t observations;
+    double number;
+    if(!token_text(j,field(j,object,"unit"),humidity ? "1" : "K") ||
+       !token_u64_string(j,field(j,object,"observations"),&observations) ||
+       !status_age(j,object,"state","rx_age_ms","UNKNOWN","FRESH","STALE")) return 0;
+    if(token_text(j,state,"UNKNOWN")) return null_token(j,value) && !observations;
+    return observations && token_double(j,value,&number) && number>=0 && (!humidity || number<=1);
+}
+static int status_position(const ts_json *j,unsigned object) {
+    double latitude,longitude,altitude;
+    uint64_t number;
+    unsigned timeout=field(j,object,"stale_after_ms");
+    if(object==TS_NONE || null_token(j,object)) return 1;
+    return (token_text(j,field(j,object,"source"),"GPS") || token_text(j,field(j,object,"source"),"ESTGPS")) &&
+        (token_text(j,field(j,object,"state"),"LIVE") || token_text(j,field(j,object,"state"),"STALE") ||
+         token_text(j,field(j,object,"state"),"INVALID")) &&
+        token_uint(j,field(j,object,"fix"),&number) && number<=255 &&
+        token_double(j,field(j,object,"lat_deg"),&latitude) && latitude>=-90 && latitude<=90 &&
+        token_double(j,field(j,object,"lon_deg"),&longitude) && longitude>=-180 && longitude<=180 &&
+        token_double(j,field(j,object,"alt_msl_m"),&altitude) &&
+        token_u64_string(j,field(j,object,"rx_age_ms"),&number) &&
+        (timeout==TS_NONE || (token_uint(j,timeout,&number) && number && number<=UINT32_MAX));
+}
+static int status_record(const ts_json *j,unsigned record) {
+    static const char *const counters[]={"seq","generation","reported_monotonic_ms","run_elapsed_ms"};
+    static const char *const packets[]={"received","estimated_lost","duplicates"};
+    unsigned source=field(j,record,"source"),weather=field(j,record,"weather");
+    unsigned packet=field(j,record,"packets"),devices=field(j,record,"devices");
+    unsigned endpoint=field(j,source,"endpoint"),state=field(j,source,"state");
+    unsigned connected=field(j,source,"connected"),count=0;
+    uint64_t number,ids[TS_STATUS_DEVICE_CAP];
+    if(!nonempty_string(j,field(j,record,"session")) ||
+       !token_uint(j,field(j,record,"sample_count"),&number) || number ||
+       !status_link(j,source,0) || endpoint>=j->count || j->token[endpoint].kind!='"' ||
+       state>=j->count || j->token[state].kind!='"' ||
+       connected>=j->count || (j->token[connected].kind!='t' && j->token[connected].kind!='f') ||
+       ((j->token[connected].kind=='t')!=(token_text(j,state,"LOCKED") &&
+          token_text(j,field(j,source,"heartbeat"),"LIVE"))) ||
+       !token_uint(j,field(j,source,"serial_baud"),&number) || number>UINT32_MAX ||
+       !status_weather(j,field(j,weather,"temperature"),0) ||
+       !status_weather(j,field(j,weather,"humidity"),1) ||
+       !status_position(j,field(j,record,"position")) ||
+       devices>=j->count || j->token[devices].kind!='[') return 0;
+    for(unsigned i=0;i<sizeof(counters)/sizeof(counters[0]);++i)
+        if(!token_u64_string(j,field(j,record,counters[i]),&number)) return 0;
+    for(unsigned i=0;i<sizeof(packets)/sizeof(packets[0]);++i)
+        if(!token_u64_string(j,field(j,packet,packets[i]),&number)) return 0;
+    for(unsigned device=devices+1;device<j->token[devices].next;device=j->token[device].next) {
+        uint64_t sysid=0,compid=0,id;
+        if(count>=TS_STATUS_DEVICE_CAP || !status_link(j,device,1) ||
+           !token_u64_string(j,field(j,device,"rx_age_ms"),&number)) return 0;
+        (void)token_uint(j,field(j,device,"sysid"),&sysid);
+        (void)token_uint(j,field(j,device,"compid"),&compid);
+        id=(sysid<<8)|compid;
+        for(unsigned previous=0;previous<count;++previous) if(ids[previous]==id) return 0;
+        ids[count++]=id;
+    }
+    return 1;
+}
 static int vector3(const ts_json *j,unsigned token) {
     unsigned i,n=0; double value;
     if(token>=j->count || j->token[token].kind!='[') return 0;
@@ -471,7 +604,6 @@ static int weather_body_record(const ts_json *j,unsigned record) {
     unsigned spatial=field(j,record,"spatial");
     uint64_t value,total_n,total_raw,total_dropped,sum_n=0,sum_raw=0,sum_dropped=0;
     uint64_t ids[16],messages[16]; unsigned instances[16],metrics[16];
-    static const char *const names[]={"temperature","humidity"};
     if(spatial<j->count && !spatial_record(j,spatial,&spatial_n)) return 0;
     if(!nonempty_string(j,field(j,record,"session")) ||
        !token_uint(j,field(j,record,"generation"),&value) ||
@@ -498,8 +630,8 @@ static int weather_body_record(const ts_json *j,unsigned record) {
             if(!token_double(j,item,&longitude) || longitude < -180 || longitude > 180) return 0;
         }
     }
-    for(unsigned metric=0;metric<2;++metric) {
-        unsigned array=field(j,measurements,names[metric]);
+    for(unsigned metric=0;metric<TS_METRIC_COUNT;++metric) {
+        unsigned array=field(j,measurements,metric_fields[metric]);
         if(array>=j->count || j->token[array].kind!='[') return 0;
         for(unsigned g=array+1;g<j->token[array].next;g=j->token[g].next) {
             unsigned stats=field(j,g,"statistics"),samples=field(j,g,"samples"),raw_count=0;
@@ -543,162 +675,308 @@ static int weather_body_record(const ts_json *j,unsigned record) {
 }
 static int validate_body(const char *body,size_t length,unsigned records[TS_RECORD_CAP],unsigned *count) {
     ts_json *j=&server.json;
-    unsigned array,i; int weather;
+    unsigned array,i; int weather,status;
     j->text=body; j->size=length; j->pos=0; j->count=0; *count=0;
     if(parse_value(j,0)==TS_NONE) return 0;
     whitespace(j);
     weather=token_text(j,field(j,0,"schema"),"mavlink_weather_v1");
-    if(j->pos!=j->size || (!weather && !token_text(j,field(j,0,"schema"),"mavlink_router_test_v1")) ||
-       (weather && !nonempty_string(j,field(j,0,"stream")))) return 0;
+    status=token_text(j,field(j,0,"schema"),"mavlink_router_status_v1");
+    if(j->pos!=j->size || (!weather && !status && !token_text(j,field(j,0,"schema"),"mavlink_router_test_v1")) ||
+       ((weather || status) && !nonempty_string(j,field(j,0,"stream")))) return 0;
     array=field(j,0,"records");
     if(array==TS_NONE || j->token[array].kind!='[') return 0;
     for(i=array+1;i<j->token[array].next;i=j->token[i].next) {
-        if(*count>=TS_RECORD_CAP || !(weather ? weather_body_record(j,i) : validate_record(j,i))) return 0;
+        if(*count>=TS_RECORD_CAP || !(status ? status_record(j,i) : weather ? weather_body_record(j,i) : validate_record(j,i))) return 0;
         records[(*count)++]=i;
     }
     return *count>0;
 }
-static unsigned terminal_rows(void) {
+static void terminal_size(unsigned *rows,unsigned *columns) {
+    *rows=24; *columns=80;
 #ifdef _WIN32
     CONSOLE_SCREEN_BUFFER_INFO info;
-    if(GetConsoleScreenBufferInfo(GetStdHandle(STD_ERROR_HANDLE),&info)) return (unsigned)(info.srWindow.Bottom-info.srWindow.Top+1);
+    if(GetConsoleScreenBufferInfo(GetStdHandle(STD_ERROR_HANDLE),&info)) {
+        *rows=(unsigned)(info.srWindow.Bottom-info.srWindow.Top+1);
+        *columns=(unsigned)(info.srWindow.Right-info.srWindow.Left+1);
+    }
 #else
     struct winsize size;
-    if(!ioctl(STDERR_FILENO,TIOCGWINSZ,&size) && size.ws_row) return size.ws_row;
+    if(!ioctl(STDERR_FILENO,TIOCGWINSZ,&size)) {
+        if(size.ws_row) *rows=size.ws_row;
+        if(size.ws_col) *columns=size.ws_col;
+    }
 #endif
-    return 24;
+    if(*rows>MF_MAX_ROWS) *rows=MF_MAX_ROWS;
 }
-static unsigned terminal_columns(void) {
-#ifdef _WIN32
-    CONSOLE_SCREEN_BUFFER_INFO info;
-    if(GetConsoleScreenBufferInfo(GetStdHandle(STD_ERROR_HANDLE),&info)) return (unsigned)(info.srWindow.Right-info.srWindow.Left+1);
-#else
-    struct winsize size;
-    if(!ioctl(STDERR_FILENO,TIOCGWINSZ,&size) && size.ws_col) return size.ws_col;
-#endif
-    return 80;
+typedef struct {
+    mf_frame *frame;
+    unsigned rows,columns,line;
+} ts_writer;
+/* Diagnostics contain formatted ASCII only. Keep colour outside the clipped
+ * text and reserve the last terminal column, so a row can never auto-wrap. */
+static void screen_line(ts_writer *writer,const char *colour,const char *format,...) {
+    char text[512];
+    size_t length;
+    va_list args;
+    if(writer->line>=writer->rows) return;
+    va_start(args,format); (void)vsnprintf(text,sizeof(text),format,args); va_end(args);
+    length=strlen(text);
+    if(length>=writer->columns) length=writer->columns ? writer->columns-1u : 0;
+    if(colour) (void)mf_append(writer->frame,colour,strlen(colour));
+    (void)mf_append(writer->frame,text,length);
+    if(colour) (void)mf_append(writer->frame,"\033[0m",4);
+    (void)mf_append(writer->frame,"\n",1);
+    ++writer->line;
 }
-static void dashboard(void) {
-    unsigned rows=terminal_rows(),columns=terminal_columns(),visible=rows>7 ? rows-7 : 1;
-    unsigned start;
-    if(!server.ansi) return;
+/* Same row-diff presenter as the router. Frames stay in fixed storage; socket
+ * waits refresh elapsed time and resize even when no records arrive. */
+static struct {
+    mf_frame frame[2];
+    unsigned next,rows,columns;
+    uint64_t next_ms;
+    int valid;
+} display;
+static uint64_t receipt_age(uint64_t now,uint64_t received,uint64_t source_age) {
+    uint64_t elapsed=now>=received ? now-received : 0;
+    return UINT64_MAX-source_age<elapsed ? UINT64_MAX : source_age+elapsed;
+}
+static void age_text(int known,uint64_t age,char *text,size_t capacity) {
+    if(known) (void)snprintf(text,capacity,"%.1fs",(double)age/1000.0);
+    else (void)snprintf(text,capacity,"--");
+}
+static double display_value(double value,ts_metric_kind metric) {
+    return metric==TS_METRIC_HUMIDITY ? value*100.0 : value-273.15;
+}
+static const char *metric_unit(ts_metric_kind metric) { return metric==TS_METRIC_HUMIDITY ? "%" : "C"; }
+static const char *metric_name(ts_metric_kind metric) { return metric==TS_METRIC_HUMIDITY ? "RH" : "T"; }
+static void metric_text(const ts_metric *metric,ts_metric_kind kind,uint64_t now,char *text,size_t capacity) {
+    char age[32];
+    age_text(metric->age_known,receipt_age(now,metric->received_ms,metric->source_age_ms),age,sizeof(age));
+    if(metric->known) (void)snprintf(text,capacity,"%s %.2f%s [sensor_age=%s]",metric_name(kind),display_value(metric->value,kind),metric_unit(kind),age);
+    else (void)snprintf(text,capacity,"%s --",metric_name(kind));
+}
+static int dashboard(int force) {
+    unsigned rows,columns,visible,key_rows;
+    uint64_t now;
+    char last_age[32],status_age[32],temperature[96],humidity[96],position_age[32];
+    ts_writer writer;
+    const mf_frame *previous;
+    int repaint;
+    if(!server.ansi) return 1;
+    now=now_ms();
+    if(!force && now<display.next_ms) return !ferror(stderr);
+    display.next_ms=now+TS_REFRESH_MS;
+    terminal_size(&rows,&columns);
+    writer.frame=&display.frame[display.next];
+    writer.rows=rows; writer.columns=columns; writer.line=0;
+    mf_reset(writer.frame);
+    screen_line(&writer,"\033[32m","[test server] LISTENING");
+    screen_line(&writer,NULL,"http://%s:%u/ingest  UDP=%u  run_elapsed=%.1fs  Ctrl+C stops",server.bind,server.port,server.udp_port,(double)(now-server.started)/1000.0);
+    screen_line(&writer,NULL,"records=%" PRIu64 " statuses=%" PRIu64 " keys=%u%s IDs=%u rejected=%" PRIu64,
+                server.records,server.statuses,server.key_n,server.keys_overflow ? "+" : "",server.id_n,server.rejected);
+    age_text(server.order!=0,receipt_age(now,server.last_received_ms,0),last_age,sizeof(last_age));
+    age_text(server.have_status,receipt_age(now,server.status_received_ms,0),status_age,sizeof(status_age));
+    screen_line(&writer,NULL,"last_rx=%s | link=%s %u.%u (report_age=%s)",last_age,
+                !server.have_status ? "--" : server.connected ? "UP" : "DOWN",server.link_sysid,server.link_compid,status_age);
+    metric_text(&server.metrics[TS_METRIC_TEMPERATURE],TS_METRIC_TEMPERATURE,now,temperature,sizeof(temperature));
+    metric_text(&server.metrics[TS_METRIC_HUMIDITY],TS_METRIC_HUMIDITY,now,humidity,sizeof(humidity));
+    screen_line(&writer,NULL,"%s | %s",temperature,humidity);
+    age_text(server.position.age_known,receipt_age(now,server.position.received_ms,server.position.source_age_ms),position_age,sizeof(position_age));
+    if(server.position.known) {
+        const char *state=!strcmp(server.position.state,"LIVE") ? "" : server.position.state;
+        screen_line(&writer,*state ? "\033[33m" : NULL,"last %s %.6f %.6f %.1fm age=%s %s fix=%u",
+                    server.position.source,server.position.latitude,server.position.longitude,server.position.altitude,
+                    position_age,state,server.position.fix);
+    } else screen_line(&writer,NULL,"GPS -- (no coordinate received)");
+    {
+        ub_report udp={0};
+        ub_receiver_get_report(server.udp,&udp);
+        if(server.udp_error) screen_line(&writer,"\033[33m","HTTP in=%" PRIu64 " ok=%" PRIu64 " | UDP ERROR=%u port=%u",
+                    server.requests,server.accepted,server.udp_error,server.udp_port);
+        else screen_line(&writer,NULL,"HTTP in=%" PRIu64 " ok=%" PRIu64 " | UDP in=%" PRIu64 " ok=%" PRIu64 " drop=%" PRIu64 " bad=%" PRIu64 " | dup=%" PRIu64,
+                    server.requests,server.accepted,server.udp_messages,server.udp_accepted,
+                    udp.drops,udp.errors+server.udp_rejected,server.cross_duplicates);
+    }
+    /* Short terminals keep the newest arrival visible. Large terminals show a
+     * stable key table instead of pushing each JSON detail into a scrolling log. */
+    key_rows=rows>13 ? rows-13 : 0;
+    if(key_rows>TS_KEY_VISIBLE) key_rows=TS_KEY_VISIBLE;
+    if(key_rows>server.key_n) key_rows=server.key_n;
+    if(key_rows) {
+        screen_line(&writer,NULL,"KEY: metric ID/msg/sensor/instance       VALUE       RX n  seq     last_rx");
+        for(unsigned i=0;i<key_rows;++i) {
+            const ts_key *key=&server.keys[i];
+            char age[32];
+            age_text(1,receipt_age(now,key->received_ms,0),age,sizeof(age));
+            screen_line(&writer,NULL,"%-2s %u.%u/%u/%u/%u  %10.2f%-1s  %7" PRIu64 "  %-7" PRIu64 " %s",
+                        metric_name(key->metric),key->sysid,key->compid,key->message,key->sensor,key->instance,
+                        display_value(key->value,key->metric),metric_unit(key->metric),key->observations,key->seq,age);
+        }
+        if(key_rows<server.key_n) screen_line(&writer,NULL,"... %u more keys retained",server.key_n-key_rows);
+    }
+    if(rows>9) screen_line(&writer,NULL,"ARRIVALS newest first (deliveries; cross-transport duplicates skipped)");
+    visible=rows>writer.line ? rows-writer.line : 0;
     if(visible>server.log_n) visible=server.log_n;
-    if(visible>TS_LOG_CAP) visible=TS_LOG_CAP;
-    start=(server.log_next+TS_LOG_CAP-visible)%TS_LOG_CAP;
-    fputs("\033[?25l\033[H\033[2J[test server] \033[32mLISTENING\033[0m\n",stderr);
-    fprintf(stderr,"TCP HTTP http://%s:%u/ingest  uptime=%.1fs\n",server.bind,server.port,(double)(now_ms()-server.started)/1000.0);
-    fprintf(stderr,"requests=%" PRIu64 " accepted=%" PRIu64 " records=%" PRIu64 " rejected=%" PRIu64 "\n",server.requests,server.accepted,server.records,server.rejected);
-    fputs("HTTP 204 = complete validated records displayed; memory-only diagnostic.\n",stderr);
-    fputs("Ctrl+C stops. Recent heartbeat, position and weather records:\n",stderr);
-    if(!visible) fputs("Waiting for the router test stream...\n",stderr);
-    for(unsigned i=0;i<visible;++i) fprintf(stderr,"%.*s\n",(int)(columns ? columns-1 : 79),server.log[(start+i)%TS_LOG_CAP].text);
-    fflush(stderr);
+    if(!server.log_n) screen_line(&writer,NULL,"Waiting for data...");
+    for(unsigned i=0;i<visible;++i)
+        screen_line(&writer,NULL,"%s",server.log[(server.log_next+TS_LOG_CAP-1u-i)%TS_LOG_CAP].text);
+    previous=display.valid ? &display.frame[display.next^1u] : NULL;
+    repaint=display.rows!=rows || display.columns!=columns;
+    display.valid=mf_present(stderr,writer.frame,previous,rows,columns,repaint);
+    if(display.valid) {
+        display.next^=1u; display.rows=rows; display.columns=columns;
+    }
+    return display.valid;
 }
 static void log_line(const char *format,...) {
     va_list args;
     ts_log *line=&server.log[server.log_next];
     va_start(args,format); (void)vsnprintf(line->text,sizeof(line->text),format,args); va_end(args);
+    { size_t used=strlen(line->text);
+      (void)snprintf(line->text+used,sizeof(line->text)-used," [%s]",server.transport==TS_UDP ? "UDP" : "HTTP"); }
     server.log_next=(server.log_next+1)%TS_LOG_CAP;
     if(server.log_n<TS_LOG_CAP) ++server.log_n;
+}
+static void status_text(const ts_json *j,unsigned token,char *text,size_t capacity) {
+    size_t n=0;
+    if(!capacity) return;
+    if(token<j->count && j->token[token].kind=='"') {
+        const ts_token *t=&j->token[token];
+        for(size_t i=t->start+1;i<t->end-1 && n+1<capacity;++i) {
+            unsigned char c=(unsigned char)j->text[i];
+            text[n++]=(char)(c>=32 && c<127 ? c : '?');
+        }
+    }
+    text[n]=0;
+}
+static void remember_id(unsigned sysid,unsigned compid) {
+    unsigned id=(sysid<<8)|compid,byte=id/8u,bit=1u<<(id%8u);
+    if(id>=TS_ID_BITS || (!sysid && !compid)) return;
+    if(!(server.ids[byte]&bit)) { server.ids[byte]|=(unsigned char)bit; ++server.id_n; }
+}
+static void remember_position(const ts_json *j,unsigned object,uint64_t received,int status) {
+    ts_position *position=&server.position;
+    uint64_t age=0,fix=0;
+    if(object>=j->count) return; /* Older status clients omit the optional field. */
+    memset(position,0,sizeof(*position));
+    if(null_token(j,object)) return;
+    position->known=token_double(j,field(j,object,"lat_deg"),&position->latitude) &&
+        token_double(j,field(j,object,"lon_deg"),&position->longitude) &&
+        token_double(j,field(j,object,"alt_msl_m"),&position->altitude);
+    position->received_ms=received;
+    if(status) {
+        position->age_known=token_u64_string(j,field(j,object,"rx_age_ms"),&age);
+        (void)token_uint(j,field(j,object,"fix"),&fix);
+        status_text(j,field(j,object,"source"),position->source,sizeof(position->source));
+        status_text(j,field(j,object,"state"),position->state,sizeof(position->state));
+    } else {
+        (void)snprintf(position->source,sizeof(position->source),"GPS");
+    }
+    position->source_age_ms=age; position->fix=(unsigned)fix;
+}
+static void print_status(unsigned record) {
+    ts_json *j=&server.json;
+    unsigned source=field(j,record,"source"),weather=field(j,record,"weather");
+    unsigned devices=field(j,record,"devices");
+    uint64_t seq=0,sysid=0,compid=0,received=server.last_received_ms;
+    (void)token_u64_string(j,field(j,record,"seq"),&seq);
+    (void)token_uint(j,field(j,source,"sysid"),&sysid);
+    (void)token_uint(j,field(j,source,"compid"),&compid);
+    server.link_sysid=(unsigned)sysid; server.link_compid=(unsigned)compid;
+    server.have_status=1; server.status_received_ms=received;
+    server.connected=j->token[field(j,source,"connected")].kind=='t';
+    status_text(j,field(j,source,"state"),server.link_state,sizeof(server.link_state));
+    remember_id((unsigned)sysid,(unsigned)compid);
+    for(unsigned d=devices+1;d<j->token[devices].next;d=j->token[d].next) {
+        (void)token_uint(j,field(j,d,"sysid"),&sysid);
+        (void)token_uint(j,field(j,d,"compid"),&compid);
+        remember_id((unsigned)sysid,(unsigned)compid);
+    }
+    for(unsigned metric=0;metric<TS_METRIC_COUNT;++metric) {
+        unsigned object=field(j,weather,metric_fields[metric]);
+        ts_metric *value=&server.metrics[metric];
+        value->known=token_double(j,field(j,object,"value"),&value->value);
+        value->age_known=token_u64_string(j,field(j,object,"rx_age_ms"),&value->source_age_ms);
+        value->received_ms=received;
+    }
+    remember_position(j,field(j,record,"position"),received,1);
+    log_line("#%" PRIu64 " STATUS seq=%" PRIu64 " ID=%u.%u link=%s",server.order,seq,
+             server.link_sysid,server.link_compid,server.connected ? "UP" : server.link_state);
+}
+static ts_key *remember_key(unsigned sysid,unsigned compid,unsigned message,unsigned sensor,
+                            unsigned instance,ts_metric_kind metric) {
+    unsigned index=server.key_n;
+    for(unsigned i=0;i<server.key_n;++i) {
+        const ts_key *key=&server.keys[i];
+        if(key->sysid==sysid && key->compid==compid && key->message==message &&
+           key->sensor==sensor && key->instance==instance && key->metric==metric) return &server.keys[i];
+    }
+    if(index==TS_KEY_CAP) {
+        server.keys_overflow=1; index=0;
+        for(unsigned i=1;i<server.key_n;++i)
+            if(server.keys[i].received_ms<server.keys[index].received_ms) index=i;
+    } else ++server.key_n;
+    memset(&server.keys[index],0,sizeof(server.keys[index]));
+    server.keys[index].sysid=sysid; server.keys[index].compid=compid;
+    server.keys[index].message=message; server.keys[index].sensor=sensor;
+    server.keys[index].instance=instance; server.keys[index].metric=metric;
+    return &server.keys[index];
 }
 static void print_weather(unsigned record) {
     ts_json *j=&server.json;
     unsigned weather=field(j,record,"weather"),measurements=field(j,weather,"measurements"),source=field(j,record,"source");
-    uint64_t seq=0,sysid=0,compid=0;
-    static const char *const names[]={"temperature","humidity"};
+    uint64_t seq=0,sysid=0,compid=0,total=0;
     (void)token_uint(j,field(j,record,"seq"),&seq);
     (void)token_uint(j,field(j,source,"sysid"),&sysid);
     (void)token_uint(j,field(j,source,"compid"),&compid);
-    for(unsigned metric=0;metric<2;++metric) {
-        unsigned array=field(j,measurements,names[metric]);
+    (void)token_uint(j,field(j,weather,"n"),&total);
+    remember_id((unsigned)sysid,(unsigned)compid);
+    for(unsigned metric=0;metric<TS_METRIC_COUNT;++metric) {
+        unsigned array=field(j,measurements,metric_fields[metric]);
         for(unsigned group=array+1;group<j->token[array].next;group=j->token[group].next) {
             unsigned rep=field(j,group,"representative"),stats=field(j,group,"statistics");
-            unsigned position=field(j,rep,"position_m");
-            unsigned provenance=field(j,rep,"position_source");
-            const char *position_label=token_text(j,provenance,"ESTGPS") ? "ESTGPS" : token_text(j,provenance,"GPS") ? "GPS" : "UNKNOWN";
-            uint64_t id=0,message_id=0,instance=0,n=0,raw=0,dropped=0,t=0,uncertainty=0,quality=0;
-            double value=0,mean=0,variance=0; char variance_text[32],uncertainty_text[32];
-            int have_t=token_u64_string(j,field(j,rep,"t_us"),&t);
-            int have_variance=token_double(j,field(j,stats,"variance"),&variance);
+            uint64_t id=0,message=0,instance=0,n=0;
+            double value=0;
+            ts_key *key;
             (void)token_uint(j,field(j,group,"sensor_id"),&id);
-            (void)token_uint(j,field(j,group,"message_id"),&message_id);
+            (void)token_uint(j,field(j,group,"message_id"),&message);
             (void)token_uint(j,field(j,group,"sensor_instance"),&instance);
             (void)token_uint(j,field(j,stats,"n"),&n);
-            (void)token_uint(j,field(j,group,"raw_n"),&raw);
-            (void)token_uint(j,field(j,group,"raw_dropped"),&dropped);
             (void)token_double(j,field(j,rep,"value"),&value);
-            (void)token_double(j,field(j,stats,"mean"),&mean);
-            (void)token_uint(j,field(j,rep,"quality"),&quality);
-            if(have_variance) (void)snprintf(variance_text,sizeof(variance_text),"%.6g",variance);
-            else (void)snprintf(variance_text,sizeof(variance_text),"unknown");
-            if(token_uint(j,field(j,rep,"time_uncertainty_us"),&uncertainty))
-                (void)snprintf(uncertainty_text,sizeof(uncertainty_text),"%" PRIu64 "us",uncertainty);
-            else (void)snprintf(uncertainty_text,sizeof(uncertainty_text),"unknown");
-            log_line("#%" PRIu64 " %" PRIu64 ".%" PRIu64 " %s msg=%" PRIu64 " sensor=%" PRIu64 "/%" PRIu64 " %.6g%s",
-                     seq,sysid,compid,names[metric],message_id,id,instance,value,metric ? " RH fraction" : " K");
-            log_line("  n=%" PRIu64 " mean=%.6g variance=%s raw=%" PRIu64 " omitted=%" PRIu64,
-                     n,mean,variance_text,raw,dropped);
-            if(have_t) log_line("  boot_us=%" PRIu64 " dt=%s q=%08" PRIx64,t,uncertainty_text,quality);
-            else log_line("  acquisition time=unknown (sender provided no usable timestamp)");
-            if(!null_token(j,position)) {
-                double p[3]={0,0,0}; unsigned item=position+1;
-                for(unsigned k=0;k<3;++k) { (void)token_double(j,item,&p[k]); item=j->token[item].next; }
-                log_line("  %s position ENU=[%.3f,%.3f,%.3f] m",position_label,p[0],p[1],p[2]);
-            } else log_line("  acquisition position=unknown");
+            key=remember_key((unsigned)sysid,(unsigned)compid,(unsigned)message,(unsigned)id,
+                             (unsigned)instance,(ts_metric_kind)metric);
+            key->value=value; key->seq=seq; key->received_ms=server.last_received_ms;
+            key->observations=UINT64_MAX-key->observations<n ? UINT64_MAX : key->observations+n;
+            server.metrics[metric].value=value; server.metrics[metric].known=1;
+            server.metrics[metric].received_ms=server.last_received_ms;
+            /* The measurement body has acquisition time, not cross-host receive
+             * age. Do not reset sensor age to zero just because HTTP retried. */
+            server.metrics[metric].age_known=0;
         }
     }
-    {
-        unsigned spatial=field(j,record,"spatial"),bins=field(j,spatial,"bins"),path=field(j,spatial,"path");
-        double target=0,effective=0;
-        if(spatial<j->count) {
-            (void)token_double(j,field(j,spatial,"target_step_m"),&target);
-            (void)token_double(j,field(j,path,"effective_width_m"),&effective);
-            unsigned known=field(j,path,"known");
-            if(known<j->count && j->token[known].kind=='t')
-                log_line("spatial target=%.3gm effective=%.3gm; cumulative revisions replace prior bins",target,effective);
-            else log_line("spatial target=%.3gm effective=unknown (position/velocity unavailable)",target);
-            if(bins<j->count && j->token[bins].next==bins+1) log_line("  no spatial updates (position/velocity unavailable or no new samples)");
-            for(unsigned b=bins+1;bins<j->count && b<j->token[bins].next;b=j->token[b].next) {
-                unsigned stats=field(j,b,"statistics");
-                uint64_t id=0,revision=0,n=0;
-                double mean=0,width=0,variance=0;
-                char var_text[32];
-                (void)token_u64_string(j,field(j,b,"bin_index"),&id);
-                (void)token_u64_string(j,field(j,b,"revision"),&revision);
-                (void)token_uint(j,field(j,stats,"n"),&n);
-                (void)token_double(j,field(j,stats,"mean"),&mean);
-                (void)token_double(j,field(j,b,"width_m"),&width);
-                if(token_double(j,field(j,stats,"variance"),&variance)) (void)snprintf(var_text,sizeof(var_text),"%.6g",variance);
-                else (void)snprintf(var_text,sizeof(var_text),"unknown");
-                log_line("  bin=%" PRIu64 " rev=%" PRIu64 " %s %s width=%.3gm n=%" PRIu64 " mean=%.6g var=%s",
-                    id,revision,token_text(j,field(j,b,"metric"),"humidity") ? "humidity" : "temperature",
-                    token_text(j,field(j,b,"state"),"complete") ? "complete" : token_text(j,field(j,b,"state"),"interrupted") ? "interrupted" : "partial",
-                    width,n,mean,var_text);
-            }
-        }
-    }
+    log_line("#%" PRIu64 " WEATHER seq=%" PRIu64 " ID=%" PRIu64 ".%" PRIu64 " n=%" PRIu64,
+             server.order,seq,sysid,compid,total);
 }
 static int print_record(unsigned record) {
     ts_json *j=&server.json;
     unsigned heartbeat=field(j,record,"heartbeat"),position=field(j,record,"position");
-    uint64_t seq=0,sysid=0,compid=0,type=0,autopilot=0,age=0;
-    if(token_text(j,field(j,0,"schema"),"mavlink_weather_v1")) print_weather(record);
+    uint64_t seq=0,sysid=0,compid=0,age=0;
+    int status=token_text(j,field(j,0,"schema"),"mavlink_router_status_v1");
+    ++server.order;
+    server.last_received_ms=now_ms();
+    if(status) print_status(record);
+    else if(token_text(j,field(j,0,"schema"),"mavlink_weather_v1")) print_weather(record);
     else {
         (void)token_uint(j,field(j,record,"seq"),&seq);
         (void)token_uint(j,field(j,heartbeat,"sysid"),&sysid);
         (void)token_uint(j,field(j,heartbeat,"compid"),&compid);
-        (void)token_uint(j,field(j,heartbeat,"type"),&type);
-        (void)token_uint(j,field(j,heartbeat,"autopilot"),&autopilot);
-        if(j->token[position].kind=='n')
-            log_line("#%" PRIu64 " heartbeat %" PRIu64 ".%" PRIu64 " type=%" PRIu64 " autopilot=%" PRIu64 " position=unavailable",seq,sysid,compid,type,autopilot);
-        else {
-            double lat=0,lon=0,alt=0;
-            int have_age=token_uint(j,field(j,record,"coordinate_age_ms"),&age);
-            (void)token_double(j,field(j,position,"lat_deg"),&lat);
-            (void)token_double(j,field(j,position,"lon_deg"),&lon);
-            (void)token_double(j,field(j,position,"alt_msl_m"),&alt);
-            log_line("#%" PRIu64 " HB %" PRIu64 ".%" PRIu64 " lat=%.7f lon=%.7f alt=%.2fm age=%s%" PRIu64 "ms",seq,sysid,compid,lat,lon,alt,have_age ? "" : "?",age);
+        remember_id((unsigned)sysid,(unsigned)compid);
+        if(!null_token(j,position)) {
+            remember_position(j,position,server.last_received_ms,0);
+            server.position.age_known=token_uint(j,field(j,record,"coordinate_age_ms"),&age);
+            server.position.source_age_ms=age;
         }
+        log_line("#%" PRIu64 " HEARTBEAT seq=%" PRIu64 " ID=%" PRIu64 ".%" PRIu64,server.order,seq,sysid,compid);
     }
     if(!server.ansi) {
         int quoted=0,escape=0;
@@ -718,13 +996,59 @@ static int print_record(unsigned record) {
         }
         if(fputc('\n',stdout)==EOF || fflush(stdout)) return 0;
     }
-    ++server.records;
+    if(status) ++server.statuses;
+    else ++server.records;
     return 1;
+}
+static int recent_record(unsigned record,ts_transport transport,int remember) {
+    const ts_json *j=&server.json;
+    unsigned stream=field(j,0,"stream"),schema;
+    size_t length=j->token[record].end-j->token[record].start,stream_length;
+    const char *bytes=j->text+j->token[record].start,*stream_bytes;
+    ts_recent *entry;
+    if(stream>=j->count) return 0;
+    stream_length=j->token[stream].end-j->token[stream].start;
+    if(stream_length>TS_STREAM_CAP || length>TS_BODY_CAP) return 0;
+    stream_bytes=j->text+j->token[stream].start;
+    schema=token_text(j,field(j,0,"schema"),"mavlink_router_status_v1") ? 1u :
+           token_text(j,field(j,0,"schema"),"mavlink_weather_v1") ? 2u : 3u;
+    for(unsigned i=0;i<TS_RECENT_CAP;++i) {
+        entry=&server.recent[i];
+        if(entry->length==length && entry->stream_length==stream_length && entry->schema==schema &&
+           !memcmp(entry->stream,stream_bytes,stream_length) && !memcmp(entry->record,bytes,length))
+            return entry->transport!=transport;
+    }
+    if(!remember) return 0;
+    entry=&server.recent[server.recent_next];
+    server.recent_next=(server.recent_next+1u)%TS_RECENT_CAP;
+    entry->length=length; entry->stream_length=stream_length; entry->schema=schema; entry->transport=transport;
+    memcpy(entry->stream,stream_bytes,stream_length); memcpy(entry->record,bytes,length);
+    return 0;
+}
+/* Both transports validate the entire envelope before displaying any record.
+ * No callback can run inside this function: the UDP pump only runs while the
+ * HTTP socket waits, so its parser never overwrites a half-processed request. */
+static unsigned ingest_body(const char *body,size_t length,ts_transport transport) {
+    unsigned records[TS_RECORD_CAP],count=0;
+    if(length>TS_BODY_CAP || !validate_body(body,length,records,&count)) return 400;
+    server.transport=transport;
+    server.last_received_ms=now_ms();
+    for(unsigned i=0;i<count;++i) {
+        if(recent_record(records[i],transport,0)) { ++server.cross_duplicates; continue; }
+        if(!print_record(records[i])) return 500;
+        (void)recent_record(records[i],transport,1);
+    }
+    return dashboard(1) ? 0 : 500;
+}
+static void udp_message(void *context,const char *body,size_t length) {
+    (void)context;
+    ++server.udp_messages;
+    if(ingest_body(body,length,TS_UDP)) ++server.udp_rejected;
+    else ++server.udp_accepted;
 }
 static void serve_client(ts_socket client) {
     size_t used=0,header_end=0,body_size=0,scan=0;
     uint64_t deadline=now_ms()+5000;
-    unsigned records[TS_RECORD_CAP],count=0;
     while(!stopped() && now_ms()<deadline) {
         int ready=socket_ready(client,0),n;
         if(ready<0) break;
@@ -746,11 +1070,8 @@ static void serve_client(ts_socket client) {
             }
         }
         if(header_end && used-header_end>=body_size) {
-            if(used-header_end!=body_size || !validate_body(server.request+header_end,body_size,records,&count)) {
-                reply(client,400,deadline); ++server.rejected; return;
-            }
-            for(unsigned i=0;i<count;++i) if(!print_record(records[i])) { reply(client,500,deadline); ++server.rejected; return; }
-            if(server.ansi) { dashboard(); if(ferror(stderr)) { reply(client,500,deadline); ++server.rejected; return; } }
+            unsigned error=used-header_end!=body_size ? 400 : ingest_body(server.request+header_end,body_size,TS_HTTP);
+            if(error) { reply(client,error,deadline); ++server.rejected; return; }
             ++server.accepted;
             reply(client,204,deadline);
             return;
@@ -762,12 +1083,16 @@ static void serve_client(ts_socket client) {
 }
 static int cli_number(const char *text,uint64_t *value) { return unsigned_number(text,strlen(text),value); }
 int main(int argc,char **argv) {
+    if(argc==2 && !strcmp(argv[1],"--version")) {
+        puts(TB_PRODUCT " test-server " TB_VERSION); return 0;
+    }
     ts_socket listener=TS_INVALID;
     struct sockaddr_in address;
     uint64_t duration=0;
-    int plain=0,result=1;
+    int plain=0,result=1,udp_explicit=0;
 #ifdef _WIN32
-    WSADATA wsa; DWORD old_mode=0; int mode_changed=0;
+    WSADATA wsa; DWORD old_mode=0; int mode_changed=0,cursor_saved=0;
+    CONSOLE_CURSOR_INFO old_cursor;
 #endif
     memset(&server,0,sizeof(server)); server.port=21000;
     (void)snprintf(server.bind,sizeof(server.bind),"127.0.0.1");
@@ -775,14 +1100,19 @@ int main(int argc,char **argv) {
         uint64_t value;
         if(!strcmp(argv[i],"--plain")) { plain=1; continue; }
         if(!strcmp(argv[i],"--help")) {
-            puts("mavlink_telemetry_data_router_test_server [--bind IPv4] [--port 21000]\n  [--plain] [--duration-ms N] [--max-requests N]\nTCP HTTP diagnostic only. RAM ring log; no files. --plain emits one JSON record per line."); return 0;
+            puts("mavlink_telemetry_data_router_test_server [--bind IPv4] [--port 21000]\n  [--udp-port N] [--plain] [--duration-ms N] [--max-requests N]\nHTTP + framed UDP diagnostic; UDP defaults to TCP port+1 (0 disables).\nRAM only; --plain emits one JSON record per line. Cross-transport duplicates use a bounded recent cache."); return 0;
         }
         if(i+1>=argc) { fprintf(stderr,"Missing value: %s\n",argv[i]); return 2; }
         if(!strcmp(argv[i],"--bind")) { if(strlen(argv[++i])>=sizeof(server.bind)) return 2; (void)snprintf(server.bind,sizeof(server.bind),"%s",argv[i]); }
         else if(!strcmp(argv[i],"--port")) { if(!cli_number(argv[++i],&value) || !value || value>65535) return 2; server.port=(unsigned)value; }
+        else if(!strcmp(argv[i],"--udp-port")) { if(!cli_number(argv[++i],&value) || value>65535) return 2; server.udp_port=(unsigned)value; udp_explicit=1; }
         else if(!strcmp(argv[i],"--duration-ms")) { if(!cli_number(argv[++i],&duration) || duration>UINT32_MAX) return 2; }
         else if(!strcmp(argv[i],"--max-requests")) { if(!cli_number(argv[++i],&server.max_requests)) return 2; }
         else { fprintf(stderr,"Unknown option: %s\n",argv[i]); return 2; }
+    }
+    if(!udp_explicit) {
+        if(server.port==65535) { fputs("TCP port 65535 needs explicit --udp-port N (0 disables)\n",stderr); return 2; }
+        server.udp_port=server.port+1u;
     }
     memset(&address,0,sizeof(address)); address.sin_family=AF_INET; address.sin_port=htons((uint16_t)server.port);
 #ifdef _WIN32
@@ -801,10 +1131,21 @@ int main(int argc,char **argv) {
     if(bind(listener,(const struct sockaddr *)&address,sizeof(address)) || listen(listener,8) || !nonblock(listener)) {
         fputs("Could not listen: address/port unavailable\n",stderr); goto done;
     }
+    if(server.udp_port) {
+        unsigned error=0;
+        server.udp=ub_receiver_open(server.bind,server.udp_port,udp_message,NULL,&error);
+        if(!server.udp) {
+            server.udp_error=error ? error : 1u;
+            fprintf(stderr,"UDP ERROR %s:%u (error=%u); HTTP remains available\n",server.bind,server.udp_port,server.udp_error);
+        }
+    }
     if(!plain) {
 #ifdef _WIN32
         HANDLE output=GetStdHandle(STD_ERROR_HANDLE);
-        if(_isatty(_fileno(stderr)) && GetConsoleMode(output,&old_mode) && SetConsoleMode(output,old_mode|ENABLE_VIRTUAL_TERMINAL_PROCESSING)) { server.ansi=1; mode_changed=1; }
+        if(_isatty(_fileno(stderr)) && GetConsoleMode(output,&old_mode) && SetConsoleMode(output,old_mode|ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
+            server.ansi=1; mode_changed=1;
+            cursor_saved=GetConsoleCursorInfo(output,&old_cursor)!=0;
+        }
 #else
         server.ansi=(unsigned)(isatty(STDERR_FILENO)!=0);
 #endif
@@ -818,8 +1159,8 @@ int main(int argc,char **argv) {
       action.sa_handler=SIG_IGN; (void)sigaction(SIGPIPE,&action,NULL); }
 #endif
     server.started=now_ms(); server.end_ms=duration ? server.started+duration : 0;
-    if(server.ansi) dashboard();
-    else fprintf(stderr,"LISTENING TCP HTTP http://%s:%u/ingest (memory-only, max_body=%u)\n",server.bind,server.port,TS_BODY_CAP);
+    if(server.ansi) (void)dashboard(1);
+    else fprintf(stderr,"LISTENING TCP HTTP http://%s:%u/ingest UDP=%u (memory-only, max_body=%u)\n",server.bind,server.port,server.udp_port,TS_BODY_CAP);
     fflush(stderr);
     while(!stopped() && (!server.max_requests || server.requests<server.max_requests)) {
         int ready=socket_ready(listener,0);
@@ -831,14 +1172,23 @@ int main(int argc,char **argv) {
         ++server.requests;
         if(nonblock(client)) serve_client(client); else ++server.rejected;
         (void)ts_close(client);
-        if(server.ansi) dashboard();
+        (void)dashboard(0);
     }
-    if(server.ansi) fputs("\033[0m\033[?25h\n",stderr);
-    fprintf(stderr,"STOPPED requests=%" PRIu64 " accepted=%" PRIu64 " records=%" PRIu64 " rejected=%" PRIu64 "\n",server.requests,server.accepted,server.records,server.rejected);
+    if(server.ansi) { (void)dashboard(1); fputs("\033[0m\033[?25h\n",stderr); }
+    {
+        ub_report udp={0};
+        ub_receiver_get_report(server.udp,&udp);
+        fprintf(stderr,"STOPPED requests=%" PRIu64 " accepted=%" PRIu64 " records=%" PRIu64 " rejected=%" PRIu64 " statuses=%" PRIu64
+                " udp_messages=%" PRIu64 " udp_accepted=%" PRIu64 " udp_rejected=%" PRIu64 " udp_drop=%" PRIu64 " cross_duplicates=%" PRIu64 " udp_errors=%" PRIu64 " udp_bind_error=%u\n",
+                server.requests,server.accepted,server.records,server.rejected,server.statuses,
+                server.udp_messages,server.udp_accepted,server.udp_rejected,udp.drops,server.cross_duplicates,udp.errors,server.udp_error);
+    }
     result=0;
 done:
+    ub_receiver_close(server.udp);
     if(listener!=TS_INVALID) (void)ts_close(listener);
 #ifdef _WIN32
+    if(cursor_saved) (void)SetConsoleCursorInfo(GetStdHandle(STD_ERROR_HANDLE),&old_cursor);
     if(mode_changed) (void)SetConsoleMode(GetStdHandle(STD_ERROR_HANDLE),old_mode);
     (void)SetConsoleCtrlHandler(stop_console,FALSE); WSACleanup();
 #endif

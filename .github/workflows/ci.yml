@@ -1,6 +1,6 @@
 name: Build, test, and package
 
-# Two native x64 builds produce four application executables in build/.
+# Test both native x64 builds before staging versioned release assets.
 on:
   push:
   pull_request:
@@ -44,7 +44,7 @@ jobs:
         run: |
           test "$(uname -m)" = x86_64
           sudo apt-get update
-          sudo apt-get install --yes ninja-build gcc g++ libcurl4-openssl-dev:amd64
+          sudo apt-get install --yes ninja-build gcc libcurl4-openssl-dev:amd64
       - name: Set up Windows x64 SDK libraries
         if: runner.os == 'Windows'
         shell: pwsh
@@ -76,18 +76,6 @@ jobs:
             -DCMAKE_C_FLAGS=--target=x86_64-pc-windows-msvc
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}-tests
-      - name: Verify PX4 overlay installer
-        run: python support/px4/test_apply_overlay.py
-      - name: Configure SHTC3 native tests (Linux)
-        if: runner.os == 'Linux'
-        run: cmake -S src/px4/shtc3/tests -B build/shtc3-tests-linux -G Ninja -DCMAKE_CXX_COMPILER=g++
-      - name: Configure SHTC3 native tests (Windows)
-        if: runner.os == 'Windows'
-        run: cmake -S src/px4/shtc3/tests -B build/shtc3-tests-windows -G Ninja -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_CXX_FLAGS=--target=x86_64-pc-windows-msvc
-      - name: Build and test actual SHTC3 protocol core
-        run: |
-          cmake --build build/shtc3-tests-${{ runner.os == 'Windows' && 'windows' || 'linux' }}
-          ctest --test-dir build/shtc3-tests-${{ runner.os == 'Windows' && 'windows' || 'linux' }} --output-on-failure
       - name: Verify executable architectures
         run: |
           python src/tests/test_arch.py build/${{ matrix.preset }}/mavlink_telemetry_data_router_headless${{ matrix.suffix }} --arch x64
@@ -104,19 +92,20 @@ jobs:
         run: python src/tests/test_monitor.py build/${{ matrix.preset }}/mavlink_telemetry_data_router_headless${{ matrix.suffix }} --interactive-executable build/${{ matrix.preset }}/mavlink_telemetry_data_router_interactive${{ matrix.suffix }}
       - name: Maximum JSON capacity
         run: python src/tests/test_sender_limits.py build/${{ matrix.preset }}/mavlink_telemetry_data_router_headless${{ matrix.suffix }}
-      - name: Install and package tested target
+      - name: Install tested target
+        run: cmake --install build/${{ matrix.preset }}
+      - name: Verify release packaging boundaries
+        run: python support/release/test_package_release.py
+      - name: Prepare versioned release assets
         run: |
-          cmake --install build/${{ matrix.preset }}
-          cmake --build --preset package-${{ matrix.preset }}
+          python support/release/package_release.py \
+            --build-dir build/${{ matrix.preset }} \
+            --platform ${{ matrix.preset }} \
+            --output release
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact }}
-          path: |
-            build/${{ matrix.preset }}/mavlink_telemetry_data_router_headless${{ matrix.suffix }}
-            build/${{ matrix.preset }}/mavlink_telemetry_data_router_interactive${{ matrix.suffix }}
-            build/${{ matrix.preset }}/tools/mavlink_telemetry_data_router_test_server${{ matrix.suffix }}
-            build/packages/*.zip
-            build/packages/*.tar.gz
+          path: release/*/assets/*
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
